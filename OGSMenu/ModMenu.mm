@@ -1,61 +1,90 @@
 #import <UIKit/UIKit.h>
-#import <dispatch/dispatch.h>
-@interface OGSMenu : NSObject
-@property(nonatomic,strong) UIWindow *window;
-@property(nonatomic,strong) UIView *panel;
-@property(nonatomic,strong) UILabel *status;
-@property(nonatomic) NSUInteger hpIndex, cashIndex, timeIndex;
-+ (instancetype)shared;
-- (void)show;
+@interface OGSPassthroughContainer : UIView
+@property(nonatomic,weak) UIButton *floatingButton;
+@property(nonatomic,weak) UIView *menuPanel;
 @end
-@implementation OGSMenu
-+ (instancetype)shared { static OGSMenu *m; static dispatch_once_t once; dispatch_once(&once, ^{m=[OGSMenu new];}); return m; }
-- (void)show {
- dispatch_async(dispatch_get_main_queue(), ^{
-  if(self.window) return;
-  UIWindowScene *scene=nil;
-  for(UIScene *s in UIApplication.sharedApplication.connectedScenes)
-   if([s isKindOfClass:UIWindowScene.class] && s.activationState==UISceneActivationStateForegroundActive) {scene=(UIWindowScene *)s;break;}
-  if(!scene) return;
-  self.window=[[UIWindow alloc] initWithWindowScene:scene];
-  self.window.frame=scene.coordinateSpace.bounds;
-  self.window.windowLevel=UIWindowLevelAlert+1;
-  self.window.backgroundColor=UIColor.clearColor;
-  UIViewController *root=[UIViewController new];root.view.backgroundColor=UIColor.clearColor;
-  self.window.rootViewController=root;
-  UIButton *floating=[UIButton buttonWithType:UIButtonTypeSystem];
-  floating.frame=CGRectMake(24,120,58,58);floating.backgroundColor=UIColor.blackColor;
-  floating.layer.cornerRadius=29;floating.layer.borderWidth=2;floating.layer.borderColor=UIColor.systemRedColor.CGColor;
-  [floating setTitle:@"OGS" forState:UIControlStateNormal];[floating setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
-  [floating addTarget:self action:@selector(toggle) forControlEvents:UIControlEventTouchUpInside];
-  [root.view addSubview:floating];
-  self.panel=[[UIView alloc]initWithFrame:CGRectMake(90,95,270,340)];
-  self.panel.backgroundColor=[UIColor colorWithRed:.11 green:.11 blue:.13 alpha:1];
-  self.panel.layer.cornerRadius=14;self.panel.hidden=YES;
-  UILabel *title=[[UILabel alloc]initWithFrame:CGRectMake(10,10,250,32)];
-  title.text=@"OGS UI DEMO";title.textColor=UIColor.whiteColor;title.textAlignment=NSTextAlignmentCenter;
-  [self.panel addSubview:title];
-  NSArray *names=@[@"HP preset",@"Cash preset",@"Ammo toggle (demo)",@"Vision toggle (demo)",@"Time preset"];
-  SEL acts[]={@selector(hp:),@selector(cash:),@selector(ammo:),@selector(vision:),@selector(time:)};
-  for(int i=0;i<5;i++){
-   UIButton *b=[UIButton buttonWithType:UIButtonTypeSystem];b.frame=CGRectMake(12,48+i*47,246,39);
-   b.backgroundColor=[UIColor colorWithWhite:.23 alpha:1];b.layer.cornerRadius=8;
-   [b setTitle:names[i] forState:UIControlStateNormal];[b setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
-   [b addTarget:self action:acts[i] forControlEvents:UIControlEventTouchUpInside];[self.panel addSubview:b];
-  }
-  self.status=[[UILabel alloc]initWithFrame:CGRectMake(10,288,250,35)];
-  self.status.text=@"UI demo only";self.status.textColor=UIColor.systemGreenColor;self.status.textAlignment=NSTextAlignmentCenter;
-  [self.panel addSubview:self.status];[root.view addSubview:self.panel];
-  self.window.hidden=NO;
- });
+@implementation OGSPassthroughContainer
+- (BOOL)pointInside:(CGPoint)p withEvent:(UIEvent *)e {
+ if(self.floatingButton && !self.floatingButton.hidden && [self.floatingButton pointInside:[self convertPoint:p toView:self.floatingButton] withEvent:e]) return YES;
+ if(self.menuPanel && !self.menuPanel.hidden && [self.menuPanel pointInside:[self convertPoint:p toView:self.menuPanel] withEvent:e]) return YES;
+ return NO;
 }
-- (void)toggle {self.panel.hidden=!self.panel.hidden;}
-- (void)hp:(UIButton *)b {NSArray *v=@[@100,@200,@300,@1000,@10000];NSNumber *n=v[self.hpIndex++%v.count];[b setTitle:[NSString stringWithFormat:@"HP: %@",n] forState:UIControlStateNormal];self.status.text=@"Demo: HP selected";}
-- (void)cash:(UIButton *)b {NSArray *v=@[@100,@200,@300,@1000,@10000];NSNumber *n=v[self.cashIndex++%v.count];[b setTitle:[NSString stringWithFormat:@"Cash: %@",n] forState:UIControlStateNormal];self.status.text=@"Demo: Cash selected";}
-- (void)ammo:(UIButton *)b {b.selected=!b.selected;[b setTitle:b.selected?@"Ammo demo: ON":@"Ammo demo: OFF" forState:UIControlStateNormal];self.status.text=@"UI only; no game changes";}
-- (void)vision:(UIButton *)b {b.selected=!b.selected;[b setTitle:b.selected?@"Vision demo: ON":@"Vision demo: OFF" forState:UIControlStateNormal];self.status.text=@"UI only; no game changes";}
-- (void)time:(UIButton *)b {NSArray *v=@[@"1.0x",@"0.5x",@"0.0x",@"2.0x"];[b setTitle:[@"Time demo: " stringByAppendingString:v[self.timeIndex++%v.count]] forState:UIControlStateNormal];self.status.text=@"UI only; no game changes";}
 @end
-__attribute__((constructor)) static void ogs_init(void) {
- dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(4*NSEC_PER_SEC)),dispatch_get_main_queue(),^{[[OGSMenu shared] show];});
+@interface OGSModMenu:NSObject
+@property(nonatomic,strong) OGSPassthroughContainer *containerView;
+@property(nonatomic,strong) UIButton *floatingButton;
+@property(nonatomic,strong) UIView *menuPanel;
+@property(nonatomic,strong) UILabel *statusLabel;
+@property(nonatomic) NSInteger hpStep,cashStep,timeStep;
+@property(nonatomic) BOOL ammoActive,visionActive;
++ (instancetype)sharedInstance;
+- (void)setupMenu;
+@end
+@implementation OGSModMenu
++ (instancetype)sharedInstance {static OGSModMenu *m;static dispatch_once_t once;dispatch_once(&once,^{m=[OGSModMenu new];});return m;}
+- (UIWindow *)gameMainWindow {
+ for(UIScene *s in UIApplication.sharedApplication.connectedScenes) if([s isKindOfClass:UIWindowScene.class] && s.activationState==UISceneActivationStateForegroundActive) {
+  UIWindowScene *scene=(UIWindowScene *)s;
+  for(UIWindow *w in scene.windows) if(w.isKeyWindow) return w;
+  for(UIWindow *w in scene.windows) if(!w.hidden && w.windowLevel==UIWindowLevelNormal) return w;
+ }
+ return UIApplication.sharedApplication.keyWindow;
 }
+- (UIButton *)makeButton:(CGRect)frame title:(NSString *)title action:(SEL)action {
+ UIButton *b=[UIButton buttonWithType:UIButtonTypeSystem];b.frame=frame;
+ b.backgroundColor=[UIColor colorWithRed:.20 green:.21 blue:.25 alpha:1];
+ [b setTitle:title forState:UIControlStateNormal];[b setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+ b.titleLabel.font=[UIFont boldSystemFontOfSize:13];b.layer.cornerRadius=8;
+ [b addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];return b;
+}
+- (void)setupMenu {dispatch_async(dispatch_get_main_queue(),^{
+ if(self.containerView)return;
+ UIWindow *w=[self gameMainWindow];if(!w)return;
+ self.containerView=[[OGSPassthroughContainer alloc]initWithFrame:w.bounds];
+ self.containerView.backgroundColor=UIColor.clearColor;
+ self.containerView.autoresizingMask=UIViewAutoresizingFlexibleWidth|UIViewAutoresizingFlexibleHeight;
+ self.floatingButton=[UIButton buttonWithType:UIButtonTypeCustom];
+ self.floatingButton.frame=CGRectMake(25,130,58,58);
+ self.floatingButton.backgroundColor=[UIColor colorWithRed:.06 green:.06 blue:.06 alpha:1];
+ self.floatingButton.alpha=1;self.floatingButton.opaque=YES;
+ [self.floatingButton setTitle:@"OGS" forState:UIControlStateNormal];
+ [self.floatingButton setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+ self.floatingButton.titleLabel.font=[UIFont boldSystemFontOfSize:15];
+ self.floatingButton.layer.cornerRadius=29;self.floatingButton.layer.borderWidth=2.5;
+ self.floatingButton.layer.borderColor=UIColor.systemRedColor.CGColor;
+ [self.floatingButton addTarget:self action:@selector(toggleMenu) forControlEvents:UIControlEventTouchUpInside];
+ [self.floatingButton addGestureRecognizer:[[UIPanGestureRecognizer alloc]initWithTarget:self action:@selector(handlePan:)]];
+ [self.containerView addSubview:self.floatingButton];
+ self.menuPanel=[[UIView alloc]initWithFrame:CGRectMake(95,40,270,330)];
+ self.menuPanel.backgroundColor=[UIColor colorWithRed:.11 green:.11 blue:.13 alpha:1];
+ self.menuPanel.alpha=1;self.menuPanel.opaque=YES;self.menuPanel.layer.cornerRadius=14;
+ self.menuPanel.layer.borderWidth=2;self.menuPanel.layer.borderColor=UIColor.systemRedColor.CGColor;
+ self.menuPanel.hidden=YES;
+ UILabel *title=[[UILabel alloc]initWithFrame:CGRectMake(15,10,240,26)];
+ title.text=@"لوحة تحكم OGS";title.textColor=UIColor.whiteColor;
+ title.textAlignment=NSTextAlignmentCenter;title.font=[UIFont boldSystemFontOfSize:16];
+ [self.menuPanel addSubview:title];
+ NSArray *labels=@[@"الدم: اضغط للتبديل",@"الفلوس: اضغط للتبديل",@"الذخيرة (تجريبي): متوقف",@"الرؤية (تجريبي): متوقف",@"سرعة الوقت: 1.0x طبيعي"];
+ SEL actions[]={@selector(cycleHP:),@selector(cycleCash:),@selector(toggleAmmo:),@selector(toggleVision:),@selector(cycleTime:)};
+ for(int i=0;i<5;i++)[self.menuPanel addSubview:[self makeButton:CGRectMake(15,44+50*i,240,42) title:labels[i] action:actions[i]]];
+ self.statusLabel=[[UILabel alloc]initWithFrame:CGRectMake(15,292,240,28)];
+ self.statusLabel.text=@"واجهة تجريبية — اللمس مفعّل";
+ self.statusLabel.textColor=UIColor.systemGreenColor;self.statusLabel.textAlignment=NSTextAlignmentCenter;
+ self.statusLabel.font=[UIFont boldSystemFontOfSize:12];[self.menuPanel addSubview:self.statusLabel];
+ [self.containerView addSubview:self.menuPanel];
+ self.containerView.floatingButton=self.floatingButton;self.containerView.menuPanel=self.menuPanel;
+ [w addSubview:self.containerView];[w bringSubviewToFront:self.containerView];
+});}
+- (void)toggleMenu {self.menuPanel.hidden=!self.menuPanel.hidden;[self.containerView.superview bringSubviewToFront:self.containerView];}
+- (void)handlePan:(UIPanGestureRecognizer *)g {
+ CGPoint t=[g translationInView:self.containerView],c=CGPointMake(g.view.center.x+t.x,g.view.center.y+t.y);
+ CGRect b=self.containerView.bounds;c.x=MAX(32,MIN(b.size.width-32,c.x));c.y=MAX(32,MIN(b.size.height-32,c.y));
+ g.view.center=c;[g setTranslation:CGPointZero inView:self.containerView];
+}
+- (void)cycleHP:(UIButton *)b {NSArray *v=@[@100,@200,@300,@1000,@10000];NSNumber *n=v[self.hpStep++%v.count];[b setTitle:[NSString stringWithFormat:@"الدم: %@",n] forState:UIControlStateNormal];self.statusLabel.text=[NSString stringWithFormat:@"اختيار تجريبي: %@",n];}
+- (void)cycleCash:(UIButton *)b {NSArray *v=@[@100,@200,@300,@1000,@10000];NSNumber *n=v[self.cashStep++%v.count];[b setTitle:[NSString stringWithFormat:@"الفلوس: %@",n] forState:UIControlStateNormal];self.statusLabel.text=[NSString stringWithFormat:@"اختيار تجريبي: %@",n];}
+- (void)toggleAmmo:(UIButton *)b {self.ammoActive=!self.ammoActive;[b setTitle:self.ammoActive?@"الذخيرة (تجريبي): مفعّل":@"الذخيرة (تجريبي): متوقف" forState:UIControlStateNormal];self.statusLabel.text=@"الواجهة فقط — لا تعديل للعبة";}
+- (void)toggleVision:(UIButton *)b {self.visionActive=!self.visionActive;[b setTitle:self.visionActive?@"الرؤية (تجريبي): مفعّل":@"الرؤية (تجريبي): متوقف" forState:UIControlStateNormal];self.statusLabel.text=@"الواجهة فقط — لا تعديل للعبة";}
+- (void)cycleTime:(UIButton *)b {NSArray *v=@[@"1.0x طبيعي",@"0.5x بطيء",@"0.0x تجميد",@"2.0x سريع"];NSString *s=v[self.timeStep++%v.count];[b setTitle:[@"سرعة الوقت: " stringByAppendingString:s] forState:UIControlStateNormal];self.statusLabel.text=@"الواجهة فقط — لا تعديل للعبة";}
+@end
+__attribute__((constructor)) static void ogs_init(void){dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(3.5*NSEC_PER_SEC)),dispatch_get_main_queue(),^{[[OGSModMenu sharedInstance]setupMenu];});}
