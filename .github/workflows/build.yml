@@ -1,23 +1,23 @@
-name: Build OGSMenu iOS dylib
-on:
-  push:
-    paths:
-      - 'OGSMenu/**'
-      - '.github/workflows/build.yml'
-  workflow_dispatch:
+name: Build OGSMenu
+on: [push, workflow_dispatch]
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Compile iOS arm64 dylib
+      - name: Compile Dylib
         run: |
-          set -euo pipefail
-          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
-          mkdir -p dist
-          xcrun --sdk iphoneos clang++ -target arm64-apple-ios14.0 -isysroot "$SDK" -std=c++17 -fobjc-arc -fblocks -dynamiclib -framework UIKit -framework Foundation -framework QuartzCore -framework CoreGraphics -Wl,-install_name,@rpath/OGSMenu.dylib OGSMenu/ModMenu.mm -o dist/OGSMenu.dylib
-          file dist/OGSMenu.dylib
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          if [ -f "OGSMenu/ModMenu.mm" ]; then
+            SRC="OGSMenu/ModMenu.mm"
+          else
+            SRC="ModMenu.mm"
+          fi
+          clang++ -arch arm64 -dynamiclib -isysroot "$SDK" \
+            -miphoneos-version-min=13.0 -fobjc-arc -Wno-deprecated-declarations \
+            -framework UIKit -framework Foundation -framework QuartzCore -framework CoreGraphics \
+            "$SRC" -o OGSMenu.dylib
       - uses: actions/upload-artifact@v4
         with:
-          name: OGSMenu-ios-arm64-dylib
-          path: dist/OGSMenu.dylib
+          name: OGSMenu_Dylib
+          path: OGSMenu.dylib
