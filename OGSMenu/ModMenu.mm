@@ -12,16 +12,15 @@
 #define OGS_MAX_NAME_BYTES  128
 #define OGS_MAX_STRING_LEN  256
 
-// رابط مستودعك المباشر (Al-hzmi/ogsmenu) مع مسارات بديلة تلقائية
-static NSString * const kDefaultGitHubConfigURL = @"https://raw.githubusercontent.com/Al-hzmi/ogsmenu/main/ogs_config.json";
+// رابط مستودعك المباشر بالاسم الصحيح (al-hzmi/OGSMenu-Build-)
+static NSString * const kDefaultGitHubConfigURL = @"https://raw.githubusercontent.com/al-hzmi/OGSMenu-Build-/main/ogs_config.json";
 
 static NSArray<NSString *> *OGSCandidateCloudURLs(NSString *customURL) {
     NSMutableArray<NSString *> *urls = [NSMutableArray array];
     if (customURL.length > 8) [urls addObject:customURL];
+    [urls addObject:@"https://raw.githubusercontent.com/al-hzmi/OGSMenu-Build-/main/ogs_config.json"];
+    [urls addObject:@"https://raw.githubusercontent.com/al-hzmi/OGSMenu-Build-/main/OGSMenu/ogs_config.json"];
     [urls addObject:@"https://raw.githubusercontent.com/Al-hzmi/ogsmenu/main/ogs_config.json"];
-    [urls addObject:@"https://raw.githubusercontent.com/Al-hzmi/ogsmenu/main/OGSMenu/ogs_config.json"];
-    [urls addObject:@"https://raw.githubusercontent.com/Al-hzmi/ogsmenu/master/ogs_config.json"];
-    [urls addObject:@"https://raw.githubusercontent.com/Al-hzmi/ogsmenu/master/OGSMenu/ogs_config.json"];
     return urls;
 }
 
