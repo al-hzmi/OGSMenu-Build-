@@ -25,30 +25,24 @@ static NSArray<NSString *> *OGSCandidateCloudURLs(NSString *customURL) {
 }
 
 // ============================================================
-// MARK: - Engine Offsets & Method Tables (Verified from Binary Audit)
+// MARK: - Verified Engine Offsets
 // ============================================================
 typedef struct {
     uintptr_t tblCashUpdate;
     uintptr_t tblChatUpdate;
     uintptr_t tblSendChatRemote;
-    uintptr_t tblOnEvent;             // Type4870::OnEvent (0x2390048)
-    uintptr_t tblOnMasterSwitched1;   // Type4821::OnMasterClientSwitched (0x2392628)
-    uintptr_t tblOnMasterSwitched2;   // Type4894::OnMasterClientSwitched (0x2391000)
-    uintptr_t tblLeaveRoom;           // Type4884::LeaveRoom (0x2390a10)
-    uintptr_t tblOpLeave;             // Type4870::OpLeave (0x238ffb0)
     uintptr_t rvaSetTimescale;
     uintptr_t rvaInRoom;
     uintptr_t rvaIsMaster;
     uintptr_t rvaGetMasterPeer;
     uintptr_t rvaGetLocalPlayer;      // PhotonNetwork::get_player (0x13cabf0)
-    uintptr_t rvaGetRoom;             // PhotonNetwork::get_room (0x13cab28)
     uintptr_t rvaAllPlayers;
     uintptr_t rvaGetPeers;
     uintptr_t rvaPlayerGetName;
     uintptr_t rvaPlayerGetID;
+    uintptr_t rvaPhotonNetTypeInfo;   // PhotonNetwork_TypeInfo (0x281c1c8)
+    uintptr_t rvaNetPeerGetMMasterId; // Type4870::get_mMasterClientId (0x13ab2a4)
     uintptr_t rvaNetPeerSetMMasterId; // Type4870::set_mMasterClientId (0x13ab2ac)
-    uintptr_t rvaNetPeerSetMaster;    // Type4870::SetMasterClient (0x13b0a20)
-    uintptr_t rvaRoomSetMasterId;     // Type4888::set_MasterClientId (0x13f1ffc)
     uintptr_t rvaArabicFix;
     uintptr_t tblPeerSync;            // PhotonNetwork::CloseConnection (0x2390a98)
     uintptr_t tblSetMaster;           // PhotonNetwork::SetMasterClient (0x2390aa0)
@@ -59,24 +53,18 @@ static OGSOffsetsConfig gOffsets = {
     .tblCashUpdate          = 0x23918b8,
     .tblChatUpdate          = 0x238fd68,
     .tblSendChatRemote      = 0x238fd80,
-    .tblOnEvent             = 0x2390048,
-    .tblOnMasterSwitched1   = 0x2392628,
-    .tblOnMasterSwitched2   = 0x2391000,
-    .tblLeaveRoom           = 0x2390a10,
-    .tblOpLeave             = 0x238ffb0,
     .rvaSetTimescale        = 0x198ac4c,
     .rvaInRoom              = 0x013CC38C,
     .rvaIsMaster            = 0x013CC2BC,
     .rvaGetMasterPeer       = 0x013CACA4,
     .rvaGetLocalPlayer      = 0x013CABF0,
-    .rvaGetRoom             = 0x013CAB28,
     .rvaAllPlayers          = 0x013CAEC4,
     .rvaGetPeers            = 0x013CAF78,
     .rvaPlayerGetName       = 0x013D7534,
     .rvaPlayerGetID         = 0x013CC384,
+    .rvaPhotonNetTypeInfo   = 0x0281C1C8,
+    .rvaNetPeerGetMMasterId = 0x013AB2A4,
     .rvaNetPeerSetMMasterId = 0x013AB2AC,
-    .rvaNetPeerSetMaster    = 0x013B0A20,
-    .rvaRoomSetMasterId     = 0x013F1FFC,
     .rvaArabicFix           = 0x0130F538,
     .tblPeerSync            = 0x2390a98,
     .tblSetMaster           = 0x2390aa0,
@@ -89,29 +77,20 @@ static OGSOffsetsConfig gOffsets = {
 typedef void    (*Update0Fn)(void *, void *);
 typedef void    (*SetTime1Fn)(float, void *);
 typedef void    (*SendChatRemoteFn)(void *, void *, void *, int32_t, int32_t, void *);
-typedef void    (*OnEventFn)(void *, void *, void *);
-typedef void    (*OnMasterSwitchFn)(void *, void *, void *);
-typedef bool    (*LeaveRoomFn)(int32_t, void *);
-typedef bool    (*OpLeaveFn)(void *, int32_t, void *);
 typedef bool    (*Bool0Fn)(void *);
 typedef void*   (*Object0Fn)(void *);
 typedef bool    (*PeerAction1Fn)(void *, void *);
 typedef void*   (*PlayerGetNameFn)(void *, void *);
 typedef int32_t (*PlayerGetIDFn)(void *, void *);
+typedef int32_t (*GetMasterIdFn)(void *, void *);
 typedef void    (*SetMasterIdFn)(void *, int32_t, void *);
-typedef bool    (*NetPeerSetMasterFn)(void *, int32_t, int32_t, void *);
 typedef void*   (*ArabicFixFn)(void *, void *);
 typedef void    (*OnDisconnectFn)(void *, void *, void *);
 
-static Update0Fn        orig_CashUpdate       = NULL;
-static Update0Fn        orig_ChatUpdate       = NULL;
-static SendChatRemoteFn orig_SendChatRemote   = NULL;
-static OnDisconnectFn   orig_OnDisconnect     = NULL;
-static OnEventFn        orig_OnEvent          = NULL;
-static OnMasterSwitchFn orig_OnMasterSwitch1  = NULL;
-static OnMasterSwitchFn orig_OnMasterSwitch2  = NULL;
-static LeaveRoomFn      orig_LeaveRoom        = NULL;
-static OpLeaveFn        orig_OpLeave          = NULL;
+static Update0Fn        orig_CashUpdate     = NULL;
+static Update0Fn        orig_ChatUpdate     = NULL;
+static SendChatRemoteFn orig_SendChatRemote = NULL;
+static OnDisconnectFn   orig_OnDisconnect   = NULL;
 
 // ============================================================
 // MARK: - Runtime State
@@ -119,43 +98,49 @@ static OpLeaveFn        orig_OpLeave          = NULL;
 typedef struct {
     volatile bool     inRoom;
     volatile bool     isMaster;
+    volatile bool     heldMasterStably; // يصبح true بعد امتلاكك للهوست بثانية كاملة
     volatile uint32_t selectedPeer;
     volatile float    gameSpeed;
     volatile bool     speedDirty;
     volatile uint64_t generation;
     volatile uint64_t readFailures;
-    volatile int32_t  autoHostOn;      // صائد السارقين + درع منع الطرد
-    volatile int32_t  chatMode;        // 0 = مفتوح | 1 = كتم | 2 = طرد من يكتب
+    volatile int32_t  autoHostOn;       // 1 = مفعّل | 0 = متوقف
+    volatile int32_t  chatMode;         // 0 = مفتوح | 1 = كتم | 2 = طرد من يكتب
     volatile int32_t  kickMsgArmed;
     volatile int32_t  forceHostReq;
     volatile int32_t  kickTargetID;
     volatile int32_t  kickRetries;
-    volatile int32_t  insideNetworkEvent;
-    void * volatile   networkingPeer;  // مؤشر Type4870 المباشر للتحكم بـ +0x1c0
+    double            roomEnterTime;
+    double            masterAcquiredTime;
+    double            lastMasterClaimTime;
+    double            lastKickPacketTime;
     char              kickTargetName[OGS_MAX_NAME_BYTES];
     char              lastHijackerName[OGS_MAX_NAME_BYTES];
     char              customKickPhrase[OGS_MAX_NAME_BYTES];
 } OGSRuntimeState;
 
 static OGSRuntimeState gOGS = {
-    .inRoom             = false,
-    .isMaster           = false,
-    .selectedPeer       = 0,
-    .gameSpeed          = 1.0f,
-    .speedDirty         = false,
-    .generation         = 0,
-    .readFailures       = 0,
-    .autoHostOn         = 1,
-    .chatMode           = 0,
-    .kickMsgArmed       = 0,
-    .forceHostReq       = 0,
-    .kickTargetID       = -1,
-    .kickRetries        = 0,
-    .insideNetworkEvent = 0,
-    .networkingPeer     = NULL,
-    .kickTargetName     = {0},
-    .lastHijackerName   = {0},
-    .customKickPhrase   = " تم طرده من الغرفة "
+    .inRoom              = false,
+    .isMaster            = false,
+    .heldMasterStably    = false,
+    .selectedPeer        = 0,
+    .gameSpeed           = 1.0f,
+    .speedDirty          = false,
+    .generation          = 0,
+    .readFailures        = 0,
+    .autoHostOn          = 1,
+    .chatMode            = 0,
+    .kickMsgArmed        = 0,
+    .forceHostReq        = 0,
+    .kickTargetID        = -1,
+    .kickRetries         = 0,
+    .roomEnterTime       = 0.0,
+    .masterAcquiredTime  = 0.0,
+    .lastMasterClaimTime = 0.0,
+    .lastKickPacketTime  = 0.0,
+    .kickTargetName      = {0},
+    .lastHijackerName    = {0},
+    .customKickPhrase    = " تم طرده من الغرفة "
 };
 
 // ============================================================
@@ -345,7 +330,7 @@ static uint32_t OGSReadPlayerArray(uintptr_t listRVA, void *output[OGS_MAX_PEERS
 }
 
 // ============================================================
-// MARK: - Force-Host & Bypass-Gate Kick Engine (Layer 1..4)
+// MARK: - Rate-Limited Host Claim & +0x1c0 Gate-Bypass Kick
 // ============================================================
 static void *OGSFindLocalPlayer(void) {
     uintptr_t getLocalAddr = OGSResolveRVA(gOffsets.rvaGetLocalPlayer);
@@ -378,65 +363,85 @@ static void *OGSFindLocalPlayer(void) {
     return NULL;
 }
 
-static int32_t OGSGetLocalPlayerID(void **outPlayerObj) {
-    void *myPlayer = OGSFindLocalPlayer();
-    if (outPlayerObj) *outPlayerObj = myPlayer;
-    if (!myPlayer) return 0;
-    uintptr_t idAddr = OGSResolveRVA(gOffsets.rvaPlayerGetID);
-    if (!idAddr) return 0;
-    return ((PlayerGetIDFn)idAddr)(myPlayer, NULL);
+// استخراج مؤشر networkingPeer بأمان من PhotonNetwork_TypeInfo (0x281c1c8 -> +0xb8 -> +0x10)
+static void *OGSGetNetworkingPeerSafe(void) {
+    uintptr_t typeInfoSlot = OGSResolveRVA(gOffsets.rvaPhotonNetTypeInfo);
+    void *typeInfo = NULL;
+    if (!OGSReadPointer(typeInfoSlot, &typeInfo)) return NULL;
+
+    void *staticFields = NULL;
+    if (!OGSReadPointer((uintptr_t)typeInfo + 0xb8, &staticFields)) return NULL;
+
+    void *netPeer = NULL;
+    if (!OGSReadPointer((uintptr_t)staticFields + 0x10, &netPeer)) return NULL;
+
+    int32_t testMasterID = 0;
+    if (!OGSReadMemory((uintptr_t)netPeer + 0x1c0, &testMasterID, sizeof(int32_t))) return NULL;
+    return netPeer;
 }
 
-// يفرض الهوست لك على 4 طبقات: (1) ذاكرة NetworkingPeer+0x1c0 (2) Room.MasterClientId (3) NetworkingPeer.SetMasterClient (4) PhotonNetwork.SetMasterClient
-static void OGSForceClaimMaster(void) {
-    void *myPlayer = NULL;
-    int32_t myID = OGSGetLocalPlayerID(&myPlayer);
-    if (!myPlayer || myID <= 0) return;
-
-    void *netPeer = gOGS.networkingPeer;
-    uintptr_t setMMasterAddr = OGSResolveRVA(gOffsets.rvaNetPeerSetMMasterId);
-    if (netPeer && (uintptr_t)netPeer > 0x100000000ULL && setMMasterAddr) {
-        ((SetMasterIdFn)setMMasterAddr)(netPeer, myID, NULL);
+// طلب الهوست مع حماية من الفيضان الشبكي (لا يرسل أكثر من مرة كل 0.45 ثانية حتى لا يطردك السيرفر)
+static void OGSSetMasterRateLimited(void *playerObj, bool bypassCooldown) {
+    if (!playerObj || (uintptr_t)playerObj < 0x100000000ULL) return;
+    double now = CFAbsoluteTimeGetCurrent();
+    if (!bypassCooldown && (now - gOGS.lastMasterClaimTime) < 0.45) {
+        return;
     }
-
-    uintptr_t getRoomAddr = OGSResolveRVA(gOffsets.rvaGetRoom);
-    uintptr_t setRoomMasterAddr = OGSResolveRVA(gOffsets.rvaRoomSetMasterId);
-    if (getRoomAddr && setRoomMasterAddr) {
-        void *room = ((Object0Fn)getRoomAddr)(NULL);
-        if (room && (uintptr_t)room > 0x100000000ULL) {
-            ((SetMasterIdFn)setRoomMasterAddr)(room, myID, NULL);
-        }
-    }
-
-    uintptr_t netPeerSetMasterAddr = OGSResolveRVA(gOffsets.rvaNetPeerSetMaster);
-    if (netPeer && (uintptr_t)netPeer > 0x100000000ULL && netPeerSetMasterAddr) {
-        ((NetPeerSetMasterFn)netPeerSetMasterAddr)(netPeer, myID, 1, NULL);
-    }
+    gOGS.lastMasterClaimTime = now;
 
     uintptr_t slotAddr = OGSResolveRVA(gOffsets.tblSetMaster);
     void *fnPtr = NULL;
     if (OGSReadPointer(slotAddr, &fnPtr) && fnPtr) {
-        ((PeerAction1Fn)fnPtr)(myPlayer, NULL);
+        ((PeerAction1Fn)fnPtr)(playerObj, NULL);
     }
 }
 
-// يكسر فحص get_IsMasterClient (0x13d305c) عبر تزويد +0x1c0 برقمك مباشرة قبل إرسال حزمة الطرد (Event 254)
-static void OGSForceKickPeerBypassingGate(void *peerObj) {
+// طرد يتخطى بوابة الفحص المحلي (+0x1c0) مؤقتاً ويرسل حزمة الطرد حتى لو كان الهوست مع الخصم!
+static void OGSKickPeerWithLocalGateBypass(void *peerObj, bool bypassCooldown) {
     if (!peerObj || (uintptr_t)peerObj < 0x100000000ULL) return;
+    double now = CFAbsoluteTimeGetCurrent();
+    if (!bypassCooldown && (now - gOGS.lastKickPacketTime) < 0.30) {
+        return;
+    }
+    gOGS.lastKickPacketTime = now;
     gOGS.kickMsgArmed = 1;
 
-    // فرض رقمك في +0x1c0 أولاً حتى تمر تعليمة TBZ W0, #0, 0x13d2fe8 داخل CloseConnection بنسبة 100%
-    OGSForceClaimMaster();
+    void *myPlayer = OGSFindLocalPlayer();
+    int32_t myID = 0;
+    uintptr_t idAddr = OGSResolveRVA(gOffsets.rvaPlayerGetID);
+    if (myPlayer && idAddr) {
+        myID = ((PlayerGetIDFn)idAddr)(myPlayer, NULL);
+    }
+
+    // فتح بوابة [networkingPeer + 0x1c0] محلياً للحظة استدعاء CloseConnection فقط
+    void *netPeer = OGSGetNetworkingPeerSafe();
+    uintptr_t getMMasterAddr = OGSResolveRVA(gOffsets.rvaNetPeerGetMMasterId);
+    uintptr_t setMMasterAddr = OGSResolveRVA(gOffsets.rvaNetPeerSetMMasterId);
+    int32_t origMasterID = 0;
+    bool patchedLocalGate = false;
+
+    if (netPeer && myID > 0 && getMMasterAddr && setMMasterAddr) {
+        origMasterID = ((GetMasterIdFn)getMMasterAddr)(netPeer, NULL);
+        if (origMasterID != myID) {
+            ((SetMasterIdFn)setMMasterAddr)(netPeer, myID, NULL);
+            patchedLocalGate = true;
+        }
+    }
 
     uintptr_t slotAddr = OGSResolveRVA(gOffsets.tblPeerSync);
     void *fnPtr = NULL;
     if (OGSReadPointer(slotAddr, &fnPtr) && fnPtr) {
         ((PeerAction1Fn)fnPtr)(peerObj, NULL);
     }
+
+    // إعادة القيمة الأصلية في الذاكرة حتى نعرف حالة السيرفر الحقيقية
+    if (patchedLocalGate && netPeer && setMMasterAddr && origMasterID > 0) {
+        ((SetMasterIdFn)setMMasterAddr)(netPeer, origMasterID, NULL);
+    }
 }
 
 // ============================================================
-// MARK: - Direct & Continuous Speed Control
+// MARK: - Speed Control
 // ============================================================
 static void OGSApplyTimescaleNow(float speed) {
     uintptr_t address = OGSResolveRVA(gOffsets.rvaSetTimescale);
@@ -494,7 +499,7 @@ static void OGSProcessSpeed(void) {
 @property (strong, nonatomic) NSMutableSet<NSNumber *> *bannedActorIDs;
 @property (strong, nonatomic) NSMutableSet<NSString *> *allowedNamesWhenLocked;
 @property (assign, nonatomic) BOOL roomLockActive;
-@property (strong, nonatomic) NSTimer *fastGuardTimer;
+@property (strong, nonatomic) NSTimer *masterTimer;
 + (instancetype)sharedInstance;
 - (void)setupMenu;
 - (void)ensureMenuVisible;
@@ -504,7 +509,7 @@ static void OGSProcessSpeed(void) {
 @end
 
 // ============================================================
-// MARK: - 60-FPS Frame & Event Anti-Hijack Engine
+// MARK: - Safe Room Snapshot & Anti-Hijack Engine (Flood-Protected)
 // ============================================================
 static volatile bool s_inSnapshotUpdate = false;
 
@@ -527,44 +532,72 @@ static void OGSUpdateRoomSnapshot(void) {
     bool inRoom = inRoomFn(NULL);
     OGSRoomSnapshot *snapshot = OGSBeginSnapshotWrite();
     snapshot->inRoom = inRoom;
+
+    double now = CFAbsoluteTimeGetCurrent();
+    bool wasInRoom = __atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE);
     __atomic_store_n(&gOGS.inRoom, inRoom, __ATOMIC_RELEASE);
 
     if (!inRoom) {
         __atomic_store_n(&gOGS.isMaster, false, __ATOMIC_RELEASE);
+        gOGS.heldMasterStably = false;
+        gOGS.roomEnterTime = 0.0;
+        gOGS.masterAcquiredTime = 0.0;
         gOGS.kickRetries = 0;
         OGSPublishSnapshot(snapshot);
         __atomic_store_n(&s_inSnapshotUpdate, false, __ATOMIC_RELEASE);
         return;
     }
 
-    void *myPlayer = NULL;
-    int32_t myID = OGSGetLocalPlayerID(&myPlayer);
-    void *masterPlayer = masterFn(NULL);
+    if (!wasInRoom || gOGS.roomEnterTime == 0.0) {
+        gOGS.roomEnterTime = now;
+        gOGS.heldMasterStably = false;
+        gOGS.masterAcquiredTime = 0.0;
+    }
+
     bool master = isMasterFn(NULL);
+    void *masterPlayer = masterFn(NULL);
+    void *myPlayer = OGSFindLocalPlayer();
     OGSModMenu *menu = [OGSModMenu sharedInstance];
 
-    // فحص فوري: إذا لم تكن أنت الهوست (أو حاول هكر سحبه منك)، نصطاده ونطرده مع كسر بوابة +0x1c0
-    if (!master && (gOGS.autoHostOn || gOGS.forceHostReq > 0 || gOGS.kickRetries > 0)) {
-        gOGS.forceHostReq = 0;
+    if (master) {
+        if (gOGS.masterAcquiredTime == 0.0) {
+            gOGS.masterAcquiredTime = now;
+        } else if ((now - gOGS.masterAcquiredTime) >= 1.2) {
+            // امتلكنا الهوست بشكل مستقر لأكثر من 1.2 ثانية، الآن أي شخص يسحبه منا هو سارق!
+            gOGS.heldMasterStably = true;
+        }
+    } else {
+        gOGS.masterAcquiredTime = 0.0;
 
-        if (gOGS.autoHostOn && masterPlayer && masterPlayer != myPlayer) {
-            OGSPeerSnapshot thiefSnap;
-            if (OGSReadPeer(masterPlayer, masterPlayer, &thiefSnap) && thiefSnap.actorID != myID) {
-                NSString *thiefName = [NSString stringWithUTF8String:thiefSnap.name];
-                NSString *normThief = OGSNormalizeKey(thiefName);
-                [menu recordHijackerName:normThief actorID:thiefSnap.actorID];
+        // ننتظر 1.5 ثانية بعد دخول الروم حتى يكتمل التحميل ولا يطردنا السيرفر
+        bool roomSettled = ((now - gOGS.roomEnterTime) >= 1.5);
 
-                gOGS.kickTargetID = thiefSnap.actorID;
-                if (normThief.UTF8String) {
-                    snprintf(gOGS.kickTargetName, sizeof(gOGS.kickTargetName), "%s", normThief.UTF8String);
-                    snprintf(gOGS.lastHijackerName, sizeof(gOGS.lastHijackerName), "%s", thiefSnap.name);
+        if (roomSettled && (gOGS.autoHostOn || gOGS.forceHostReq > 0 || gOGS.kickRetries > 0)) {
+            bool manualForce = (gOGS.forceHostReq > 0);
+            gOGS.forceHostReq = 0;
+
+            // إذا كنا نمتلك الهوست بشكل مستقر في هذه الغرفة وسحبه لاعب آخر منا -> نطرده فوراً ببوابة +0x1c0!
+            if (gOGS.autoHostOn && gOGS.heldMasterStably && masterPlayer && masterPlayer != myPlayer) {
+                OGSPeerSnapshot thiefSnap;
+                if (OGSReadPeer(masterPlayer, masterPlayer, &thiefSnap)) {
+                    NSString *thiefName = [NSString stringWithUTF8String:thiefSnap.name];
+                    NSString *normThief = OGSNormalizeKey(thiefName);
+                    [menu recordHijackerName:normThief actorID:thiefSnap.actorID];
+
+                    gOGS.kickTargetID = thiefSnap.actorID;
+                    if (normThief.UTF8String) {
+                        snprintf(gOGS.kickTargetName, sizeof(gOGS.kickTargetName), "%s", normThief.UTF8String);
+                        snprintf(gOGS.lastHijackerName, sizeof(gOGS.lastHijackerName), "%s", thiefSnap.name);
+                    }
+                    gOGS.kickRetries = 15;
                 }
-                gOGS.kickRetries = 90;
-                OGSForceKickPeerBypassingGate(masterPlayer);
+                OGSKickPeerWithLocalGateBypass(masterPlayer, true);
+            }
+
+            if (myPlayer) {
+                OGSSetMasterRateLimited(myPlayer, manualForce);
             }
         }
-        OGSForceClaimMaster();
-        master = true;
     }
 
     snapshot->isMaster = master;
@@ -588,12 +621,18 @@ static void OGSUpdateRoomSnapshot(void) {
             bool matchName = (gOGS.kickTargetName[0] != '\0' && strcmp(normName.UTF8String, gOGS.kickTargetName) == 0);
             if (matchID || matchName) {
                 targetStillInRoom = true;
-                OGSForceKickPeerBypassingGate(players[i]);
+                if (!master && myPlayer) {
+                    OGSSetMasterRateLimited(myPlayer, false);
+                }
+                OGSKickPeerWithLocalGateBypass(players[i], false);
             }
         }
 
         if ([menu shouldAutoKickPeerWithName:normName actorID:peerSnap.actorID]) {
-            OGSForceKickPeerBypassingGate(players[i]);
+            if (!master && myPlayer) {
+                OGSSetMasterRateLimited(myPlayer, false);
+            }
+            OGSKickPeerWithLocalGateBypass(players[i], false);
         }
     }
 
@@ -612,101 +651,8 @@ static void OGSUpdateRoomSnapshot(void) {
 }
 
 // ============================================================
-// MARK: - Zero-Latency Network Hooks (Anti-Kick + Instant Hijack Trap)
+// MARK: - Game Hooks (Clean & Stable 4 Hooks Only)
 // ============================================================
-
-// اعتراض فوري في نفس اللحظة التي يتبدل فيها الهوست داخل المحرك
-static void OGSHandleMasterSwitchedCallback(void *newMasterPlayer) {
-    if (!gOGS.autoHostOn || !newMasterPlayer || (uintptr_t)newMasterPlayer < 0x100000000ULL) return;
-
-    void *myPlayer = NULL;
-    int32_t myID = OGSGetLocalPlayerID(&myPlayer);
-    if (!myPlayer || newMasterPlayer == myPlayer) return;
-
-    OGSPeerSnapshot thiefSnap;
-    if (OGSReadPeer(newMasterPlayer, newMasterPlayer, &thiefSnap) && thiefSnap.actorID != myID) {
-        NSString *thiefName = [NSString stringWithUTF8String:thiefSnap.name];
-        NSString *normThief = OGSNormalizeKey(thiefName);
-        [[OGSModMenu sharedInstance] recordHijackerName:normThief actorID:thiefSnap.actorID];
-
-        gOGS.kickTargetID = thiefSnap.actorID;
-        if (normThief.UTF8String) {
-            snprintf(gOGS.kickTargetName, sizeof(gOGS.kickTargetName), "%s", normThief.UTF8String);
-            snprintf(gOGS.lastHijackerName, sizeof(gOGS.lastHijackerName), "%s", thiefSnap.name);
-        }
-        gOGS.kickRetries = 90;
-    }
-
-    // استعادة الهوست وطرد السارق فوراً من داخل نفس الـ Callback!
-    OGSForceKickPeerBypassingGate(newMasterPlayer);
-}
-
-static void hook_OnMasterClientSwitched1(void *self, void *newMasterPlayer, void *method) {
-    OGSHandleMasterSwitchedCallback(newMasterPlayer);
-    if (orig_OnMasterSwitch1) orig_OnMasterSwitch1(self, newMasterPlayer, method);
-}
-
-static void hook_OnMasterClientSwitched2(void *self, void *newMasterPlayer, void *method) {
-    OGSHandleMasterSwitchedCallback(newMasterPlayer);
-    if (orig_OnMasterSwitch2) orig_OnMasterSwitch2(self, newMasterPlayer, method);
-}
-
-// درع منع الطرد (Anti-Kick): يمنع أوامر الخروج القسرية القادمة من داخل حزم الشبكة (OnEvent)
-static bool hook_LeaveRoom(int32_t becomeInactive, void *method) {
-    if (gOGS.autoHostOn && gOGS.insideNetworkEvent > 0) {
-        OGSForceClaimMaster();
-        return false;
-    }
-    return orig_LeaveRoom ? orig_LeaveRoom(becomeInactive, method) : false;
-}
-
-static bool hook_OpLeave(void *self, int32_t becomeInactive, void *method) {
-    if (self) gOGS.networkingPeer = self;
-    if (gOGS.autoHostOn && gOGS.insideNetworkEvent > 0) {
-        OGSForceClaimMaster();
-        return false;
-    }
-    return orig_OpLeave ? orig_OpLeave(self, becomeInactive, method) : false;
-}
-
-// خطاف حزم الشبكة (Type4870::OnEvent @ 0x13b54ac): يلتقط networkingPeer ويحبط Event 203 ويصطاد السارق لحظياً
-static void hook_OnEvent(void *self, void *eventData, void *method) {
-    if (self && (uintptr_t)self > 0x100000000ULL) {
-        gOGS.networkingPeer = self;
-    }
-
-    // فحص كود الحدث لإحباط حزمة الطرد (Event 203 = 0xCB) قبل أن تصل للمحرك
-    if (gOGS.autoHostOn && eventData && (uintptr_t)eventData > 0x100000000ULL) {
-        uint8_t evCode = 0;
-        if (OGSReadMemory((uintptr_t)eventData + 0x10, &evCode, sizeof(uint8_t))) {
-            if (evCode == 203) {
-                OGSForceClaimMaster();
-                return;
-            }
-        }
-    }
-
-    __atomic_fetch_add(&gOGS.insideNetworkEvent, 1, __ATOMIC_ACQ_REL);
-    if (orig_OnEvent) orig_OnEvent(self, eventData, method);
-    __atomic_fetch_sub(&gOGS.insideNetworkEvent, 1, __ATOMIC_ACQ_REL);
-
-    // بعد معالجة الحزمة مباشرة: نفحص الحقل [networkingPeer + 0x1c0] (mMasterClientId)
-    if (gOGS.autoHostOn && self && (uintptr_t)self > 0x100000000ULL) {
-        int32_t currentMasterID = 0;
-        if (OGSReadMemory((uintptr_t)self + 0x1c0, &currentMasterID, sizeof(int32_t)) && currentMasterID > 0) {
-            void *myPlayer = NULL;
-            int32_t myID = OGSGetLocalPlayerID(&myPlayer);
-            if (myID > 0 && currentMasterID != myID) {
-                // شخص آخر حاول تغيير mMasterClientId! نسجل رقمه ونطرده فوراً
-                gOGS.kickTargetID = currentMasterID;
-                gOGS.kickRetries = 90;
-                OGSForceClaimMaster();
-                OGSUpdateRoomSnapshot();
-            }
-        }
-    }
-}
-
 static void *OGSCreateFreshKickString(void *templateIl2CppStr) {
     if (!templateIl2CppStr || (uintptr_t)templateIl2CppStr < 0x100000000ULL) return NULL;
 
@@ -774,7 +720,7 @@ static void hook_SendChatRemote(void *self, void *senderStr, void *msgStr, int32
             if (utf8) {
                 snprintf(gOGS.kickTargetName, sizeof(gOGS.kickTargetName), "%s", utf8);
                 gOGS.kickTargetID = -1;
-                gOGS.kickRetries = 60;
+                gOGS.kickRetries = 15;
                 OGSUpdateRoomSnapshot();
             }
         }
@@ -783,10 +729,15 @@ static void hook_SendChatRemote(void *self, void *senderStr, void *msgStr, int32
     if (orig_SendChatRemote) orig_SendChatRemote(self, senderStr, msgStr, p3, p4, method);
 }
 
+static volatile int32_t s_chatFrameDiv = 0;
+
 static void hook_ChatUpdate(void *self, void *method) {
     if (orig_ChatUpdate) orig_ChatUpdate(self, method);
     OGSProcessSpeed();
-    OGSUpdateRoomSnapshot();
+    if (++s_chatFrameDiv >= 18) {
+        s_chatFrameDiv = 0;
+        OGSUpdateRoomSnapshot();
+    }
 }
 
 static void hook_CashUpdate(void *self, void *method) {
@@ -797,15 +748,10 @@ static void hook_CashUpdate(void *self, void *method) {
 static void OGSInstallHooks(void) {
     uintptr_t base = OGSFindGameImage();
     if (!base) return;
-    if (gOffsets.tblCashUpdate)        { void **sl = (void **)(base + gOffsets.tblCashUpdate);        if (*sl != (void *)&hook_CashUpdate)              { orig_CashUpdate      = (Update0Fn)*sl;        *sl = (void *)&hook_CashUpdate; } }
-    if (gOffsets.tblChatUpdate)        { void **sl = (void **)(base + gOffsets.tblChatUpdate);        if (*sl != (void *)&hook_ChatUpdate)              { orig_ChatUpdate      = (Update0Fn)*sl;        *sl = (void *)&hook_ChatUpdate; } }
-    if (gOffsets.tblSendChatRemote)    { void **sl = (void **)(base + gOffsets.tblSendChatRemote);    if (*sl != (void *)&hook_SendChatRemote)          { orig_SendChatRemote  = (SendChatRemoteFn)*sl; *sl = (void *)&hook_SendChatRemote; } }
-    if (gOffsets.tblOnDisconnect)      { void **sl = (void **)(base + gOffsets.tblOnDisconnect);      if (*sl != (void *)&hook_OnPhotonPlayerDisconnected) { orig_OnDisconnect = (OnDisconnectFn)*sl;   *sl = (void *)&hook_OnPhotonPlayerDisconnected; } }
-    if (gOffsets.tblOnEvent)           { void **sl = (void **)(base + gOffsets.tblOnEvent);           if (*sl != (void *)&hook_OnEvent)                 { orig_OnEvent         = (OnEventFn)*sl;        *sl = (void *)&hook_OnEvent; } }
-    if (gOffsets.tblOnMasterSwitched1) { void **sl = (void **)(base + gOffsets.tblOnMasterSwitched1); if (*sl != (void *)&hook_OnMasterClientSwitched1) { orig_OnMasterSwitch1 = (OnMasterSwitchFn)*sl; *sl = (void *)&hook_OnMasterClientSwitched1; } }
-    if (gOffsets.tblOnMasterSwitched2) { void **sl = (void **)(base + gOffsets.tblOnMasterSwitched2); if (*sl != (void *)&hook_OnMasterClientSwitched2) { orig_OnMasterSwitch2 = (OnMasterSwitchFn)*sl; *sl = (void *)&hook_OnMasterClientSwitched2; } }
-    if (gOffsets.tblLeaveRoom)         { void **sl = (void **)(base + gOffsets.tblLeaveRoom);         if (*sl != (void *)&hook_LeaveRoom)               { orig_LeaveRoom       = (LeaveRoomFn)*sl;      *sl = (void *)&hook_LeaveRoom; } }
-    if (gOffsets.tblOpLeave)           { void **sl = (void **)(base + gOffsets.tblOpLeave);           if (*sl != (void *)&hook_OpLeave)                 { orig_OpLeave         = (OpLeaveFn)*sl;        *sl = (void *)&hook_OpLeave; } }
+    if (gOffsets.tblCashUpdate)     { void **sl = (void **)(base + gOffsets.tblCashUpdate);     if (*sl != (void *)&hook_CashUpdate)     { orig_CashUpdate     = (Update0Fn)*sl;        *sl = (void *)&hook_CashUpdate; } }
+    if (gOffsets.tblChatUpdate)     { void **sl = (void **)(base + gOffsets.tblChatUpdate);     if (*sl != (void *)&hook_ChatUpdate)     { orig_ChatUpdate     = (Update0Fn)*sl;        *sl = (void *)&hook_ChatUpdate; } }
+    if (gOffsets.tblSendChatRemote) { void **sl = (void **)(base + gOffsets.tblSendChatRemote); if (*sl != (void *)&hook_SendChatRemote) { orig_SendChatRemote = (SendChatRemoteFn)*sl; *sl = (void *)&hook_SendChatRemote; } }
+    if (gOffsets.tblOnDisconnect)   { void **sl = (void **)(base + gOffsets.tblOnDisconnect);   if (*sl != (void *)&hook_OnPhotonPlayerDisconnected) { orig_OnDisconnect = (OnDisconnectFn)*sl; *sl = (void *)&hook_OnPhotonPlayerDisconnected; } }
 }
 
 static uintptr_t OGSParseHexOffset(id val, uintptr_t fallback) {
@@ -928,7 +874,7 @@ static uintptr_t OGSParseHexOffset(id val, uintptr_t fallback) {
         self.menuPanel.hidden = YES;
 
         self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 5, 260, 18)];
-        self.titleLabel.text = @"OGS v10: درع منع الطرد + صائد السارقين";
+        self.titleLabel.text = @"OGS v10.1: طرد قسري (+0x1c0) بدون كراش";
         self.titleLabel.textColor = [UIColor whiteColor];
         self.titleLabel.textAlignment = NSTextAlignmentCenter;
         self.titleLabel.font = [UIFont boldSystemFontOfSize:11.0];
@@ -966,13 +912,13 @@ static uintptr_t OGSParseHexOffset(id val, uintptr_t fallback) {
         UIColor *wpnGreen   = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
 
         [self.menuPanel addSubview:[self makeBtn:CGRectMake(10, 70, 100, 30) title:@"▶ السابق" bg:darkGray action:@selector(prevPlayer:)]];
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(115, 70, 85, 30) title:@"طرد الكل 💥" bg:banRed action:@selector(kickAllPlayers:)]];
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(115, 70, 85, 30) title:@"سحب الهوست 👑" bg:hostBlue action:@selector(claimHostNow:)]];
         [self.menuPanel addSubview:[self makeBtn:CGRectMake(205, 70, 100, 30) title:@"التالي ◀" bg:darkGray action:@selector(nextPlayer:)]];
 
         [self.menuPanel addSubview:[self makeBtn:CGRectMake(161, 105, 144, 32) title:@"طرد قسري فوري" bg:kickOrange action:@selector(kickSelected:)]];
         [self.menuPanel addSubview:[self makeBtn:CGRectMake(10, 105, 144, 32) title:@"طرد وحظر (Ban)" bg:banRed action:@selector(banSelected:)]];
 
-        self.hostLockButton = [self makeBtn:CGRectMake(155, 142, 150, 32) title:@"درع الهوست والطرد: مفعّل 🛡️" bg:wpnGreen action:@selector(toggleAutoHost:)];
+        self.hostLockButton = [self makeBtn:CGRectMake(155, 142, 150, 32) title:@"حماية الهوست: مفعّل 👑" bg:wpnGreen action:@selector(toggleAutoHost:)];
         [self.menuPanel addSubview:self.hostLockButton];
 
         self.muteChatButton = [self makeBtn:CGRectMake(10, 142, 140, 32) title:@"الشات: مفتوح" bg:darkGray action:@selector(cycleChatMode:)];
@@ -995,14 +941,16 @@ static uintptr_t OGSParseHexOffset(id val, uintptr_t fallback) {
         [gw addSubview:self.containerView];
         [gw bringSubviewToFront:self.containerView];
 
-        self.fastGuardTimer = [NSTimer scheduledTimerWithTimeInterval:0.05 target:self selector:@selector(onFastGuardTick) userInfo:nil repeats:YES];
+        // مؤقت متوازن (0.30 ثانية) يمنع طرد السيرفر بسبب الفيضان الشبكي
+        self.masterTimer = [NSTimer scheduledTimerWithTimeInterval:0.30 target:self selector:@selector(onMasterTick) userInfo:nil repeats:YES];
+        self.masterTimer.tolerance = 0.05;
 
         [self fetchGitHubCloudConfigWithFeedback:NO];
     });
 }
 
 // ============================================================
-// MARK: - GitHub Live Cloud Sync (al-hzmi/OGSMenu-Build-)
+// MARK: - GitHub Live Cloud Sync
 // ============================================================
 - (void)syncCloudTapped:(UIButton *)sender {
     [self fetchGitHubCloudConfigWithFeedback:YES];
@@ -1116,20 +1064,14 @@ static uintptr_t OGSParseHexOffset(id val, uintptr_t fallback) {
 }
 
 // ============================================================
-// MARK: - High-Speed Guard & UI Controls
+// MARK: - UI Controls
 // ============================================================
-static uint32_t s_uiRefreshDiv = 0;
-
-- (void)onFastGuardTick {
+- (void)onMasterTick {
+    [self ensureMenuVisible];
     OGSProcessSpeed();
     OGSUpdateRoomSnapshot();
-    if (++s_uiRefreshDiv >= 4) {
-        s_uiRefreshDiv = 0;
-        [self ensureMenuVisible];
-        if (self.menuPanel && !self.menuPanel.hidden) {
-            [self refreshUI];
-        }
-    }
+    if (!self.menuPanel || self.menuPanel.hidden) return;
+    [self refreshUI];
 }
 
 - (void)refreshUI {
@@ -1153,13 +1095,13 @@ static uint32_t s_uiRefreshDiv = 0;
     }
 
     if (gOGS.kickRetries > 0) {
-        self.statusLabel.text = @"هجوم قسري (+0x1c0): جاري طرد الهدف...";
+        self.statusLabel.text = @"جاري طرد اللاعب عبر بوابة (+0x1c0)...";
     } else if (gOGS.lastHijackerName[0] != '\0') {
         NSString *hj = [NSString stringWithUTF8String:gOGS.lastHijackerName];
-        self.statusLabel.text = [NSString stringWithFormat:@"تم صيد وطرد السارق: %@", hj ?: @""];
+        self.statusLabel.text = [NSString stringWithFormat:@"تم صيد وطرد سارق الهوست: %@", hj ?: @""];
     } else {
         self.statusLabel.text = [NSString stringWithFormat:@"%@ | بالروم: %u | المحظورين: %lu",
-                                 snapshot.inRoom ? (snapshot.isMaster ? @"الهوست: أنت 🛡️👑" : @"درع الهوست نشط 🛡️") : @"غير متصل",
+                                 snapshot.inRoom ? (snapshot.isMaster ? @"الهوست: أنت 👑" : @"متصل (حماية آمنة)") : @"غير متصل",
                                  count,
                                  (unsigned long)self.bannedNames.count];
     }
@@ -1197,26 +1139,22 @@ static uint32_t s_uiRefreshDiv = 0;
     [self refreshUI];
 }
 
-- (void)kickAllPlayers:(UIButton *)sender {
-    OGSForceClaimMaster();
-    void *players[OGS_MAX_PEERS];
-    uint32_t count = OGSReadPlayerArray(gOffsets.rvaGetPeers, players);
-    for (uint32_t i = 0; i < count; i++) {
-        OGSForceKickPeerBypassingGate(players[i]);
+- (void)claimHostNow:(UIButton *)sender {
+    void *me = OGSFindLocalPlayer();
+    if (me) {
+        OGSSetMasterRateLimited(me, true);
+        self.statusLabel.text = @"تم إرسال طلب سحب الهوست 👑";
     }
-    self.statusLabel.text = @"تم إرسال طرد قسري لجميع اللاعبين 💥";
 }
 
 - (void)toggleAutoHost:(UIButton *)s {
     gOGS.autoHostOn = !gOGS.autoHostOn;
     if (gOGS.autoHostOn) {
         gOGS.forceHostReq = 1;
-        OGSForceClaimMaster();
-        OGSUpdateRoomSnapshot();
-        [s setTitle:@"درع الهوست والطرد: مفعّل 🛡️" forState:UIControlStateNormal];
+        [s setTitle:@"حماية الهوست: مفعّل 👑" forState:UIControlStateNormal];
         s.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
     } else {
-        [s setTitle:@"درع الهوست والطرد: متوقف" forState:UIControlStateNormal];
+        [s setTitle:@"حماية الهوست: متوقف" forState:UIControlStateNormal];
         s.backgroundColor = [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
     }
     [self refreshUI];
@@ -1236,7 +1174,7 @@ static uint32_t s_uiRefreshDiv = 0;
     }
 }
 
-- (void)triggerKickForPeer:(OGSPeerSnapshot)peer {
+- (void)triggerImmediateGateBypassKick:(OGSPeerSnapshot)peer {
     gOGS.kickTargetID = peer.actorID;
     NSString *pName = [NSString stringWithUTF8String:peer.name];
     NSString *normName = OGSNormalizeKey(pName);
@@ -1244,8 +1182,20 @@ static uint32_t s_uiRefreshDiv = 0;
     if (utf8) {
         snprintf(gOGS.kickTargetName, sizeof(gOGS.kickTargetName), "%s", utf8);
     }
-    gOGS.kickRetries = 90;
-    OGSUpdateRoomSnapshot();
+    gOGS.kickRetries = 12;
+
+    // البحث عن مؤشر اللاعب وتنفيذ الطرد القسري عبر بوابة +0x1c0 فوراً لحظة الضغط
+    void *players[OGS_MAX_PEERS];
+    uint32_t count = OGSReadPlayerArray(gOffsets.rvaGetPeers, players);
+    uintptr_t idAddr = OGSResolveRVA(gOffsets.rvaPlayerGetID);
+    PlayerGetIDFn getID = (PlayerGetIDFn)idAddr;
+
+    for (uint32_t i = 0; i < count; i++) {
+        if (getID && getID(players[i], NULL) == peer.actorID) {
+            OGSKickPeerWithLocalGateBypass(players[i], true);
+            break;
+        }
+    }
 }
 
 - (void)kickSelected:(UIButton *)s {
@@ -1256,8 +1206,8 @@ static uint32_t s_uiRefreshDiv = 0;
 
     OGSPeerSnapshot peer = snapshot.peers[selected];
     NSString *pName = [NSString stringWithUTF8String:peer.name];
-    [self triggerKickForPeer:peer];
-    self.statusLabel.text = [NSString stringWithFormat:@"طرد قسري: %@", pName ?: @"اللاعب"];
+    [self triggerImmediateGateBypassKick:peer];
+    self.statusLabel.text = [NSString stringWithFormat:@"طرد قسري (+0x1c0): %@", pName ?: @"اللاعب"];
 }
 
 - (void)banSelected:(UIButton *)s {
@@ -1274,7 +1224,7 @@ static uint32_t s_uiRefreshDiv = 0;
     if (peer.actorID > 0)    [self.bannedActorIDs addObject:@(peer.actorID)];
     [self saveLocalBans];
 
-    [self triggerKickForPeer:peer];
+    [self triggerImmediateGateBypassKick:peer];
     [self refreshUI];
     self.statusLabel.text = [NSString stringWithFormat:@"تم طرد وحظر: %@", pName ?: @"اللاعب"];
 }
@@ -1348,9 +1298,6 @@ static uint32_t s_uiRefreshDiv = 0;
 
 __attribute__((constructor))
 static void ogs_init(void) {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        OGSInstallHooks();
-    });
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         OGSInstallHooks();
         [[OGSModMenu sharedInstance] setupMenu];
