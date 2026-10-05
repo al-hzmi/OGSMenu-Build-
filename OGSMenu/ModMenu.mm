@@ -12,27 +12,47 @@
 #define OGS_MAX_NAME_BYTES  128
 #define OGS_MAX_STRING_LEN  256
 
+// يمكنك وضع رابط Raw لملف ogs_config.json هنا، أو لصقه من داخل اللعبة عند الضغط على زر 🔄
+static NSString * const kDefaultGitHubConfigURL = @"";
+
 // ============================================================
-// MARK: - Engine Addresses
+// MARK: - Dynamic Engine Offsets (Default Fallback + Cloud Updatable)
 // ============================================================
-static const uintptr_t TBL_CASH_UPDATE      = 0x23918b8; // Type4640::Update
-static const uintptr_t TBL_CHAT_UPDATE      = 0x238fd68; // Type4635::Update
-static const uintptr_t TBL_SEND_CHAT_REMOTE = 0x238fd80; // Type4635::SendChatRemote
-static const uintptr_t RVA_SET_TIMESCALE    = 0x198ac4c; // Time::set_timeScale
+typedef struct {
+    uintptr_t tblCashUpdate;
+    uintptr_t tblChatUpdate;
+    uintptr_t tblSendChatRemote;
+    uintptr_t rvaSetTimescale;
+    uintptr_t rvaInRoom;
+    uintptr_t rvaIsMaster;
+    uintptr_t rvaGetMasterPeer;
+    uintptr_t rvaAllPlayers;
+    uintptr_t rvaGetPeers;
+    uintptr_t rvaPlayerGetName;
+    uintptr_t rvaPlayerGetID;
+    uintptr_t rvaArabicFix;
+    uintptr_t tblPeerSync;
+    uintptr_t tblSetMaster;
+    uintptr_t tblOnDisconnect;
+} OGSOffsetsConfig;
 
-static const uintptr_t RVA_IN_ROOM          = 0x013CC38C; // PhotonNetwork::get_inRoom()
-static const uintptr_t RVA_IS_MASTER        = 0x013CC2BC; // PhotonNetwork::get_isMasterClient()
-static const uintptr_t RVA_GET_MASTER_PEER  = 0x013CACA4; // PhotonNetwork::get_masterClient()
-static const uintptr_t RVA_ALL_PLAYERS      = 0x013CAEC4; // PhotonNetwork::get_playerList()
-static const uintptr_t RVA_GET_PEERS        = 0x013CAF78; // PhotonNetwork::get_otherPlayers()
-
-static const uintptr_t RVA_PLAYER_GET_NAME  = 0x013D7534; // PhotonPlayer::get_name()
-static const uintptr_t RVA_PLAYER_GET_ID    = 0x013CC384; // PhotonPlayer::get_ID()
-static const uintptr_t RVA_ARABIC_FIX       = 0x0130F538; // Type4294::Fix
-
-static const uintptr_t TBL_PEER_SYNC        = 0x2390a98;  // CloseConnection(PhotonPlayer)
-static const uintptr_t TBL_SET_MASTER       = 0x2390aa0;  // SetMasterClient(PhotonPlayer)
-static const uintptr_t TBL_ON_DISCONNECT    = 0x2391930;  // OnPhotonPlayerDisconnected(PhotonPlayer)
+static OGSOffsetsConfig gOffsets = {
+    .tblCashUpdate     = 0x23918b8, // Type4640::Update
+    .tblChatUpdate     = 0x238fd68, // Type4635::Update
+    .tblSendChatRemote = 0x238fd80, // Type4635::SendChatRemote
+    .rvaSetTimescale   = 0x198ac4c, // Time::set_timeScale
+    .rvaInRoom         = 0x013CC38C, // PhotonNetwork::get_inRoom()
+    .rvaIsMaster       = 0x013CC2BC, // PhotonNetwork::get_isMasterClient()
+    .rvaGetMasterPeer  = 0x013CACA4, // PhotonNetwork::get_masterClient()
+    .rvaAllPlayers     = 0x013CAEC4, // PhotonNetwork::get_playerList()
+    .rvaGetPeers       = 0x013CAF78, // PhotonNetwork::get_otherPlayers()
+    .rvaPlayerGetName  = 0x013D7534, // PhotonPlayer::get_name()
+    .rvaPlayerGetID    = 0x013CC384, // PhotonPlayer::get_ID()
+    .rvaArabicFix      = 0x0130F538, // Type4294::Fix
+    .tblPeerSync       = 0x2390a98,  // CloseConnection(PhotonPlayer)
+    .tblSetMaster      = 0x2390aa0,  // SetMasterClient(PhotonPlayer)
+    .tblOnDisconnect    = 0x2391930   // OnPhotonPlayerDisconnected(PhotonPlayer)
+};
 
 // ============================================================
 // MARK: - Function Signatures
@@ -71,23 +91,25 @@ typedef struct {
     volatile int32_t  kickTargetID;
     volatile int32_t  kickRetries;
     char              kickTargetName[OGS_MAX_NAME_BYTES];
+    char              customKickPhrase[OGS_MAX_NAME_BYTES];
 } OGSRuntimeState;
 
 static OGSRuntimeState gOGS = {
-    .inRoom         = false,
-    .isMaster       = false,
-    .selectedPeer   = 0,
-    .gameSpeed      = 1.0f,
-    .speedDirty     = false,
-    .generation     = 0,
-    .readFailures   = 0,
-    .autoHostOn     = 1,
-    .chatMode       = 0,
-    .kickMsgArmed   = 0,
-    .forceHostReq   = 0,
-    .kickTargetID   = -1,
-    .kickRetries    = 0,
-    .kickTargetName = {0}
+    .inRoom           = false,
+    .isMaster         = false,
+    .selectedPeer     = 0,
+    .gameSpeed        = 1.0f,
+    .speedDirty       = false,
+    .generation       = 0,
+    .readFailures     = 0,
+    .autoHostOn       = 1,
+    .chatMode         = 0,
+    .kickMsgArmed     = 0,
+    .forceHostReq     = 0,
+    .kickTargetID     = -1,
+    .kickRetries      = 0,
+    .kickTargetName   = {0},
+    .customKickPhrase = " تم طرده من الغرفة "
 };
 
 // ============================================================
@@ -224,8 +246,8 @@ static bool OGSReadPeer(void *peer, void *master, OGSPeerSnapshot *output) {
     memset(output, 0, sizeof(*output));
     output->isHost = (peer == master);
 
-    uintptr_t idAddress   = OGSResolveRVA(RVA_PLAYER_GET_ID);
-    uintptr_t nameAddress = OGSResolveRVA(RVA_PLAYER_GET_NAME);
+    uintptr_t idAddress   = OGSResolveRVA(gOffsets.rvaPlayerGetID);
+    uintptr_t nameAddress = OGSResolveRVA(gOffsets.rvaPlayerGetName);
     if (!idAddress || !nameAddress) return false;
 
     PlayerGetIDFn getID     = (PlayerGetIDFn)idAddress;
@@ -250,7 +272,7 @@ static uint32_t OGSReadPlayerArray(uintptr_t listRVA, void *output[OGS_MAX_PEERS
     if (!output) return 0;
     memset(output, 0, sizeof(void *) * OGS_MAX_PEERS);
 
-    uintptr_t inRoomAddress = OGSResolveRVA(RVA_IN_ROOM);
+    uintptr_t inRoomAddress = OGSResolveRVA(gOffsets.rvaInRoom);
     uintptr_t listAddress   = OGSResolveRVA(listRVA);
     if (!inRoomAddress || !listAddress) return 0;
 
@@ -281,14 +303,14 @@ static uint32_t OGSReadPlayerArray(uintptr_t listRVA, void *output[OGS_MAX_PEERS
 // ============================================================
 static void *OGSFindLocalPlayer(void) {
     void *allPeers[OGS_MAX_PEERS];
-    uint32_t allCount = OGSReadPlayerArray(RVA_ALL_PLAYERS, allPeers);
+    uint32_t allCount = OGSReadPlayerArray(gOffsets.rvaAllPlayers, allPeers);
     if (allCount == 0) return NULL;
 
     void *otherPeers[OGS_MAX_PEERS];
-    uint32_t otherCount = OGSReadPlayerArray(RVA_GET_PEERS, otherPeers);
+    uint32_t otherCount = OGSReadPlayerArray(gOffsets.rvaGetPeers, otherPeers);
     if (otherCount == 0) return allPeers[0];
 
-    uintptr_t idAddress = OGSResolveRVA(RVA_PLAYER_GET_ID);
+    uintptr_t idAddress = OGSResolveRVA(gOffsets.rvaPlayerGetID);
     PlayerGetIDFn getID = (PlayerGetIDFn)idAddress;
 
     for (uint32_t i = 0; i < allCount; i++) {
@@ -306,7 +328,7 @@ static void *OGSFindLocalPlayer(void) {
 
 static void OGSSetMaster(void *playerObj) {
     if (!playerObj) return;
-    uintptr_t slotAddr = OGSResolveRVA(TBL_SET_MASTER);
+    uintptr_t slotAddr = OGSResolveRVA(gOffsets.tblSetMaster);
     void *fnPtr = NULL;
     if (OGSReadPointer(slotAddr, &fnPtr) && fnPtr) {
         ((PeerAction1Fn)fnPtr)(playerObj, NULL);
@@ -316,7 +338,7 @@ static void OGSSetMaster(void *playerObj) {
 static void OGSCloseConnRaw(void *peerObj) {
     if (!peerObj) return;
     gOGS.kickMsgArmed = 1;
-    uintptr_t slotAddr = OGSResolveRVA(TBL_PEER_SYNC);
+    uintptr_t slotAddr = OGSResolveRVA(gOffsets.tblPeerSync);
     void *fnPtr = NULL;
     if (OGSReadPointer(slotAddr, &fnPtr) && fnPtr) {
         ((PeerAction1Fn)fnPtr)(peerObj, NULL);
@@ -335,7 +357,7 @@ static void OGSRequestSpeed(float speed) {
 
 static void OGSProcessSpeed(void) {
     if (!__atomic_exchange_n(&gOGS.speedDirty, false, __ATOMIC_ACQ_REL)) return;
-    uintptr_t address = OGSResolveRVA(RVA_SET_TIMESCALE);
+    uintptr_t address = OGSResolveRVA(gOffsets.rvaSetTimescale);
     if (!address) return;
     float speed = gOGS.gameSpeed;
     SetTime1Fn setTime = (SetTime1Fn)address;
@@ -362,8 +384,10 @@ static void OGSProcessSpeed(void) {
 @property (strong, nonatomic) OGSPassthroughContainer *containerView;
 @property (strong, nonatomic) UIButton *floatingButton;
 @property (strong, nonatomic) UIView *menuPanel;
+@property (strong, nonatomic) UILabel *titleLabel;
 @property (strong, nonatomic) UILabel *playerLabel;
 @property (strong, nonatomic) UILabel *statusLabel;
+@property (strong, nonatomic) UIButton *syncCloudButton;
 @property (strong, nonatomic) UIButton *unbanButton;
 @property (strong, nonatomic) UIButton *lockButton;
 @property (strong, nonatomic) UIButton *hostLockButton;
@@ -377,6 +401,7 @@ static void OGSProcessSpeed(void) {
 + (instancetype)sharedInstance;
 - (void)setupMenu;
 - (void)ensureMenuVisible;
+- (void)fetchGitHubCloudConfigWithPromptIfNeeded:(BOOL)promptIfEmpty;
 - (BOOL)shouldAutoKickPeerWithName:(NSString *)normName actorID:(int32_t)actID;
 @end
 
@@ -388,9 +413,9 @@ static volatile bool s_inSnapshotUpdate = false;
 static void OGSUpdateRoomSnapshot(void) {
     if (__atomic_exchange_n(&s_inSnapshotUpdate, true, __ATOMIC_ACQ_REL)) return;
 
-    uintptr_t inRoomAddress       = OGSResolveRVA(RVA_IN_ROOM);
-    uintptr_t masterStateAddress  = OGSResolveRVA(RVA_IS_MASTER);
-    uintptr_t masterPlayerAddress = OGSResolveRVA(RVA_GET_MASTER_PEER);
+    uintptr_t inRoomAddress       = OGSResolveRVA(gOffsets.rvaInRoom);
+    uintptr_t masterStateAddress  = OGSResolveRVA(gOffsets.rvaIsMaster);
+    uintptr_t masterPlayerAddress = OGSResolveRVA(gOffsets.rvaGetMasterPeer);
 
     if (!inRoomAddress || !masterStateAddress || !masterPlayerAddress) {
         __atomic_store_n(&s_inSnapshotUpdate, false, __ATOMIC_RELEASE);
@@ -432,7 +457,7 @@ static void OGSUpdateRoomSnapshot(void) {
     __atomic_store_n(&gOGS.isMaster, master, __ATOMIC_RELEASE);
 
     void *players[OGS_MAX_PEERS];
-    uint32_t count = OGSReadPlayerArray(RVA_GET_PEERS, players);
+    uint32_t count = OGSReadPlayerArray(gOffsets.rvaGetPeers, players);
     OGSModMenu *menu = [OGSModMenu sharedInstance];
     bool targetStillInRoom = false;
 
@@ -499,8 +524,11 @@ static void *OGSCreateFreshKickString(void *templateIl2CppStr) {
         }
     }
 
-    NSString *kickPhrase = @" تم طرده من الغرفة ";
+    NSString *kickPhrase = [NSString stringWithUTF8String:gOGS.customKickPhrase];
+    if (!kickPhrase.length) kickPhrase = @" تم طرده من الغرفة ";
     NSUInteger len = kickPhrase.length;
+    if (len > 90) len = 90;
+
     static uint8_t s_rawStrBuf[256] = {0};
     memset(s_rawStrBuf, 0, sizeof(s_rawStrBuf));
     memcpy(s_rawStrBuf, header, 16);
@@ -508,7 +536,7 @@ static void *OGSCreateFreshKickString(void *templateIl2CppStr) {
     [kickPhrase getCharacters:(unichar *)(s_rawStrBuf + 0x14) range:NSMakeRange(0, len)];
 
     if (origIsPreFixed) {
-        uintptr_t fixAddr = OGSResolveRVA(RVA_ARABIC_FIX);
+        uintptr_t fixAddr = OGSResolveRVA(gOffsets.rvaArabicFix);
         if (fixAddr) {
             void *fixed = ((ArabicFixFn)fixAddr)(s_rawStrBuf, NULL);
             if (fixed) return fixed;
@@ -575,14 +603,24 @@ static void hook_CashUpdate(void *self, void *method) {
 static void OGSInstallHooks(void) {
     uintptr_t base = OGSFindGameImage();
     if (!base) return;
-    if (TBL_CASH_UPDATE)      { void **sl = (void **)(base + TBL_CASH_UPDATE);      orig_CashUpdate     = (Update0Fn)*sl;        *sl = (void *)&hook_CashUpdate; }
-    if (TBL_CHAT_UPDATE)      { void **sl = (void **)(base + TBL_CHAT_UPDATE);      orig_ChatUpdate     = (Update0Fn)*sl;        *sl = (void *)&hook_ChatUpdate; }
-    if (TBL_SEND_CHAT_REMOTE) { void **sl = (void **)(base + TBL_SEND_CHAT_REMOTE); orig_SendChatRemote = (SendChatRemoteFn)*sl; *sl = (void *)&hook_SendChatRemote; }
-    if (TBL_ON_DISCONNECT)    { void **sl = (void **)(base + TBL_ON_DISCONNECT);    orig_OnDisconnect   = (OnDisconnectFn)*sl;   *sl = (void *)&hook_OnPhotonPlayerDisconnected; }
+    if (gOffsets.tblCashUpdate)     { void **sl = (void **)(base + gOffsets.tblCashUpdate);     if (*sl != (void *)&hook_CashUpdate)     { orig_CashUpdate     = (Update0Fn)*sl;        *sl = (void *)&hook_CashUpdate; } }
+    if (gOffsets.tblChatUpdate)     { void **sl = (void **)(base + gOffsets.tblChatUpdate);     if (*sl != (void *)&hook_ChatUpdate)     { orig_ChatUpdate     = (Update0Fn)*sl;        *sl = (void *)&hook_ChatUpdate; } }
+    if (gOffsets.tblSendChatRemote) { void **sl = (void **)(base + gOffsets.tblSendChatRemote); if (*sl != (void *)&hook_SendChatRemote) { orig_SendChatRemote = (SendChatRemoteFn)*sl; *sl = (void *)&hook_SendChatRemote; } }
+    if (gOffsets.tblOnDisconnect)   { void **sl = (void **)(base + gOffsets.tblOnDisconnect);   if (*sl != (void *)&hook_OnPhotonPlayerDisconnected) { orig_OnDisconnect = (OnDisconnectFn)*sl; *sl = (void *)&hook_OnPhotonPlayerDisconnected; } }
+}
+
+static uintptr_t OGSParseHexOffset(id val, uintptr_t fallback) {
+    if ([val isKindOfClass:[NSNumber class]]) return (uintptr_t)[val unsignedLongLongValue];
+    if ([val isKindOfClass:[NSString class]]) {
+        unsigned long long outVal = 0;
+        NSScanner *scanner = [NSScanner scannerWithString:(NSString *)val];
+        if ([scanner scanHexLongLong:&outVal] && outVal > 0) return (uintptr_t)outVal;
+    }
+    return fallback;
 }
 
 // ============================================================
-// MARK: - ModMenu UI Implementation
+// MARK: - ModMenu UI & Live Cloud Config Implementation
 // ============================================================
 @implementation OGSModMenu
 + (instancetype)sharedInstance {
@@ -593,8 +631,15 @@ static void OGSInstallHooks(void) {
         inst.bannedNames = [NSMutableSet set];
         inst.bannedActorIDs = [NSMutableSet set];
         inst.allowedNamesWhenLocked = [NSMutableSet set];
+        NSArray *savedBans = [[NSUserDefaults standardUserDefaults] stringArrayForKey:@"OGS_SavedBannedNames"];
+        if (savedBans) [inst.bannedNames addObjectsFromArray:savedBans];
     });
     return inst;
+}
+
+- (void)saveLocalBans {
+    [[NSUserDefaults standardUserDefaults] setObject:self.bannedNames.allObjects forKey:@"OGS_SavedBannedNames"];
+    [[NSUserDefaults standardUserDefaults] synchronize];
 }
 
 - (BOOL)shouldAutoKickPeerWithName:(NSString *)normName actorID:(int32_t)actID {
@@ -630,7 +675,6 @@ static void OGSInstallHooks(void) {
     return b;
 }
 
-// حارس ظهور الزر: يعيد الزر لأعلى الشاشة دائماً حتى لو غيرت اللعبة النافذة أو المشهد
 - (void)ensureMenuVisible {
     UIWindow *gw = [self gameMainWindow];
     if (!gw || !self.containerView) return;
@@ -678,12 +722,19 @@ static void OGSInstallHooks(void) {
         self.menuPanel.layer.borderColor = [UIColor systemRedColor].CGColor;
         self.menuPanel.hidden = YES;
 
-        UILabel *tl = [[UILabel alloc] initWithFrame:CGRectMake(10, 5, 295, 18)];
-        tl.text = @"OGS v8.1: الهوست + الطرد المؤكد + الشات + السرعة";
-        tl.textColor = [UIColor whiteColor];
-        tl.textAlignment = NSTextAlignmentCenter;
-        tl.font = [UIFont boldSystemFontOfSize:11.5];
-        [self.menuPanel addSubview:tl];
+        self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 5, 260, 18)];
+        self.titleLabel.text = @"OGS v9: الهوست + الطرد + الشات + سحابي";
+        self.titleLabel.textColor = [UIColor whiteColor];
+        self.titleLabel.textAlignment = NSTextAlignmentCenter;
+        self.titleLabel.font = [UIFont boldSystemFontOfSize:11.0];
+        [self.menuPanel addSubview:self.titleLabel];
+
+        // زر التحديث الهوائي المباشر من GitHub (🔄)
+        self.syncCloudButton = [self makeBtn:CGRectMake(273, 3, 32, 21)
+                                       title:@"🔄"
+                                          bg:[UIColor colorWithRed:0.18 green:0.45 blue:0.75 alpha:1.0]
+                                      action:@selector(syncCloudTapped:)];
+        [self.menuPanel addSubview:self.syncCloudButton];
 
         UIView *infoBox = [[UIView alloc] initWithFrame:CGRectMake(10, 25, 295, 40)];
         infoBox.backgroundColor = [UIColor colorWithRed:0.16 green:0.17 blue:0.20 alpha:1.0];
@@ -741,9 +792,149 @@ static void OGSInstallHooks(void) {
 
         self.masterTimer = [NSTimer scheduledTimerWithTimeInterval:0.40 target:self selector:@selector(onMasterTick) userInfo:nil repeats:YES];
         self.masterTimer.tolerance = 0.08;
+
+        // جلب التحديث السحابي تلقائياً عند التشغيل إن وجد رابط محفوظ
+        [self fetchGitHubCloudConfigWithPromptIfNeeded:NO];
     });
 }
 
+// ============================================================
+// MARK: - GitHub Live Cloud Sync (No Re-signing Needed)
+// ============================================================
+- (NSString *)currentCloudURL {
+    NSString *saved = [[NSUserDefaults standardUserDefaults] stringForKey:@"OGS_GitHubConfigURL"];
+    if (saved.length > 8) return saved;
+    if (kDefaultGitHubConfigURL.length > 8) return kDefaultGitHubConfigURL;
+    return nil;
+}
+
+- (void)promptForCloudURL {
+    UIWindow *gw = [self gameMainWindow];
+    UIViewController *rootVC = gw.rootViewController;
+    if (!rootVC) return;
+
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"ربط التحديث المباشر من GitHub"
+                                                                   message:@"الصق رابط Raw لملف ogs_config.json في مستودعك لتحديث الإعدادات والمحظورين والعناوين فوراً بدون إعادة توقيع:"
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+        tf.placeholder = @"https://raw.githubusercontent.com/.../ogs_config.json";
+        tf.text = [self currentCloudURL] ?: @"";
+        tf.keyboardType = UIKeyboardTypeURL;
+    }];
+    [alert addAction:[UIAlertAction actionWithTitle:@"حفظ وتحديث الآن 🔄" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        NSString *urlStr = [alert.textFields.firstObject.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (urlStr.length > 8) {
+            [[NSUserDefaults standardUserDefaults] setObject:urlStr forKey:@"OGS_GitHubConfigURL"];
+            [[NSUserDefaults standardUserDefaults] synchronize];
+            [self fetchGitHubCloudConfigWithPromptIfNeeded:NO];
+        }
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"إلغاء" style:UIAlertActionStyleCancel handler:nil]];
+    [rootVC presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)syncCloudTapped:(UIButton *)sender {
+    if (![self currentCloudURL]) {
+        [self promptForCloudURL];
+        return;
+    }
+    [self fetchGitHubCloudConfigWithPromptIfNeeded:YES];
+}
+
+- (void)fetchGitHubCloudConfigWithPromptIfNeeded:(BOOL)showFeedback {
+    NSString *baseUrl = [self currentCloudURL];
+    if (!baseUrl) return;
+
+    // إضافة timestamp لكسر كاش GitHub Raw وضمان جلب التعديل في نفس الثانية
+    NSString *sep = [baseUrl containsString:@"?"] ? @"&" : @"?";
+    NSString *bustUrl = [NSString stringWithFormat:@"%@%@t=%lld", baseUrl, sep, (long long)([[NSDate date] timeIntervalSince1970] * 1000)];
+    NSURL *url = [NSURL URLWithString:bustUrl];
+    if (!url) {
+        if (showFeedback) [self promptForCloudURL];
+        return;
+    }
+
+    if (showFeedback) {
+        self.statusLabel.text = @"جاري جلب التحديث من GitHub...";
+    }
+
+    NSURLRequest *req = [NSURLRequest requestWithURL:url cachePolicy:NSURLRequestReloadIgnoringLocalAndRemoteCacheData timeoutInterval:8.0];
+    [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (error || !data) {
+                if (showFeedback) self.statusLabel.text = @"تعذر الاتصال بـ GitHub (تأكد من الرابط)";
+                return;
+            }
+            NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            if (![json isKindOfClass:[NSDictionary class]]) {
+                if (showFeedback) self.statusLabel.text = @"صيغة ملف JSON غير صحيحة";
+                return;
+            }
+            [self applyCloudConfigDictionary:json];
+            if (showFeedback) {
+                self.statusLabel.text = @"تم التحديث من GitHub بنجاح ✅";
+            }
+        });
+    }] resume];
+}
+
+- (void)applyCloudConfigDictionary:(NSDictionary *)json {
+    if ([json[@"menu_title"] isKindOfClass:[NSString class]]) {
+        self.titleLabel.text = json[@"menu_title"];
+    }
+    if ([json[@"kick_message"] isKindOfClass:[NSString class]]) {
+        const char *utf8 = [json[@"kick_message"] UTF8String];
+        if (utf8) snprintf(gOGS.customKickPhrase, sizeof(gOGS.customKickPhrase), "%s", utf8);
+    }
+    if ([json[@"panel_width"] isKindOfClass:[NSNumber class]] && [json[@"panel_height"] isKindOfClass:[NSNumber class]]) {
+        CGFloat w = [json[@"panel_width"] floatValue];
+        CGFloat h = [json[@"panel_height"] floatValue];
+        if (w >= 260 && w <= 420 && h >= 200 && h <= 360) {
+            CGRect f = self.menuPanel.frame;
+            f.size = CGSizeMake(w, h);
+            self.menuPanel.frame = f;
+        }
+    }
+    if ([json[@"default_speed"] isKindOfClass:[NSNumber class]]) {
+        [self applySpeed:[json[@"default_speed"] floatValue]];
+    }
+    if ([json[@"banned_names"] isKindOfClass:[NSArray class]]) {
+        for (id item in (NSArray *)json[@"banned_names"]) {
+            if ([item isKindOfClass:[NSString class]]) {
+                NSString *norm = OGSNormalizeKey(item);
+                if (norm.length > 0) [self.bannedNames addObject:norm];
+            }
+        }
+        [self saveLocalBans];
+    }
+    if ([json[@"banned_ids"] isKindOfClass:[NSArray class]]) {
+        for (id item in (NSArray *)json[@"banned_ids"]) {
+            if ([item isKindOfClass:[NSNumber class]]) {
+                [self.bannedActorIDs addObject:item];
+            }
+        }
+    }
+    if ([json[@"offsets"] isKindOfClass:[NSDictionary class]]) {
+        NSDictionary *off = json[@"offsets"];
+        gOffsets.rvaInRoom         = OGSParseHexOffset(off[@"rva_in_room"], gOffsets.rvaInRoom);
+        gOffsets.rvaIsMaster       = OGSParseHexOffset(off[@"rva_is_master"], gOffsets.rvaIsMaster);
+        gOffsets.rvaGetMasterPeer  = OGSParseHexOffset(off[@"rva_get_master_peer"], gOffsets.rvaGetMasterPeer);
+        gOffsets.rvaAllPlayers     = OGSParseHexOffset(off[@"rva_all_players"], gOffsets.rvaAllPlayers);
+        gOffsets.rvaGetPeers       = OGSParseHexOffset(off[@"rva_get_peers"], gOffsets.rvaGetPeers);
+        gOffsets.rvaPlayerGetName  = OGSParseHexOffset(off[@"rva_player_get_name"], gOffsets.rvaPlayerGetName);
+        gOffsets.rvaPlayerGetID    = OGSParseHexOffset(off[@"rva_player_get_id"], gOffsets.rvaPlayerGetID);
+        gOffsets.rvaSetTimescale   = OGSParseHexOffset(off[@"rva_set_timescale"], gOffsets.rvaSetTimescale);
+        gOffsets.tblPeerSync       = OGSParseHexOffset(off[@"tbl_peer_sync"], gOffsets.tblPeerSync);
+        gOffsets.tblSetMaster      = OGSParseHexOffset(off[@"tbl_set_master"], gOffsets.tblSetMaster);
+        gOffsets.tblOnDisconnect   = OGSParseHexOffset(off[@"tbl_on_disconnect"], gOffsets.tblOnDisconnect);
+        OGSInstallHooks();
+    }
+    [self refreshUI];
+}
+
+// ============================================================
+// MARK: - Standard Controls
+// ============================================================
 - (void)onMasterTick {
     [self ensureMenuVisible];
     OGSUpdateRoomSnapshot();
@@ -876,6 +1067,7 @@ static void OGSInstallHooks(void) {
 
     if (normName.length > 0) [self.bannedNames addObject:normName];
     if (peer.actorID > 0)    [self.bannedActorIDs addObject:@(peer.actorID)];
+    [self saveLocalBans];
 
     [self triggerKickForPeer:peer];
     [self refreshUI];
@@ -906,6 +1098,7 @@ static void OGSInstallHooks(void) {
 - (void)clearBanList:(UIButton *)s {
     [self.bannedNames removeAllObjects];
     [self.bannedActorIDs removeAllObjects];
+    [self saveLocalBans];
     [self refreshUI];
     self.statusLabel.text = @"تم مسح قائمة المحظورين بالكامل";
 }
@@ -941,6 +1134,9 @@ static void OGSInstallHooks(void) {
     [alert addAction:[UIAlertAction actionWithTitle:@"تطبيق" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
         float val = [alert.textFields.firstObject.text floatValue];
         if (val >= 0.0f && val <= 20.0f) [self applySpeed:val];
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"تغيير رابط GitHub 🔄" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        [self promptForCloudURL];
     }]];
     [alert addAction:[UIAlertAction actionWithTitle:@"إلغاء" style:UIAlertActionStyleCancel handler:nil]];
     [rootVC presentViewController:alert animated:YES completion:nil];
