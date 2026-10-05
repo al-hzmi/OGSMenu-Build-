@@ -6,36 +6,24 @@
 #include <stdlib.h>
 
 // جداول وعناوين اللعب الأساسية
-static const uintptr_t TBL_CASH_UPDATE       = 0x23918b8;
-static const uintptr_t TBL_GET_DMG           = 0x2391388;
-static const uintptr_t TBL_WPN_HOOK          = 0x238ea10;
-static const uintptr_t RVA_REFILL_AMMO       = 0x1382c10;
-static const uintptr_t RVA_SET_TIMESCALE     = 0x198ac4c;
+static const uintptr_t TBL_CASH_UPDATE       = 0x23918b8; // Type4640::Update
+static const uintptr_t TBL_GET_DMG           = 0x2391388; // الدمج 999
+static const uintptr_t TBL_WPN_HOOK          = 0x238ea10; // السلاح
+static const uintptr_t RVA_REFILL_AMMO       = 0x1382c10; // الذخيرة
+static const uintptr_t RVA_SET_TIMESCALE     = 0x198ac4c; // السرعة
 
-// عناوين الأسلحة وقنبلة الشنطة C4 (Type 4720)
-static const uintptr_t RVA_SWITCH_WEAPON     = 0x013EAA78; // Type4720::SwitchWeapon
-static const uintptr_t RVA_GET_WPN_SELECT    = 0x013EBD90; // Type4720::GetWeaponToSelect
-static const uintptr_t RVA_SWITCH_C4         = 0x013EC1AC; // Type4720::SwitchWeaponC4
-static const uintptr_t RVA_SWITCH_GRENADE    = 0x013EC238; // Type4720::SwitchWeaponGrenade
-static const uintptr_t RVA_SWITCH_C4_SHOW    = 0x013EC350; // Type4720::SwitchWeaponC4Show
+// جداول الشات (Type 4635) - تعمل باستمرار داخل الروم على خيط UnityMain
+static const uintptr_t TBL_CHAT_UPDATE       = 0x238fd68; // Type4635::Update
+static const uintptr_t TBL_SEND_CHAT_REMOTE  = 0x238fd80; // Type4635::SendChatRemote
 
-// عناوين وجداول الشات (Type 4635)
-static const uintptr_t TBL_CHAT_UPDATE       = 0x238fd68;  // Type4635::Update
-static const uintptr_t TBL_SEND_CHAT_REMOTE  = 0x238fd80;  // Type4635::SendChatRemote
-static const uintptr_t RVA_SEND_CHAT         = 0x013A8C68; // Type4635::SendChat
-
-// عناوين PhotonNetwork و PhotonPlayer
+// عناوين PhotonNetwork (تُستدعى حصرياً من خيط UnityMain لمنع الكراش)
 static const uintptr_t RVA_IN_ROOM           = 0x013CC38C; // PhotonNetwork::get_inRoom()
 static const uintptr_t RVA_IS_MASTER         = 0x013CC2BC; // PhotonNetwork::get_isMasterClient()
 static const uintptr_t RVA_GET_MASTER_PEER   = 0x013CACA4; // PhotonNetwork::get_masterClient()
 static const uintptr_t RVA_ALL_PLAYERS       = 0x013CAEC4; // PhotonNetwork::get_playerList()
 static const uintptr_t RVA_GET_PEERS         = 0x013CAF78; // PhotonNetwork::get_otherPlayers()
-
 static const uintptr_t RVA_PLAYER_GET_NAME   = 0x013D7534; // PhotonPlayer::get_name()
-static const uintptr_t RVA_PLAYER_GET_USERID = 0x013D692C; // PhotonPlayer::get_UserId()
-static const uintptr_t RVA_PLAYER_GET_ID     = 0x013CC384; // PhotonPlayer::get_ID()
-static const uintptr_t RVA_PLAYER_IS_MASTER  = 0x013D305C; // PhotonPlayer::get_IsMasterClient()
-static const uintptr_t RVA_ARABIC_FIX        = 0x0130F538; // Type4294::Fix(Il2CppString*)
+static const uintptr_t RVA_ARABIC_FIX        = 0x0130F538; // Type4294::Fix
 
 static const uintptr_t TBL_PEER_SYNC         = 0x2390a98;  // CloseConnection(PhotonPlayer)
 static const uintptr_t TBL_SET_MASTER        = 0x2390aa0;  // SetMasterClient(PhotonPlayer)
@@ -46,21 +34,11 @@ typedef void    (*Refill0Fn)(void *, void *);
 typedef int32_t (*GetDMG2Fn)(void *, uintptr_t, uintptr_t, void *, double, double, double);
 typedef void    (*WpnHookFn)(void *, uintptr_t, uintptr_t, uintptr_t, void *, double, double, double, double);
 typedef void    (*SetTime1Fn)(float, void *);
-
-typedef void    (*SwitchWpnFn)(void *, void *, int32_t, void *);
-typedef void*   (*GetWpnSelectFn)(void *, void *);
-typedef void    (*SwitchC4Fn)(void *, void *);
-typedef void    (*SwitchC4ShowFn)(void *, int32_t, void *);
-
-typedef void    (*SendChatFn)(void *, void *, void *, int32_t, int32_t, void *);
 typedef void    (*SendChatRemoteFn)(void *, void *, void *, int32_t, int32_t, void *);
 
 typedef bool    (*DiagBool0Fn)(void *);
 typedef void*   (*DiagGetPeers0Fn)(void *);
 typedef bool    (*DiagPeerSync1Fn)(void *, void *);
-typedef void*   (*PlayerGetStrFn)(void *, void *);
-typedef int32_t (*PlayerGetIDFn)(void *, void *);
-typedef bool    (*PlayerIsMasterFn)(void *, void *);
 typedef void*   (*ArabicFixFn)(void *, void *);
 typedef void    (*OnDisconnectFn)(void *, void *, void *);
 
@@ -70,24 +48,34 @@ static SendChatRemoteFn orig_SendChatRemote = NULL;
 static GetDMG2Fn        orig_GetDMG         = NULL;
 static WpnHookFn        orig_WpnHook        = NULL;
 static OnDisconnectFn   orig_OnDisconnect   = NULL;
-static SwitchWpnFn      orig_SwitchWeapon   = NULL;
-static GetWpnSelectFn   orig_GetWpnSelect   = NULL;
 
+// ذاكرة وسيطة آمنة (Thread-Safe Cache) تفصل واجهة الأزرار عن خيط اللعبة تماماً
+typedef struct {
+    void *peerPtr;
+    int32_t actorID;
+    bool isHost;
+    char nameUTF8[128];
+} OGSPeerEntry;
+
+static OGSPeerEntry      g_peerCache[64];
+static volatile uint32_t g_cached_count    = 0;
+static volatile int32_t  g_cached_in_room  = 0;
+static volatile int32_t  g_cached_is_host  = 0;
 static volatile uint32_t g_selected_peer   = 0;
-static volatile int32_t  g_auto_host_on    = 1; // احتكار الهوست وطرد السارق مفعّل تلقائياً
-static volatile int32_t  g_chat_mode       = 0; // 0 = عادي | 1 = كتم عندي | 2 = طرد أي شخص يكتب
-static volatile int32_t  g_wpn_mode        = 1; // 1 = دمج 999 | 2 = قنبلة C4 + دمج 999 | 3 = قنابل + دمج 999 | 0 = عادي
-static volatile int32_t  g_c4_trigger      = 0;
+
+// أوامر تُرسل من الواجهة وتُنفذ بأمان داخل خيط UnityMain
+// 1 = طرد المحدد | 2 = سحب الهوست لنفسي
+static volatile int32_t  g_pending_cmd     = 0;
+static void * volatile   g_pending_target  = NULL;
+
+static volatile int32_t  g_auto_host_on    = 1; // حماية الهوست وطرد السارق
+static volatile int32_t  g_chat_mode       = 0; // 0 = مفتوح | 1 = كتم الشات | 2 = طرد من يكتب
+static volatile int32_t  g_super_weapon_on = 1; // دمج 999 + ذخيرة لا نهائية
 static volatile float    g_custom_speed    = 1.0f;
 static volatile int32_t  g_speed_dirty     = 0;
 static volatile int32_t  g_kick_msg_armed  = 0;
-static volatile int32_t  g_guard_tick      = 0;
-static volatile int32_t  g_host_tick       = 0;
-
-static void *g_chatInstance        = NULL;
-static void *g_wpnSwitcher         = NULL;
-static void *g_templateIl2CppStr   = NULL;
-static void *g_customKickIl2CppStr = NULL;
+static volatile int32_t  g_unity_tick      = 0;
+static void *g_customKickIl2CppStr         = NULL;
 
 static uintptr_t getSlide() {
     for (uint32_t i = 0; i < _dyld_image_count(); i++) {
@@ -97,6 +85,7 @@ static uintptr_t getSlide() {
     return _dyld_get_image_vmaddr_slide(0);
 }
 
+// قراءة محمية عبر النواة: مستحيل أن تسبب كراش حتى لو كان المؤشر تالفاً
 static bool safeReadMem(uintptr_t addr, void *buf, size_t len) {
     if (addr < 0x100000000ULL) return false;
     vm_size_t outSize = 0;
@@ -104,36 +93,69 @@ static bool safeReadMem(uintptr_t addr, void *buf, size_t len) {
     return (kr == KERN_SUCCESS && outSize == len);
 }
 
-static NSString *OGSReadIl2CppString(void *strPtr) {
+static NSString *OGSReadIl2CppStringSafe(void *strPtr) {
     if (!strPtr || (uintptr_t)strPtr < 0x100000000ULL) return nil;
+    uintptr_t klassPtr = 0;
+    if (!safeReadMem((uintptr_t)strPtr, &klassPtr, sizeof(uintptr_t)) || klassPtr < 0x100000000ULL) return nil;
+
     int32_t strLen = 0;
     if (!safeReadMem((uintptr_t)strPtr + 0x10, &strLen, sizeof(int32_t))) return nil;
-    if (strLen <= 0 || strLen > 80) return nil;
+    if (strLen <= 0 || strLen > 48) return nil;
 
-    uint16_t chars[84] = {0};
-    if (!safeReadMem((uintptr_t)strPtr + 0x14, chars, (size_t)strLen * sizeof(uint16_t))) return nil;
-    g_templateIl2CppStr = strPtr;
+    uint16_t chars[52] = {0};
+    if (!safeReadMem((uintptr_t)strPtr + 0x14, chars, (size_t)(strLen + 1) * sizeof(uint16_t))) return nil;
+    if (chars[strLen] != 0) return nil;
+
+    for (int32_t i = 0; i < strLen; i++) {
+        if (chars[i] < 0x20 || chars[i] == 0xFFFE || chars[i] == 0xFFFF) return nil;
+    }
     return [NSString stringWithCharacters:chars length:(NSUInteger)strLen];
 }
 
-static void *OGSCreateIl2CppString(NSString *nsStr) {
-    if (!nsStr) nsStr = @"";
-    if (!g_templateIl2CppStr || (uintptr_t)g_templateIl2CppStr < 0x100000000ULL) return NULL;
+// استخراج اسم اللاعب ورقمه من الذاكرة مباشرة بدون استدعاء أي دالة قد تسبب كراش
+static void OGSExtractPeerInfoSafe(void *peerObj, void *masterPeerObj, char *outNameUTF8, size_t maxLen, int32_t *outActorID, bool *outIsHost) {
+    if (outActorID) *outActorID = 0;
+    if (outIsHost)  *outIsHost = (peerObj && peerObj == masterPeerObj);
+    if (outNameUTF8 && maxLen > 0) strncpy(outNameUTF8, "لاعب", maxLen - 1);
+    if (!peerObj || (uintptr_t)peerObj < 0x100000000ULL) return;
 
-    uint8_t header[16] = {0};
-    if (!safeReadMem((uintptr_t)g_templateIl2CppStr, header, 16)) return NULL;
-
-    NSUInteger len = nsStr.length;
-    if (len > 100) len = 100;
-    uint8_t *rawObj = (uint8_t *)calloc(1, 0x14 + (len + 4) * sizeof(uint16_t));
-    if (!rawObj) return NULL;
-
-    memcpy(rawObj, header, 16);
-    *(int32_t *)(rawObj + 0x10) = (int32_t)len;
-    if (len > 0) {
-        [nsStr getCharacters:(unichar *)(rawObj + 0x14) range:NSMakeRange(0, len)];
+    uintptr_t baseObj = (uintptr_t)peerObj;
+    int32_t actorID = 0;
+    if (safeReadMem(baseObj + 0x10, &actorID, sizeof(int32_t))) {
+        if (actorID > 0 && actorID < 10000 && outActorID) {
+            *outActorID = actorID;
+        }
     }
-    return rawObj;
+
+    // معرفة إزاحة الاسم من تعليمة LDR داخل PhotonPlayer::get_name إن وجدت
+    uintptr_t base = 0x100000000ULL + getSlide();
+    uint32_t insn = 0;
+    uintptr_t dynamicOff = 0x18;
+    if (safeReadMem(base + RVA_PLAYER_GET_NAME, &insn, sizeof(uint32_t))) {
+        if ((insn & 0xFFC003FF) == 0xF9400000) {
+            uint32_t off = ((insn >> 10) & 0xFFF) * 8;
+            if (off >= 0x10 && off <= 0x50) dynamicOff = off;
+        }
+    }
+
+    const uintptr_t offsets[] = {dynamicOff, 0x18, 0x20, 0x28, 0x30, 0x38, 0x10};
+    for (size_t i = 0; i < sizeof(offsets) / sizeof(offsets[0]); i++) {
+        uintptr_t strPtr = 0;
+        if (!safeReadMem(baseObj + offsets[i], &strPtr, sizeof(uintptr_t))) continue;
+        NSString *s = OGSReadIl2CppStringSafe((void *)strPtr);
+        if (s && s.length > 0) {
+            const char *utf8 = [s UTF8String];
+            if (utf8 && outNameUTF8) {
+                strncpy(outNameUTF8, utf8, maxLen - 1);
+                outNameUTF8[maxLen - 1] = '\0';
+                return;
+            }
+        }
+    }
+
+    if (actorID > 0 && actorID < 10000 && outNameUTF8) {
+        snprintf(outNameUTF8, maxLen, "ID:%d", actorID);
+    }
 }
 
 static NSString *OGSNormalizeKey(NSString *raw) {
@@ -141,178 +163,74 @@ static NSString *OGSNormalizeKey(NSString *raw) {
     return [[raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] lowercaseString];
 }
 
-static NSString *OGSGetPlayerIdentity(void *peerObj, NSString **outBanKey, int32_t *outActorID, bool *outIsHost) {
-    if (outActorID) *outActorID = 0;
-    if (outIsHost)  *outIsHost = false;
-    if (outBanKey)  *outBanKey = @"";
-    if (!peerObj) return @"غير معروف";
-
-    uintptr_t base = 0x100000000ULL + getSlide();
-    PlayerGetIDFn getID       = (PlayerGetIDFn)(base + RVA_PLAYER_GET_ID);
-    PlayerGetStrFn getName    = (PlayerGetStrFn)(base + RVA_PLAYER_GET_NAME);
-    PlayerGetStrFn getUserId  = (PlayerGetStrFn)(base + RVA_PLAYER_GET_USERID);
-    PlayerIsMasterFn isMaster = (PlayerIsMasterFn)(base + RVA_PLAYER_IS_MASTER);
-
-    int32_t actorID = getID ? getID(peerObj, NULL) : 0;
-    if (outActorID) *outActorID = actorID;
-    if (outIsHost && isMaster) *outIsHost = isMaster(peerObj, NULL);
-
-    NSString *realName = getName ? OGSReadIl2CppString(getName(peerObj, NULL)) : nil;
-    NSString *userId   = getUserId ? OGSReadIl2CppString(getUserId(peerObj, NULL)) : nil;
-
-    if (!realName || realName.length == 0) {
-        realName = [NSString stringWithFormat:@"ID:%d", actorID];
-    }
-
-    if (outBanKey) {
-        NSString *normName = OGSNormalizeKey(realName);
-        if (userId && userId.length > 0) {
-            *outBanKey = [NSString stringWithFormat:@"%@|%@", normName, OGSNormalizeKey(userId)];
-        } else {
-            *outBanKey = normName;
-        }
-    }
-    return realName;
-}
-
-static void OGSBroadcastRoomChat(NSString *senderTitle, NSString *messageText) {
-    if (!g_chatInstance || (uintptr_t)g_chatInstance < 0x100000000ULL) return;
-
-    if (!g_templateIl2CppStr) {
-        void *existingFieldStr = NULL;
-        if (safeReadMem((uintptr_t)g_chatInstance + 0x38, &existingFieldStr, sizeof(void *)) && existingFieldStr) {
-            OGSReadIl2CppString(existingFieldStr);
-        }
-    }
-
-    void *il2cppSender = OGSCreateIl2CppString(senderTitle);
-    void *il2cppMsg    = OGSCreateIl2CppString(messageText);
-    if (!il2cppSender || !il2cppMsg) return;
-
-    int32_t w3 = 0;
-    uintptr_t obj128 = 0;
-    if (safeReadMem((uintptr_t)g_chatInstance + 0x128, &obj128, sizeof(uintptr_t)) && obj128 > 0x100000000ULL) {
-        safeReadMem(obj128 + 0x1B0, &w3, sizeof(int32_t));
-    }
-
-    uintptr_t base = 0x100000000ULL + getSlide();
-    SendChatFn sendChat = (SendChatFn)(base + RVA_SEND_CHAT);
-    sendChat(g_chatInstance, il2cppSender, il2cppMsg, w3, 0, NULL);
-}
-
-static uint32_t OGSGetPeerCount(void ***outItems) {
+// دوال Photon تُستدعى حصرياً من داخل خيط UnityMain
+static uint32_t OGSUnityGetPeers(uintptr_t rvaListFn, void *outPeers[64]) {
     uintptr_t base = 0x100000000ULL + getSlide();
     DiagBool0Fn inRoom = (DiagBool0Fn)(base + RVA_IN_ROOM);
-    DiagGetPeers0Fn getPeers = (DiagGetPeers0Fn)(base + RVA_GET_PEERS);
-    if (!inRoom || !inRoom(NULL) || !getPeers) return 0;
+    DiagGetPeers0Fn getList = (DiagGetPeers0Fn)(base + rvaListFn);
+    if (!inRoom || !inRoom(NULL) || !getList) return 0;
 
-    void *arr = getPeers(NULL);
-    if (!arr) return 0;
+    void *arr = getList(NULL);
+    if (!arr || (uintptr_t)arr < 0x100000000ULL) return 0;
 
     uintptr_t n = 0;
     if (!safeReadMem((uintptr_t)arr + 0x18, &n, sizeof(uintptr_t))) return 0;
     if (n == 0 || n > 64) return 0;
 
-    if (outItems) *outItems = (void **)((uint8_t *)arr + 0x20);
-    return (uint32_t)n;
+    uint32_t validCount = 0;
+    for (uint32_t i = 0; i < (uint32_t)n; i++) {
+        void *p = NULL;
+        if (safeReadMem((uintptr_t)arr + 0x20 + i * sizeof(void *), &p, sizeof(void *)) && p && (uintptr_t)p > 0x100000000ULL) {
+            if (outPeers) outPeers[validCount] = p;
+            validCount++;
+        }
+    }
+    return validCount;
 }
 
-static uint32_t OGSGetAllPlayersCount(void ***outItems) {
-    uintptr_t base = 0x100000000ULL + getSlide();
-    DiagBool0Fn inRoom = (DiagBool0Fn)(base + RVA_IN_ROOM);
-    DiagGetPeers0Fn getAll = (DiagGetPeers0Fn)(base + RVA_ALL_PLAYERS);
-    if (!inRoom || !inRoom(NULL) || !getAll) return 0;
+static void *OGSUnityFindLocalPlayer(void) {
+    void *allPeers[64] = {0};
+    uint32_t allCount = OGSUnityGetPeers(RVA_ALL_PLAYERS, allPeers);
+    if (allCount == 0) return NULL;
 
-    void *arr = getAll(NULL);
-    if (!arr) return 0;
-
-    uintptr_t n = 0;
-    if (!safeReadMem((uintptr_t)arr + 0x18, &n, sizeof(uintptr_t))) return 0;
-    if (n == 0 || n > 64) return 0;
-
-    if (outItems) *outItems = (void **)((uint8_t *)arr + 0x20);
-    return (uint32_t)n;
-}
-
-static void *OGSFindLocalPlayerObject(void) {
-    void **allItems = NULL;
-    uint32_t allCount = OGSGetAllPlayersCount(&allItems);
-    if (allCount == 0 || !allItems) return NULL;
-
-    void **otherItems = NULL;
-    uint32_t otherCount = OGSGetPeerCount(&otherItems);
-    if (otherCount == 0 || !otherItems) return allItems[0];
+    void *otherPeers[64] = {0};
+    uint32_t otherCount = OGSUnityGetPeers(RVA_GET_PEERS, otherPeers);
+    if (otherCount == 0) return allPeers[0];
 
     for (uint32_t i = 0; i < allCount; i++) {
-        void *cand = allItems[i];
-        if (!cand) continue;
-        int32_t candID = 0;
-        OGSGetPlayerIdentity(cand, NULL, &candID, NULL);
-
+        void *cand = allPeers[i];
         bool isOther = false;
         for (uint32_t j = 0; j < otherCount; j++) {
-            if (otherItems[j] == cand) { isOther = true; break; }
-            int32_t otherID = 0;
-            OGSGetPlayerIdentity(otherItems[j], NULL, &otherID, NULL);
-            if (candID > 0 && otherID == candID) { isOther = true; break; }
+            if (otherPeers[j] == cand) { isOther = true; break; }
         }
         if (!isOther) return cand;
     }
     return NULL;
 }
 
-static bool OGSSetRoomMasterObject(void *playerObj) {
-    if (!playerObj) return false;
+static void OGSUnitySetMaster(void *playerObj) {
+    if (!playerObj || (uintptr_t)playerObj < 0x100000000ULL) return;
     uintptr_t base = 0x100000000ULL + getSlide();
-    void *fnPtr = *(void **)(base + TBL_SET_MASTER);
-    if (!fnPtr) return false;
-    return ((DiagPeerSync1Fn)fnPtr)(playerObj, NULL);
+    void *fnPtr = NULL;
+    if (safeReadMem(base + TBL_SET_MASTER, &fnPtr, sizeof(void *)) && fnPtr) {
+        ((DiagPeerSync1Fn)fnPtr)(playerObj, NULL);
+    }
 }
 
-static bool OGSDisconnectPeerRaw(void *peerObj) {
-    if (!peerObj) return false;
+static void OGSUnityKickPeer(void *peerObj) {
+    if (!peerObj || (uintptr_t)peerObj < 0x100000000ULL) return;
     g_kick_msg_armed = 1;
-    uintptr_t base = 0x100000000ULL + getSlide();
-    void *fnPtr = *(void **)(base + TBL_PEER_SYNC);
-    if (!fnPtr) return false;
-    return ((DiagPeerSync1Fn)fnPtr)(peerObj, NULL);
-}
-
-static void OGSKickPeerWithBroadcast(void *peerObj, bool announceInChat) {
-    if (!peerObj) return;
-    g_kick_msg_armed = 1;
-
-    NSString *pName = OGSGetPlayerIdentity(peerObj, NULL, NULL, NULL);
 
     uintptr_t base = 0x100000000ULL + getSlide();
     DiagBool0Fn isMaster = (DiagBool0Fn)(base + RVA_IS_MASTER);
     if (!isMaster || !isMaster(NULL)) {
-        void *myPlayer = OGSFindLocalPlayerObject();
-        if (myPlayer) OGSSetRoomMasterObject(myPlayer);
+        void *myPlayer = OGSUnityFindLocalPlayer();
+        if (myPlayer) OGSUnitySetMaster(myPlayer);
     }
 
-    if (announceInChat && pName.length > 0) {
-        NSString *msg = [NSString stringWithFormat:@"تم طرد %@ من الغرفة", pName];
-        OGSBroadcastRoomChat(@"[إدارة الغرفة]", msg);
-    }
-
-    OGSDisconnectPeerRaw(peerObj);
-}
-
-static void OGSApplySpecialWeaponLoadout(void) {
-    if (!g_wpnSwitcher || (uintptr_t)g_wpnSwitcher < 0x100000000ULL) return;
-    uintptr_t wpnDict = 0;
-    if (!safeReadMem((uintptr_t)g_wpnSwitcher + 0x70, &wpnDict, sizeof(uintptr_t)) || wpnDict < 0x100000000ULL) return;
-
-    uintptr_t base = 0x100000000ULL + getSlide();
-    if (g_wpn_mode == 2) {
-        SwitchC4ShowFn c4Show = (SwitchC4ShowFn)(base + RVA_SWITCH_C4_SHOW);
-        SwitchC4Fn c4Equip    = (SwitchC4Fn)(base + RVA_SWITCH_C4);
-        if (c4Show)  c4Show(g_wpnSwitcher, 1, NULL);
-        if (c4Equip) c4Equip(g_wpnSwitcher, NULL);
-    } else if (g_wpn_mode == 3) {
-        SwitchC4Fn grenEquip = (SwitchC4Fn)(base + RVA_SWITCH_GRENADE);
-        if (grenEquip) grenEquip(g_wpnSwitcher, NULL);
+    void *fnPtr = NULL;
+    if (safeReadMem(base + TBL_PEER_SYNC, &fnPtr, sizeof(void *)) && fnPtr) {
+        ((DiagPeerSync1Fn)fnPtr)(peerObj, NULL);
     }
 }
 
@@ -346,8 +264,80 @@ static void OGSApplySpecialWeaponLoadout(void) {
 @property (strong, nonatomic) NSTimer *uiTimer;
 + (instancetype)sharedInstance;
 - (void)setupMenu;
-- (void)runRoomProtectionTick;
+- (BOOL)isNameBannedOrLockedOut:(NSString *)normName;
 @end
+
+// الدالة المركزية التي تعمل داخل خيط UnityMain فقط (آمنة 100% ولا تسبب كراش)
+static void OGSRunUnityMainThreadLogic(void) {
+    uintptr_t base = 0x100000000ULL + getSlide();
+
+    if (g_speed_dirty && RVA_SET_TIMESCALE > 0) {
+        g_speed_dirty = 0;
+        ((SetTime1Fn)(base + RVA_SET_TIMESCALE))(g_custom_speed, NULL);
+    }
+
+    // تنفيذ أي أمر ضغطت عليه في الواجهة فوراً داخل خيط Unity
+    int32_t cmd = g_pending_cmd;
+    if (cmd != 0) {
+        void *target = g_pending_target;
+        g_pending_cmd = 0;
+        g_pending_target = NULL;
+        if (cmd == 1 && target) {
+            OGSUnityKickPeer(target);
+        } else if (cmd == 2) {
+            void *me = OGSUnityFindLocalPlayer();
+            if (me) OGSUnitySetMaster(me);
+        }
+    }
+
+    if (++g_unity_tick < 10) return;
+    g_unity_tick = 0;
+
+    DiagBool0Fn inRoomFn = (DiagBool0Fn)(base + RVA_IN_ROOM);
+    bool inRoom = inRoomFn ? inRoomFn(NULL) : false;
+    g_cached_in_room = inRoom ? 1 : 0;
+
+    if (!inRoom) {
+        g_cached_count = 0;
+        g_cached_is_host = 0;
+        return;
+    }
+
+    DiagBool0Fn isMasterFn = (DiagBool0Fn)(base + RVA_IS_MASTER);
+    DiagGetPeers0Fn getMasterPeerFn = (DiagGetPeers0Fn)(base + RVA_GET_MASTER_PEER);
+    bool isMaster = isMasterFn ? isMasterFn(NULL) : false;
+    void *masterPeer = getMasterPeerFn ? getMasterPeerFn(NULL) : NULL;
+
+    // 1. حماية الهوست المضادة للهكر: استعادة الهوست فوراً + طرد الهكر السارق
+    if (g_auto_host_on && !isMaster) {
+        void *myPlayer = OGSUnityFindLocalPlayer();
+        if (myPlayer) {
+            OGSUnitySetMaster(myPlayer);
+            isMaster = true;
+        }
+        if (masterPeer && masterPeer != myPlayer) {
+            OGSUnityKickPeer(masterPeer);
+        }
+    }
+    g_cached_is_host = isMaster ? 1 : 0;
+
+    // 2. تحديث قائمة اللاعبين في الذاكرة الوسيطة وتطبيق الحظر التلقائي
+    void *peers[64] = {0};
+    uint32_t count = OGSUnityGetPeers(RVA_GET_PEERS, peers);
+    OGSModMenu *menu = [OGSModMenu sharedInstance];
+
+    for (uint32_t i = 0; i < count && i < 64; i++) {
+        g_peerCache[i].peerPtr = peers[i];
+        OGSExtractPeerInfoSafe(peers[i], masterPeer, g_peerCache[i].nameUTF8, sizeof(g_peerCache[i].nameUTF8), &g_peerCache[i].actorID, &g_peerCache[i].isHost);
+
+        NSString *pName = [NSString stringWithUTF8String:g_peerCache[i].nameUTF8];
+        NSString *normName = OGSNormalizeKey(pName);
+        if ([menu isNameBannedOrLockedOut:normName]) {
+            OGSUnityKickPeer(peers[i]);
+        }
+    }
+    g_cached_count = count;
+}
 
 static void *OGSBuildKickLeaveString(void *templateIl2CppStr) {
     if (g_customKickIl2CppStr) return g_customKickIl2CppStr;
@@ -357,7 +347,7 @@ static void *OGSBuildKickLeaveString(void *templateIl2CppStr) {
     if (!safeReadMem((uintptr_t)templateIl2CppStr, header, 16)) return NULL;
 
     bool origIsPreFixed = false;
-    NSString *origText = OGSReadIl2CppString(templateIl2CppStr);
+    NSString *origText = OGSReadIl2CppStringSafe(templateIl2CppStr);
     if (origText) {
         for (NSUInteger i = 0; i < origText.length; i++) {
             unichar c = [origText characterAtIndex:i];
@@ -407,105 +397,46 @@ static void hook_OnPhotonPlayerDisconnected(void *self, void *player, void *meth
 }
 
 static void hook_SendChatRemote(void *self, void *senderStr, void *msgStr, int32_t p3, int32_t p4, void *method) {
-    g_chatInstance = self;
-    if (senderStr) OGSReadIl2CppString(senderStr);
-
     if (g_chat_mode == 1) {
-        return;
+        return; // كتم رسائل اللاعبين
     } else if (g_chat_mode == 2) {
-        NSString *senderName = OGSReadIl2CppString(senderStr);
+        // طرد تلقائي لأي لاعب يرسل رسالة في الشات
+        NSString *senderName = OGSReadIl2CppStringSafe(senderStr);
         if (senderName && senderName.length > 0) {
             NSString *normSender = OGSNormalizeKey(senderName);
-            void **items = NULL;
-            uint32_t count = OGSGetPeerCount(&items);
-            for (uint32_t i = 0; i < count; i++) {
-                if (!items[i]) continue;
-                NSString *peerName = OGSGetPlayerIdentity(items[i], NULL, NULL, NULL);
+            uint32_t count = g_cached_count;
+            for (uint32_t i = 0; i < count && i < 64; i++) {
+                NSString *peerName = [NSString stringWithUTF8String:g_peerCache[i].nameUTF8];
                 if ([OGSNormalizeKey(peerName) isEqualToString:normSender]) {
-                    OGSKickPeerWithBroadcast(items[i], true);
+                    OGSUnityKickPeer(g_peerCache[i].peerPtr);
                     return;
                 }
             }
         }
         return;
     }
-
     if (orig_SendChatRemote) orig_SendChatRemote(self, senderStr, msgStr, p3, p4, method);
 }
 
 static void hook_ChatUpdate(void *self, void *method) {
-    g_chatInstance = self;
     if (orig_ChatUpdate) orig_ChatUpdate(self, method);
-
-    if (g_auto_host_on && ++g_host_tick >= 6) {
-        g_host_tick = 0;
-        uintptr_t base = 0x100000000ULL + getSlide();
-        DiagBool0Fn inRoom = (DiagBool0Fn)(base + RVA_IN_ROOM);
-        DiagBool0Fn isMaster = (DiagBool0Fn)(base + RVA_IS_MASTER);
-        if (inRoom && inRoom(NULL) && isMaster && !isMaster(NULL)) {
-            DiagGetPeers0Fn getMasterPeer = (DiagGetPeers0Fn)(base + RVA_GET_MASTER_PEER);
-            void *thiefPeer = getMasterPeer ? getMasterPeer(NULL) : NULL;
-            void *myPlayer  = OGSFindLocalPlayerObject();
-
-            if (myPlayer) {
-                OGSSetRoomMasterObject(myPlayer);
-            }
-            if (thiefPeer && thiefPeer != myPlayer) {
-                OGSDisconnectPeerRaw(thiefPeer);
-            }
-        }
-    }
-
-    if (++g_guard_tick >= 12) {
-        g_guard_tick = 0;
-        [[OGSModMenu sharedInstance] runRoomProtectionTick];
-    }
+    OGSRunUnityMainThreadLogic();
 }
 
-static void hook_SwitchWeapon(void *self, void *wpnObj, int32_t flag, void *method) {
-    if (self) g_wpnSwitcher = self;
-    if (orig_SwitchWeapon) orig_SwitchWeapon(self, wpnObj, flag, method);
-}
-
-static void *hook_GetWpnSelect(void *self, void *method) {
-    if (self) g_wpnSwitcher = self;
-    return orig_GetWpnSelect ? orig_GetWpnSelect(self, method) : NULL;
+static void hook_CashUpdate(void *s, void *m) {
+    if (orig_CashUpdate) orig_CashUpdate(s, m);
+    OGSRunUnityMainThreadLogic();
 }
 
 static int32_t hook_GetDMG(void *s, uintptr_t p1, uintptr_t p2, void *m, double d0, double d1, double d2) {
-    if (g_wpn_mode > 0) return 999;
+    if (g_super_weapon_on) return 999;
     return orig_GetDMG ? orig_GetDMG(s, p1, p2, m, d0, d1, d2) : 0;
 }
 
 static void hook_Wpn(void *s, uintptr_t p1, uintptr_t p2, uintptr_t p3, void *m, double d0, double d1, double d2, double d3) {
     if (orig_WpnHook) orig_WpnHook(s, p1, p2, p3, m, d0, d1, d2, d3);
-    if (s && g_wpn_mode > 0 && RVA_REFILL_AMMO > 0) {
+    if (s && g_super_weapon_on && RVA_REFILL_AMMO > 0) {
         ((Refill0Fn)(0x100000000ULL + getSlide() + RVA_REFILL_AMMO))(s, NULL);
-    }
-}
-
-static void hook_CashUpdate(void *s, void *m) {
-    if (orig_CashUpdate) orig_CashUpdate(s, m);
-    if (g_speed_dirty && RVA_SET_TIMESCALE > 0) {
-        g_speed_dirty = 0;
-        ((SetTime1Fn)(0x100000000ULL + getSlide() + RVA_SET_TIMESCALE))(g_custom_speed, NULL);
-    }
-    if (g_c4_trigger) {
-        g_c4_trigger = 0;
-        OGSApplySpecialWeaponLoadout();
-    }
-}
-
-// ربط سريع ومباشر في جدول __DATA
-static void hookTableByRVA(uintptr_t base, uintptr_t targetRVA, void *newFn, void **origFnOut) {
-    uintptr_t targetAddr = base + targetRVA;
-    for (uintptr_t off = 0x238D000; off < 0x2394000; off += 8) {
-        uintptr_t *slot = (uintptr_t *)(base + off);
-        if (*slot == targetAddr) {
-            if (origFnOut) *origFnOut = (void *)(*slot);
-            *slot = (uintptr_t)newFn;
-            break;
-        }
     }
 }
 
@@ -517,9 +448,6 @@ static void installAllHooks() {
     if (TBL_GET_DMG)          { void **sl = (void **)(base + TBL_GET_DMG);          orig_GetDMG         = (GetDMG2Fn)*sl;        *sl = (void *)&hook_GetDMG; }
     if (TBL_WPN_HOOK)         { void **sl = (void **)(base + TBL_WPN_HOOK);         orig_WpnHook        = (WpnHookFn)*sl;        *sl = (void *)&hook_Wpn; }
     if (TBL_ON_DISCONNECT)    { void **sl = (void **)(base + TBL_ON_DISCONNECT);    orig_OnDisconnect   = (OnDisconnectFn)*sl;   *sl = (void *)&hook_OnPhotonPlayerDisconnected; }
-
-    hookTableByRVA(base, RVA_SWITCH_WEAPON, (void *)&hook_SwitchWeapon, (void **)&orig_SwitchWeapon);
-    hookTableByRVA(base, RVA_GET_WPN_SELECT, (void *)&hook_GetWpnSelect, (void **)&orig_GetWpnSelect);
 }
 
 @implementation OGSModMenu
@@ -532,6 +460,13 @@ static void installAllHooks() {
         inst.allowedNamesWhenLocked = [NSMutableSet set];
     });
     return inst;
+}
+
+- (BOOL)isNameBannedOrLockedOut:(NSString *)normName {
+    if (!normName || normName.length == 0) return NO;
+    if ([self.bannedNames containsObject:normName]) return YES;
+    if (self.roomLockActive && ![self.allowedNamesWhenLocked containsObject:normName]) return YES;
+    return NO;
 }
 
 - (UIWindow *)gameMainWindow {
@@ -582,7 +517,7 @@ static void installAllHooks() {
         self.menuPanel.hidden = YES;
 
         UILabel *tl = [[UILabel alloc] initWithFrame:CGRectMake(10, 4, 295, 18)];
-        tl.text = @"OGS v5: الهوست + الطرد + الشات + السرعة + C4";
+        tl.text = @"OGS v6: الهوست + الطرد + الشات + السرعة + 999";
         tl.textColor = [UIColor whiteColor];
         tl.textAlignment = NSTextAlignmentCenter;
         tl.font = [UIFont boldSystemFontOfSize:11.5];
@@ -617,11 +552,11 @@ static void installAllHooks() {
         [self.menuPanel addSubview:[self makeBtn:CGRectMake(10, 68, 144, 30) title:@"▶ اللاعب السابق" bg:darkGray action:@selector(prevPlayer:)]];
         [self.menuPanel addSubview:[self makeBtn:CGRectMake(161, 68, 144, 30) title:@"اللاعب التالي ◀" bg:darkGray action:@selector(nextPlayer:)]];
 
-        // صف 2: طرد أو حظر مع إعلان في الشات العام
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(161, 103, 144, 32) title:@"طرد المحدد (مع إعلان)" bg:kickOrange action:@selector(kickSelected:)]];
+        // صف 2: طرد أو حظر
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(161, 103, 144, 32) title:@"طرد المحدد فقط" bg:kickOrange action:@selector(kickSelected:)]];
         [self.menuPanel addSubview:[self makeBtn:CGRectMake(10, 103, 144, 32) title:@"طرد وحظر (Ban)" bg:banRed action:@selector(banSelected:)]];
 
-        // صف 3: احتكار الهوست المضاد للهكر + التحكم بالشات
+        // صف 3: حماية الهوست المضادة للهكر + كتم الشات
         self.hostLockButton = [self makeBtn:CGRectMake(155, 140, 150, 32) title:@"حماية الهوست: مفعّل 👑" bg:wpnGreen action:@selector(toggleAutoHost:)];
         [self.menuPanel addSubview:self.hostLockButton];
 
@@ -641,8 +576,8 @@ static void installAllHooks() {
         [self.menuPanel addSubview:self.speedSetButton];
         [self.menuPanel addSubview:[self makeBtn:CGRectMake(250, 212, 55, 30) title:@"سرعة +" bg:darkGray action:@selector(speedUp:)]];
 
-        // صف 6: السلاح الخارق وقنبلة الشنطة C4
-        self.weaponButton = [self makeBtn:CGRectMake(10, 247, 295, 34) title:@"السلاح: دمج 999 + ذخيرة (اضغط لـ C4 💣)" bg:wpnGreen action:@selector(cycleWeaponMode:)];
+        // صف 6: السلاح الخارق (دمج 999 + ذخيرة بدون تعشيق)
+        self.weaponButton = [self makeBtn:CGRectMake(10, 247, 295, 34) title:@"سلاح خارق (دمج 999 + ذخيرة): مفعّل ⚡" bg:wpnGreen action:@selector(toggleSuperWeapon:)];
         [self.menuPanel addSubview:self.weaponButton];
 
         [self.containerView addSubview:self.menuPanel];
@@ -655,63 +590,33 @@ static void installAllHooks() {
     });
 }
 
-- (void)runRoomProtectionTick {
-    if (self.bannedNames.count == 0 && !self.roomLockActive) return;
+// تحديث الواجهة يقرأ فقط من الذاكرة الوسيطة (لا يستدعي أي دالة في اللعبة، فلا يمكن أن يسبب كراش)
+- (void)refreshUI {
+    uint32_t count = g_cached_count;
+    bool master = (g_cached_is_host != 0);
 
-    void **items = NULL;
-    uint32_t count = OGSGetPeerCount(&items);
-    if (count == 0 || !items) return;
-
-    for (uint32_t i = 0; i < count; i++) {
-        void *peer = items[i];
-        if (!peer) continue;
-
-        NSString *banKey = nil;
-        NSString *pName = OGSGetPlayerIdentity(peer, &banKey, NULL, NULL);
-        NSString *normName = OGSNormalizeKey(pName);
-
-        bool isBanned = ([self.bannedNames containsObject:normName] || (banKey.length > 0 && [self.bannedNames containsObject:banKey]));
-        if (isBanned) {
-            OGSKickPeerWithBroadcast(peer, false);
-            continue;
-        }
-        if (self.roomLockActive && ![self.allowedNamesWhenLocked containsObject:normName]) {
-            OGSKickPeerWithBroadcast(peer, false);
-        }
+    if (count == 0) {
+        g_selected_peer = 0;
+        self.playerLabel.text = @"المحدد: لا يوجد لاعبين معك حالياً";
+    } else {
+        if (g_selected_peer >= count) g_selected_peer = 0;
+        NSString *pName = [NSString stringWithUTF8String:g_peerCache[g_selected_peer].nameUTF8];
+        bool isPeerHost = g_peerCache[g_selected_peer].isHost;
+        self.playerLabel.text = [NSString stringWithFormat:@"(%u/%u) %@%@",
+                                 g_selected_peer + 1, count, pName, isPeerHost ? @" 👑" : @""];
     }
+
+    self.statusLabel.text = [NSString stringWithFormat:@"الهوست: %@ | بالروم: %u | المحظورين: %lu",
+                             master ? @"أنت 👑" : (g_auto_host_on ? @"حماية نشطة" : @"غيرك"),
+                             count,
+                             (unsigned long)self.bannedNames.count];
+    [self.unbanButton setTitle:[NSString stringWithFormat:@"فك حظر الكل (%lu)", (unsigned long)self.bannedNames.count] forState:UIControlStateNormal];
 }
 
 - (void)onUITick {
     if (self.menuPanel && !self.menuPanel.hidden) {
         [self refreshUI];
     }
-}
-
-- (void)refreshUI {
-    uintptr_t base = 0x100000000ULL + getSlide();
-    DiagBool0Fn isMaster = (DiagBool0Fn)(base + RVA_IS_MASTER);
-    bool master = isMaster ? isMaster(NULL) : false;
-
-    void **items = NULL;
-    uint32_t count = OGSGetPeerCount(&items);
-
-    if (count == 0 || !items) {
-        g_selected_peer = 0;
-        self.playerLabel.text = @"المحدد: لا يوجد لاعبين معك حالياً";
-    } else {
-        if (g_selected_peer >= count) g_selected_peer = 0;
-        int32_t actorID = 0;
-        bool isPeerHost = false;
-        NSString *pName = OGSGetPlayerIdentity(items[g_selected_peer], NULL, &actorID, &isPeerHost);
-        self.playerLabel.text = [NSString stringWithFormat:@"(%u/%u) %@%@",
-                                 g_selected_peer + 1, count, pName, isPeerHost ? @" 👑" : @""];
-    }
-
-    self.statusLabel.text = [NSString stringWithFormat:@"الهوست: %@ | بالروم: %u | المحظورين: %lu",
-                             master ? @"أنت 👑" : @"حماية نشطة...",
-                             count,
-                             (unsigned long)self.bannedNames.count];
-    [self.unbanButton setTitle:[NSString stringWithFormat:@"فك حظر الكل (%lu)", (unsigned long)self.bannedNames.count] forState:UIControlStateNormal];
 }
 
 - (void)toggleMenu {
@@ -726,14 +631,14 @@ static void installAllHooks() {
 }
 
 - (void)nextPlayer:(UIButton *)s {
-    uint32_t n = OGSGetPeerCount(NULL);
+    uint32_t n = g_cached_count;
     if (n > 0) g_selected_peer = (g_selected_peer + 1) % n;
     else g_selected_peer = 0;
     [self refreshUI];
 }
 
 - (void)prevPlayer:(UIButton *)s {
-    uint32_t n = OGSGetPeerCount(NULL);
+    uint32_t n = g_cached_count;
     if (n > 0) g_selected_peer = (g_selected_peer + n - 1) % n;
     else g_selected_peer = 0;
     [self refreshUI];
@@ -742,8 +647,7 @@ static void installAllHooks() {
 - (void)toggleAutoHost:(UIButton *)s {
     g_auto_host_on = !g_auto_host_on;
     if (g_auto_host_on) {
-        void *myPlayer = OGSFindLocalPlayerObject();
-        if (myPlayer) OGSSetRoomMasterObject(myPlayer);
+        g_pending_cmd = 2; // يطلب من خيط Unity سحب الهوست فوراً
         [s setTitle:@"حماية الهوست: مفعّل 👑" forState:UIControlStateNormal];
         s.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
     } else {
@@ -761,7 +665,6 @@ static void installAllHooks() {
     } else if (g_chat_mode == 2) {
         [s setTitle:@"الشات: طرد من يكتب 🚫" forState:UIControlStateNormal];
         s.backgroundColor = [UIColor colorWithRed:0.70 green:0.12 blue:0.15 alpha:1.0];
-        OGSBroadcastRoomChat(@"[إدارة الغرفة]", @"تم إغلاق الشات من قبل الهوست");
     } else {
         [s setTitle:@"الشات: مفتوح" forState:UIControlStateNormal];
         s.backgroundColor = [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
@@ -769,29 +672,27 @@ static void installAllHooks() {
 }
 
 - (void)kickSelected:(UIButton *)s {
-    void **items = NULL;
-    uint32_t count = OGSGetPeerCount(&items);
-    if (count == 0 || !items) return;
+    uint32_t count = g_cached_count;
+    if (count == 0) return;
     if (g_selected_peer >= count) g_selected_peer = 0;
-    NSString *pName = OGSGetPlayerIdentity(items[g_selected_peer], NULL, NULL, NULL);
-    OGSKickPeerWithBroadcast(items[g_selected_peer], true);
-    self.statusLabel.text = [NSString stringWithFormat:@"تم طرد وإعلان: %@", pName];
+
+    NSString *pName = [NSString stringWithUTF8String:g_peerCache[g_selected_peer].nameUTF8];
+    g_pending_target = g_peerCache[g_selected_peer].peerPtr;
+    g_pending_cmd = 1; // ينفذ الطرد في خيط UnityMain
+    self.statusLabel.text = [NSString stringWithFormat:@"تم طرد: %@", pName];
 }
 
 - (void)banSelected:(UIButton *)s {
-    void **items = NULL;
-    uint32_t count = OGSGetPeerCount(&items);
-    if (count == 0 || !items) return;
+    uint32_t count = g_cached_count;
+    if (count == 0) return;
     if (g_selected_peer >= count) g_selected_peer = 0;
 
-    NSString *banKey = nil;
-    NSString *pName = OGSGetPlayerIdentity(items[g_selected_peer], &banKey, NULL, NULL);
+    NSString *pName = [NSString stringWithUTF8String:g_peerCache[g_selected_peer].nameUTF8];
     NSString *normName = OGSNormalizeKey(pName);
-
     if (normName.length > 0) [self.bannedNames addObject:normName];
-    if (banKey.length > 0)   [self.bannedNames addObject:banKey];
 
-    OGSKickPeerWithBroadcast(items[g_selected_peer], true);
+    g_pending_target = g_peerCache[g_selected_peer].peerPtr;
+    g_pending_cmd = 1; // ينفذ الطرد والحظر في خيط UnityMain
     [self refreshUI];
     self.statusLabel.text = [NSString stringWithFormat:@"تم طرد وحظر: %@", pName];
 }
@@ -801,13 +702,10 @@ static void installAllHooks() {
     [self.allowedNamesWhenLocked removeAllObjects];
 
     if (self.roomLockActive) {
-        void **items = NULL;
-        uint32_t count = OGSGetPeerCount(&items);
-        for (uint32_t i = 0; i < count; i++) {
-            if (items && items[i]) {
-                NSString *pName = OGSGetPlayerIdentity(items[i], NULL, NULL, NULL);
-                [self.allowedNamesWhenLocked addObject:OGSNormalizeKey(pName)];
-            }
+        uint32_t count = g_cached_count;
+        for (uint32_t i = 0; i < count && i < 64; i++) {
+            NSString *pName = [NSString stringWithUTF8String:g_peerCache[i].nameUTF8];
+            [self.allowedNamesWhenLocked addObject:OGSNormalizeKey(pName)];
         }
         [s setTitle:@"قفل الروم: مقفل 🔒" forState:UIControlStateNormal];
         s.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
@@ -828,10 +726,7 @@ static void installAllHooks() {
     if (newSpeed < 0.0f) newSpeed = 0.0f;
     if (newSpeed > 20.0f) newSpeed = 20.0f;
     g_custom_speed = newSpeed;
-    g_speed_dirty = 1;
-    if (RVA_SET_TIMESCALE > 0) {
-        ((SetTime1Fn)(0x100000000ULL + getSlide() + RVA_SET_TIMESCALE))(g_custom_speed, NULL);
-    }
+    g_speed_dirty = 1; // يُطبق بأمان داخل خيط UnityMain
     [self.speedSetButton setTitle:[NSString stringWithFormat:@"السرعة: %.1fx (اضغط للكتابة)", g_custom_speed] forState:UIControlStateNormal];
 }
 
@@ -859,23 +754,13 @@ static void installAllHooks() {
     [rootVC presentViewController:alert animated:YES completion:nil];
 }
 
-- (void)cycleWeaponMode:(UIButton *)s {
-    g_wpn_mode = (g_wpn_mode + 1) % 4;
-    if (g_wpn_mode == 1) {
-        [s setTitle:@"السلاح: دمج 999 + ذخيرة (اضغط لـ C4 💣)" forState:UIControlStateNormal];
+- (void)toggleSuperWeapon:(UIButton *)s {
+    g_super_weapon_on = !g_super_weapon_on;
+    if (g_super_weapon_on) {
+        [s setTitle:@"سلاح خارق (دمج 999 + ذخيرة): مفعّل ⚡" forState:UIControlStateNormal];
         s.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
-    } else if (g_wpn_mode == 2) {
-        g_c4_trigger = 1;
-        OGSApplySpecialWeaponLoadout();
-        [s setTitle:@"قنبلة الشنطة C4 + دمج 999: مفعّل 💣" forState:UIControlStateNormal];
-        s.backgroundColor = [UIColor colorWithRed:0.80 green:0.35 blue:0.10 alpha:1.0];
-    } else if (g_wpn_mode == 3) {
-        g_c4_trigger = 1;
-        OGSApplySpecialWeaponLoadout();
-        [s setTitle:@"قنابل خاصة + دمج 999: مفعّل 💥" forState:UIControlStateNormal];
-        s.backgroundColor = [UIColor colorWithRed:0.55 green:0.18 blue:0.65 alpha:1.0];
     } else {
-        [s setTitle:@"السلاح الخارق: متوقف (عادي)" forState:UIControlStateNormal];
+        [s setTitle:@"سلاح خارق (دمج 999 + ذخيرة): متوقف" forState:UIControlStateNormal];
         s.backgroundColor = [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
     }
 }
