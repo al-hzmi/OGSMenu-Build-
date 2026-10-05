@@ -12,8 +12,18 @@
 #define OGS_MAX_NAME_BYTES  128
 #define OGS_MAX_STRING_LEN  256
 
-// يمكنك وضع رابط Raw لملف ogs_config.json هنا، أو لصقه من داخل اللعبة عند الضغط على زر 🔄
-static NSString * const kDefaultGitHubConfigURL = @"";
+// رابط مستودعك المباشر (Al-hzmi/ogsmenu) مع مسارات بديلة تلقائية
+static NSString * const kDefaultGitHubConfigURL = @"https://raw.githubusercontent.com/Al-hzmi/ogsmenu/main/ogs_config.json";
+
+static NSArray<NSString *> *OGSCandidateCloudURLs(NSString *customURL) {
+    NSMutableArray<NSString *> *urls = [NSMutableArray array];
+    if (customURL.length > 8) [urls addObject:customURL];
+    [urls addObject:@"https://raw.githubusercontent.com/Al-hzmi/ogsmenu/main/ogs_config.json"];
+    [urls addObject:@"https://raw.githubusercontent.com/Al-hzmi/ogsmenu/main/OGSMenu/ogs_config.json"];
+    [urls addObject:@"https://raw.githubusercontent.com/Al-hzmi/ogsmenu/master/ogs_config.json"];
+    [urls addObject:@"https://raw.githubusercontent.com/Al-hzmi/ogsmenu/master/OGSMenu/ogs_config.json"];
+    return urls;
+}
 
 // ============================================================
 // MARK: - Dynamic Engine Offsets (Default Fallback + Cloud Updatable)
@@ -51,7 +61,7 @@ static OGSOffsetsConfig gOffsets = {
     .rvaArabicFix      = 0x0130F538, // Type4294::Fix
     .tblPeerSync       = 0x2390a98,  // CloseConnection(PhotonPlayer)
     .tblSetMaster      = 0x2390aa0,  // SetMasterClient(PhotonPlayer)
-    .tblOnDisconnect    = 0x2391930   // OnPhotonPlayerDisconnected(PhotonPlayer)
+    .tblOnDisconnect   = 0x2391930   // OnPhotonPlayerDisconnected(PhotonPlayer)
 };
 
 // ============================================================
@@ -401,7 +411,7 @@ static void OGSProcessSpeed(void) {
 + (instancetype)sharedInstance;
 - (void)setupMenu;
 - (void)ensureMenuVisible;
-- (void)fetchGitHubCloudConfigWithPromptIfNeeded:(BOOL)promptIfEmpty;
+- (void)fetchGitHubCloudConfigWithFeedback:(BOOL)showFeedback;
 - (BOOL)shouldAutoKickPeerWithName:(NSString *)normName actorID:(int32_t)actID;
 @end
 
@@ -793,89 +803,69 @@ static uintptr_t OGSParseHexOffset(id val, uintptr_t fallback) {
         self.masterTimer = [NSTimer scheduledTimerWithTimeInterval:0.40 target:self selector:@selector(onMasterTick) userInfo:nil repeats:YES];
         self.masterTimer.tolerance = 0.08;
 
-        // جلب التحديث السحابي تلقائياً عند التشغيل إن وجد رابط محفوظ
-        [self fetchGitHubCloudConfigWithPromptIfNeeded:NO];
+        // جلب التحديث السحابي تلقائياً من مستودع Al-hzmi/ogsmenu فور التشغيل
+        [self fetchGitHubCloudConfigWithFeedback:NO];
     });
 }
 
 // ============================================================
-// MARK: - GitHub Live Cloud Sync (No Re-signing Needed)
+// MARK: - GitHub Live Cloud Sync (Al-hzmi/ogsmenu)
 // ============================================================
-- (NSString *)currentCloudURL {
-    NSString *saved = [[NSUserDefaults standardUserDefaults] stringForKey:@"OGS_GitHubConfigURL"];
-    if (saved.length > 8) return saved;
-    if (kDefaultGitHubConfigURL.length > 8) return kDefaultGitHubConfigURL;
-    return nil;
-}
-
-- (void)promptForCloudURL {
-    UIWindow *gw = [self gameMainWindow];
-    UIViewController *rootVC = gw.rootViewController;
-    if (!rootVC) return;
-
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"ربط التحديث المباشر من GitHub"
-                                                                   message:@"الصق رابط Raw لملف ogs_config.json في مستودعك لتحديث الإعدادات والمحظورين والعناوين فوراً بدون إعادة توقيع:"
-                                                            preferredStyle:UIAlertControllerStyleAlert];
-    [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-        tf.placeholder = @"https://raw.githubusercontent.com/.../ogs_config.json";
-        tf.text = [self currentCloudURL] ?: @"";
-        tf.keyboardType = UIKeyboardTypeURL;
-    }];
-    [alert addAction:[UIAlertAction actionWithTitle:@"حفظ وتحديث الآن 🔄" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-        NSString *urlStr = [alert.textFields.firstObject.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        if (urlStr.length > 8) {
-            [[NSUserDefaults standardUserDefaults] setObject:urlStr forKey:@"OGS_GitHubConfigURL"];
-            [[NSUserDefaults standardUserDefaults] synchronize];
-            [self fetchGitHubCloudConfigWithPromptIfNeeded:NO];
-        }
-    }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"إلغاء" style:UIAlertActionStyleCancel handler:nil]];
-    [rootVC presentViewController:alert animated:YES completion:nil];
-}
-
 - (void)syncCloudTapped:(UIButton *)sender {
-    if (![self currentCloudURL]) {
-        [self promptForCloudURL];
+    [self fetchGitHubCloudConfigWithFeedback:YES];
+}
+
+- (void)tryFetchFromCandidateURLs:(NSArray<NSString *> *)candidates index:(NSUInteger)idx showFeedback:(BOOL)showFeedback {
+    if (idx >= candidates.count) {
+        if (showFeedback) {
+            self.statusLabel.text = @"تأكد من إنشاء ملف ogs_config.json في المستودع";
+        }
         return;
     }
-    [self fetchGitHubCloudConfigWithPromptIfNeeded:YES];
-}
 
-- (void)fetchGitHubCloudConfigWithPromptIfNeeded:(BOOL)showFeedback {
-    NSString *baseUrl = [self currentCloudURL];
-    if (!baseUrl) return;
-
-    // إضافة timestamp لكسر كاش GitHub Raw وضمان جلب التعديل في نفس الثانية
+    NSString *baseUrl = candidates[idx];
     NSString *sep = [baseUrl containsString:@"?"] ? @"&" : @"?";
     NSString *bustUrl = [NSString stringWithFormat:@"%@%@t=%lld", baseUrl, sep, (long long)([[NSDate date] timeIntervalSince1970] * 1000)];
     NSURL *url = [NSURL URLWithString:bustUrl];
     if (!url) {
-        if (showFeedback) [self promptForCloudURL];
+        [self tryFetchFromCandidateURLs:candidates index:idx + 1 showFeedback:showFeedback];
         return;
     }
 
-    if (showFeedback) {
-        self.statusLabel.text = @"جاري جلب التحديث من GitHub...";
-    }
-
-    NSURLRequest *req = [NSURLRequest requestWithURL:url cachePolicy:NSURLRequestReloadIgnoringLocalAndRemoteCacheData timeoutInterval:8.0];
+    NSURLRequest *req = [NSURLRequest requestWithURL:url cachePolicy:NSURLRequestReloadIgnoringLocalAndRemoteCacheData timeoutInterval:6.0];
     [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        NSHTTPURLResponse *httpResp = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
+        if (error || !data || (httpResp && httpResp.statusCode != 200)) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self tryFetchFromCandidateURLs:candidates index:idx + 1 showFeedback:showFeedback];
+            });
+            return;
+        }
+
+        NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+        if (![json isKindOfClass:[NSDictionary class]]) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self tryFetchFromCandidateURLs:candidates index:idx + 1 showFeedback:showFeedback];
+            });
+            return;
+        }
+
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (error || !data) {
-                if (showFeedback) self.statusLabel.text = @"تعذر الاتصال بـ GitHub (تأكد من الرابط)";
-                return;
-            }
-            NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-            if (![json isKindOfClass:[NSDictionary class]]) {
-                if (showFeedback) self.statusLabel.text = @"صيغة ملف JSON غير صحيحة";
-                return;
-            }
             [self applyCloudConfigDictionary:json];
             if (showFeedback) {
-                self.statusLabel.text = @"تم التحديث من GitHub بنجاح ✅";
+                self.statusLabel.text = @"تم التحديث من GitHub (Al-hzmi) بنجاح ✅";
             }
         });
     }] resume];
+}
+
+- (void)fetchGitHubCloudConfigWithFeedback:(BOOL)showFeedback {
+    if (showFeedback) {
+        self.statusLabel.text = @"جاري التحديث من Al-hzmi/ogsmenu...";
+    }
+    NSString *savedCustom = [[NSUserDefaults standardUserDefaults] stringForKey:@"OGS_GitHubConfigURL"];
+    NSArray<NSString *> *candidates = OGSCandidateCloudURLs(savedCustom ?: kDefaultGitHubConfigURL);
+    [self tryFetchFromCandidateURLs:candidates index:0 showFeedback:showFeedback];
 }
 
 - (void)applyCloudConfigDictionary:(NSDictionary *)json {
@@ -1134,9 +1124,6 @@ static uintptr_t OGSParseHexOffset(id val, uintptr_t fallback) {
     [alert addAction:[UIAlertAction actionWithTitle:@"تطبيق" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
         float val = [alert.textFields.firstObject.text floatValue];
         if (val >= 0.0f && val <= 20.0f) [self applySpeed:val];
-    }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"تغيير رابط GitHub 🔄" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-        [self promptForCloudURL];
     }]];
     [alert addAction:[UIAlertAction actionWithTitle:@"إلغاء" style:UIAlertActionStyleCancel handler:nil]];
     [rootVC presentViewController:alert animated:YES completion:nil];
