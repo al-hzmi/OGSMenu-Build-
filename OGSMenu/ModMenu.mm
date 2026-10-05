@@ -116,7 +116,6 @@ static NSString *OGSReadIl2CppString(void *strPtr) {
     return [NSString stringWithCharacters:chars length:(NSUInteger)strLen];
 }
 
-// إنشاء نص Il2CppString سليم لإرساله في الشات العام
 static void *OGSCreateIl2CppString(NSString *nsStr) {
     if (!nsStr) nsStr = @"";
     if (!g_templateIl2CppStr || (uintptr_t)g_templateIl2CppStr < 0x100000000ULL) return NULL;
@@ -176,13 +175,11 @@ static NSString *OGSGetPlayerIdentity(void *peerObj, NSString **outBanKey, int32
     return realName;
 }
 
-// إرسال رسالة في شات الروم العام يراها كل اللاعبين (باستخدام معاملات 0x13A7E80)
 static void OGSBroadcastRoomChat(NSString *senderTitle, NSString *messageText) {
     if (!g_chatInstance || (uintptr_t)g_chatInstance < 0x100000000ULL) return;
 
-    // التأكد من وجود قالب نصي صالح
     if (!g_templateIl2CppStr) {
-        void * existingFieldStr = NULL;
+        void *existingFieldStr = NULL;
         if (safeReadMem((uintptr_t)g_chatInstance + 0x38, &existingFieldStr, sizeof(void *)) && existingFieldStr) {
             OGSReadIl2CppString(existingFieldStr);
         }
@@ -281,7 +278,6 @@ static bool OGSDisconnectPeerRaw(void *peerObj) {
     return ((DiagPeerSync1Fn)fnPtr)(peerObj, NULL);
 }
 
-// يضمن أنك الهوست، ويرسل في شات الروم للكل "تم طرد فلان من الغرفة"، ثم يطرده فوراً
 static void OGSKickPeerWithBroadcast(void *peerObj, bool announceInChat) {
     if (!peerObj) return;
     g_kick_msg_armed = 1;
@@ -303,7 +299,6 @@ static void OGSKickPeerWithBroadcast(void *peerObj, bool announceInChat) {
     OGSDisconnectPeerRaw(peerObj);
 }
 
-// تفعيل قنبلة الشنطة C4 أو القنابل الخاصة عبر Type 4720
 static void OGSApplySpecialWeaponLoadout(void) {
     if (!g_wpnSwitcher || (uintptr_t)g_wpnSwitcher < 0x100000000ULL) return;
     uintptr_t wpnDict = 0;
@@ -311,7 +306,6 @@ static void OGSApplySpecialWeaponLoadout(void) {
 
     uintptr_t base = 0x100000000ULL + getSlide();
     if (g_wpn_mode == 2) {
-        // إظهار شنطة الـ C4 ومؤقتها وتجهيز القنبلة في اليد
         SwitchC4ShowFn c4Show = (SwitchC4ShowFn)(base + RVA_SWITCH_C4_SHOW);
         SwitchC4Fn c4Equip    = (SwitchC4Fn)(base + RVA_SWITCH_C4);
         if (c4Show)  c4Show(g_wpnSwitcher, 1, NULL);
@@ -412,16 +406,13 @@ static void hook_OnPhotonPlayerDisconnected(void *self, void *player, void *meth
     if (leaveStrSlot && origLeaveStr) *leaveStrSlot = origLeaveStr;
 }
 
-// اعتراض الرسائل القادمة من اللاعبين الآخرين (الكتم أو الطرد الفوري لمن يسب/يكتب)
 static void hook_SendChatRemote(void *self, void *senderStr, void *msgStr, int32_t p3, int32_t p4, void *method) {
     g_chatInstance = self;
     if (senderStr) OGSReadIl2CppString(senderStr);
 
     if (g_chat_mode == 1) {
-        // وضع الكتم: تجاهل الرسالة القادمة
         return;
     } else if (g_chat_mode == 2) {
-        // وضع منع الشات في الروم: البحث عن صاحب الرسالة وطرده تلقائياً!
         NSString *senderName = OGSReadIl2CppString(senderStr);
         if (senderName && senderName.length > 0) {
             NSString *normSender = OGSNormalizeKey(senderName);
@@ -442,12 +433,10 @@ static void hook_SendChatRemote(void *self, void *senderStr, void *msgStr, int32
     if (orig_SendChatRemote) orig_SendChatRemote(self, senderStr, msgStr, p3, p4, method);
 }
 
-// يعمل 60 مرة في الثانية داخل الغرفة (حتى لو كنت ميتاً)
 static void hook_ChatUpdate(void *self, void *method) {
     g_chatInstance = self;
     if (orig_ChatUpdate) orig_ChatUpdate(self, method);
 
-    // 1. حماية الهوست المضادة للهكر: استعادة الهوست فوراً + طرد الهكر الذي حاول سحبه!
     if (g_auto_host_on && ++g_host_tick >= 6) {
         g_host_tick = 0;
         uintptr_t base = 0x100000000ULL + getSlide();
@@ -462,20 +451,17 @@ static void hook_ChatUpdate(void *self, void *method) {
                 OGSSetRoomMasterObject(myPlayer);
             }
             if (thiefPeer && thiefPeer != myPlayer) {
-                // طرد الهكر الذي حاول سحب الهوست منك فوراً
                 OGSDisconnectPeerRaw(thiefPeer);
             }
         }
     }
 
-    // 2. فحص قائمة المحظورين وقفل الروم باستمرار
     if (++g_guard_tick >= 12) {
         g_guard_tick = 0;
         [[OGSModMenu sharedInstance] runRoomProtectionTick];
     }
 }
 
-// التقاط مؤشر كلاس الأسلحة Type 4720 لتفعيل قنبلة الشنطة C4
 static void hook_SwitchWeapon(void *self, void *wpnObj, int32_t flag, void *method) {
     if (self) g_wpnSwitcher = self;
     if (orig_SwitchWeapon) orig_SwitchWeapon(self, wpnObj, flag, method);
@@ -510,15 +496,14 @@ static void hook_CashUpdate(void *s, void *m) {
     }
 }
 
-// بحث تلقائي في جدول __DATA لربط دوال الأسلحة بدون الحاجة لعناوين ثابتة
+// ربط سريع ومباشر في جدول __DATA
 static void hookTableByRVA(uintptr_t base, uintptr_t targetRVA, void *newFn, void **origFnOut) {
     uintptr_t targetAddr = base + targetRVA;
-    for (uintptr_t off = 0x2358400; off < 0x2420000; off += 8) {
-        uintptr_t val = 0;
-        if (safeReadMem(base + off, &val, sizeof(uintptr_t)) && val == targetAddr) {
-            void **slot = (void **)(base + off);
-            if (origFnOut) *origFnOut = *slot;
-            *slot = newFn;
+    for (uintptr_t off = 0x238D000; off < 0x2394000; off += 8) {
+        uintptr_t *slot = (uintptr_t *)(base + off);
+        if (*slot == targetAddr) {
+            if (origFnOut) *origFnOut = (void *)(*slot);
+            *slot = (uintptr_t)newFn;
             break;
         }
     }
@@ -589,7 +574,6 @@ static void installAllHooks() {
         [self.floatingButton addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)]];
         [self.containerView addSubview:self.floatingButton];
 
-        // لوحة مدمجة بالكامل (ارتفاع 292 فقط لتظهر كاملة في الشاشة العرضية)
         self.menuPanel = [[UIView alloc] initWithFrame:CGRectMake(75, 12, 315, 292)];
         self.menuPanel.backgroundColor = [UIColor colorWithRed:0.09 green:0.09 blue:0.11 alpha:0.96];
         self.menuPanel.layer.cornerRadius = 14.0;
@@ -598,10 +582,10 @@ static void installAllHooks() {
         self.menuPanel.hidden = YES;
 
         UILabel *tl = [[UILabel alloc] initWithFrame:CGRectMake(10, 4, 295, 18)];
-        tl.text = @"OGS: حماية الهوست + الطرد + الشات + C4";
+        tl.text = @"OGS v5: الهوست + الطرد + الشات + السرعة + C4";
         tl.textColor = [UIColor whiteColor];
         tl.textAlignment = NSTextAlignmentCenter;
-        tl.font = [UIFont boldSystemFontOfSize:12.0];
+        tl.font = [UIFont boldSystemFontOfSize:11.5];
         [self.menuPanel addSubview:tl];
 
         UIView *infoBox = [[UIView alloc] initWithFrame:CGRectMake(10, 24, 295, 40)];
