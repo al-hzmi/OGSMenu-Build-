@@ -1,61 +1,369 @@
 #import <UIKit/UIKit.h>
-#import <dispatch/dispatch.h>
-@interface OGSMenu : NSObject
-@property(nonatomic,strong) UIWindow *window;
-@property(nonatomic,strong) UIView *panel;
-@property(nonatomic,strong) UILabel *status;
-@property(nonatomic) NSUInteger hpIndex, cashIndex, timeIndex;
-+ (instancetype)shared;
-- (void)show;
-@end
-@implementation OGSMenu
-+ (instancetype)shared { static OGSMenu *m; static dispatch_once_t once; dispatch_once(&once, ^{m=[OGSMenu new];}); return m; }
-- (void)show {
- dispatch_async(dispatch_get_main_queue(), ^{
-  if(self.window) return;
-  UIWindowScene *scene=nil;
-  for(UIScene *s in UIApplication.sharedApplication.connectedScenes)
-   if([s isKindOfClass:UIWindowScene.class] && s.activationState==UISceneActivationStateForegroundActive) {scene=(UIWindowScene *)s;break;}
-  if(!scene) return;
-  self.window=[[UIWindow alloc] initWithWindowScene:scene];
-  self.window.frame=scene.coordinateSpace.bounds;
-  self.window.windowLevel=UIWindowLevelAlert+1;
-  self.window.backgroundColor=UIColor.clearColor;
-  UIViewController *root=[UIViewController new];root.view.backgroundColor=UIColor.clearColor;
-  self.window.rootViewController=root;
-  UIButton *floating=[UIButton buttonWithType:UIButtonTypeSystem];
-  floating.frame=CGRectMake(24,120,58,58);floating.backgroundColor=UIColor.blackColor;
-  floating.layer.cornerRadius=29;floating.layer.borderWidth=2;floating.layer.borderColor=UIColor.systemRedColor.CGColor;
-  [floating setTitle:@"OGS" forState:UIControlStateNormal];[floating setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
-  [floating addTarget:self action:@selector(toggle) forControlEvents:UIControlEventTouchUpInside];
-  [root.view addSubview:floating];
-  self.panel=[[UIView alloc]initWithFrame:CGRectMake(90,95,270,340)];
-  self.panel.backgroundColor=[UIColor colorWithRed:.11 green:.11 blue:.13 alpha:1];
-  self.panel.layer.cornerRadius=14;self.panel.hidden=YES;
-  UILabel *title=[[UILabel alloc]initWithFrame:CGRectMake(10,10,250,32)];
-  title.text=@"OGS UI DEMO";title.textColor=UIColor.whiteColor;title.textAlignment=NSTextAlignmentCenter;
-  [self.panel addSubview:title];
-  NSArray *names=@[@"HP preset",@"Cash preset",@"Ammo toggle (demo)",@"Vision toggle (demo)",@"Time preset"];
-  SEL acts[]={@selector(hp:),@selector(cash:),@selector(ammo:),@selector(vision:),@selector(time:)};
-  for(int i=0;i<5;i++){
-   UIButton *b=[UIButton buttonWithType:UIButtonTypeSystem];b.frame=CGRectMake(12,48+i*47,246,39);
-   b.backgroundColor=[UIColor colorWithWhite:.23 alpha:1];b.layer.cornerRadius=8;
-   [b setTitle:names[i] forState:UIControlStateNormal];[b setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
-   [b addTarget:self action:acts[i] forControlEvents:UIControlEventTouchUpInside];[self.panel addSubview:b];
-  }
-  self.status=[[UILabel alloc]initWithFrame:CGRectMake(10,288,250,35)];
-  self.status.text=@"UI demo only";self.status.textColor=UIColor.systemGreenColor;self.status.textAlignment=NSTextAlignmentCenter;
-  [self.panel addSubview:self.status];[root.view addSubview:self.panel];
-  self.window.hidden=NO;
- });
+#include <mach-o/dyld.h>
+#include <stdint.h>
+#include <string.h>
+
+static const uintptr_t TBL_CASH_UPDATE   = 0x23918b8;
+static const uintptr_t RVA_ADD_CASH      = 0x13fa064;
+static const uintptr_t TBL_SUB_CASH      = 0x2391988;
+static const uintptr_t RVA_SETUP_BOXES   = 0x13e5554;
+static const uintptr_t TBL_SETUP_BOXES   = 0x23912a0;
+static const uintptr_t TBL_GET_DMG       = 0x2391388;
+static const uintptr_t TBL_WPN_HOOK      = 0x238ea10;
+static const uintptr_t RVA_REFILL_AMMO   = 0x1382c10;
+static const uintptr_t RVA_SET_TIMESCALE = 0x198ac4c;
+static const uint32_t  FIELD_CASH_OFF    = 0x0;
+static const uint32_t  FIELD_HP_OFF      = 0x0;
+
+// عناوين PhotonNetwork لإدارة الغرفة والطرد
+static const uintptr_t RVA_IN_ROOM       = 0x013CC38C;
+static const uintptr_t RVA_IS_MASTER     = 0x013CC2BC;
+static const uintptr_t RVA_GET_PEERS     = 0x013CAF78;
+static const uintptr_t RVA_CLOSE_CONN    = 0x013D2E84;
+
+typedef void (*Update0Fn)(void *, void *);
+typedef void (*Refill0Fn)(void *, void *);
+typedef void (*AddCash1Fn)(void *, int32_t, void *);
+typedef bool (*SubCash1Fn)(void *, int32_t, void *, uintptr_t, double, double);
+typedef int32_t (*GetDMG2Fn)(void *, uintptr_t, uintptr_t, void *, double, double, double);
+typedef void (*SetupBoxes2Fn)(void *, uintptr_t, uintptr_t, void *, double, double, double);
+typedef void (*WpnHookFn)(void *, uintptr_t, uintptr_t, uintptr_t, void *, double, double, double, double);
+typedef void (*SetTime1Fn)(float, void *);
+
+typedef bool  (*DiagBool0Fn)(void *);
+typedef void* (*DiagGetPeers0Fn)(void *);
+typedef bool  (*PhotonCloseConn1Fn)(void *, void *);
+
+static Update0Fn     orig_CashUpdate = NULL;
+static SubCash1Fn    orig_SubCash    = NULL;
+static GetDMG2Fn     orig_GetDMG     = NULL;
+static SetupBoxes2Fn orig_SetupBoxes = NULL;
+static WpnHookFn     orig_WpnHook    = NULL;
+
+static volatile uint32_t g_selected_peer = 0;
+static volatile int32_t  g_room_lock_on  = 0;
+static volatile uint32_t g_allowed_peers = 0;
+static volatile int32_t  g_lock_tick     = 0;
+static volatile int32_t  g_hp_val = 0, g_cash_val = 0, g_cash_q = 0, g_ammo_on = 0, g_vis_on = 0, g_vis_trig = 0;
+
+// تعريف getSlide أولاً قبل استخدامها في دوال الغرفة
+static uintptr_t getSlide() {
+    for (uint32_t i = 0; i < _dyld_image_count(); i++) {
+        const char *n = _dyld_get_image_name(i);
+        if (n && strstr(n, "/fps.app/fps")) return _dyld_get_image_vmaddr_slide(i);
+    }
+    return _dyld_get_image_vmaddr_slide(0);
 }
-- (void)toggle {self.panel.hidden=!self.panel.hidden;}
-- (void)hp:(UIButton *)b {NSArray *v=@[@100,@200,@300,@1000,@10000];NSNumber *n=v[self.hpIndex++%v.count];[b setTitle:[NSString stringWithFormat:@"HP: %@",n] forState:UIControlStateNormal];self.status.text=@"Demo: HP selected";}
-- (void)cash:(UIButton *)b {NSArray *v=@[@100,@200,@300,@1000,@10000];NSNumber *n=v[self.cashIndex++%v.count];[b setTitle:[NSString stringWithFormat:@"Cash: %@",n] forState:UIControlStateNormal];self.status.text=@"Demo: Cash selected";}
-- (void)ammo:(UIButton *)b {b.selected=!b.selected;[b setTitle:b.selected?@"Ammo demo: ON":@"Ammo demo: OFF" forState:UIControlStateNormal];self.status.text=@"UI only; no game changes";}
-- (void)vision:(UIButton *)b {b.selected=!b.selected;[b setTitle:b.selected?@"Vision demo: ON":@"Vision demo: OFF" forState:UIControlStateNormal];self.status.text=@"UI only; no game changes";}
-- (void)time:(UIButton *)b {NSArray *v=@[@"1.0x",@"0.5x",@"0.0x",@"2.0x"];[b setTitle:[@"Time demo: " stringByAppendingString:v[self.timeIndex++%v.count]] forState:UIControlStateNormal];self.status.text=@"UI only; no game changes";}
+
+static uint32_t OGSGetPeerCount(void ***outItems) {
+    uintptr_t base = 0x100000000ULL + getSlide();
+    DiagBool0Fn inRoom = (DiagBool0Fn)(base + RVA_IN_ROOM);
+    DiagGetPeers0Fn getPeers = (DiagGetPeers0Fn)(base + RVA_GET_PEERS);
+    if (!inRoom || !inRoom(NULL) || !getPeers) return 0;
+
+    void *arr = getPeers(NULL);
+    if (!arr) return 0;
+
+    uintptr_t n = *(uintptr_t *)((uint8_t *)arr + 0x18);
+    if (n == 0 || n > 64) return 0;
+
+    if (outItems) {
+        *outItems = (void **)((uint8_t *)arr + 0x20);
+    }
+    return (uint32_t)n;
+}
+
+static NSString *OGSRoomDiagnosticText(void) {
+    uintptr_t base = 0x100000000ULL + getSlide();
+    DiagBool0Fn inRoom = (DiagBool0Fn)(base + RVA_IN_ROOM);
+    DiagBool0Fn isMaster = (DiagBool0Fn)(base + RVA_IS_MASTER);
+    bool room = inRoom ? inRoom(NULL) : false;
+    bool master = isMaster ? isMaster(NULL) : false;
+    uint32_t peerCount = OGSGetPeerCount(NULL);
+
+    if (peerCount == 0) g_selected_peer = 0;
+    else if (g_selected_peer >= peerCount) g_selected_peer = 0;
+
+    return [NSString stringWithFormat:@"الغرفة: %@ | الهوست: %@ | اللاعبين: %u | المحدد: %@",
+            room ? @"متصل" : @"لا",
+            master ? @"أنت" : @"لا",
+            peerCount,
+            peerCount ? [NSString stringWithFormat:@"%u/%u", g_selected_peer + 1, peerCount] : @"لا يوجد"];
+}
+
+static void OGSSelectNextPeer(void) {
+    uint32_t n = OGSGetPeerCount(NULL);
+    if (n == 0) {
+        g_selected_peer = 0;
+        return;
+    }
+    g_selected_peer = (g_selected_peer + 1) % n;
+}
+
+static bool OGSKickSelectedPeer(void) {
+    void **items = NULL;
+    uint32_t count = OGSGetPeerCount(&items);
+    if (count == 0 || !items) return false;
+
+    if (g_selected_peer >= count) g_selected_peer = 0;
+    void *targetPlayer = items[g_selected_peer];
+    if (!targetPlayer) return false;
+
+    uintptr_t base = 0x100000000ULL + getSlide();
+    PhotonCloseConn1Fn closeConn = (PhotonCloseConn1Fn)(base + RVA_CLOSE_CONN);
+    closeConn(targetPlayer, NULL);
+    return true;
+}
+
+static void OGSEnforceRoomLock(void) {
+    void **items = NULL;
+    uint32_t count = OGSGetPeerCount(&items);
+    if (count == 0 || !items) return;
+
+    // إذا دخل أي لاعب جديد فوق العدد المسموح به عند تفعيل القفل، يُطرد فوراً
+    if (count > g_allowed_peers) {
+        uintptr_t base = 0x100000000ULL + getSlide();
+        PhotonCloseConn1Fn closeConn = (PhotonCloseConn1Fn)(base + RVA_CLOSE_CONN);
+        for (uint32_t i = g_allowed_peers; i < count; i++) {
+            if (items[i]) {
+                closeConn(items[i], NULL);
+            }
+        }
+    }
+}
+
+static int32_t hook_GetDMG(void *s, uintptr_t p1, uintptr_t p2, void *m, double d0, double d1, double d2) {
+    return g_hp_val > 0 ? g_hp_val : (orig_GetDMG ? orig_GetDMG(s, p1, p2, m, d0, d1, d2) : 0);
+}
+
+static bool hook_SubCash(void *s, int32_t a, void *m, uintptr_t x3, double d0, double d1) {
+    if (g_cash_val > 0 && s) {
+        if (RVA_ADD_CASH > 0) ((AddCash1Fn)(0x100000000ULL + getSlide() + RVA_ADD_CASH))(s, g_cash_val, NULL);
+        return true;
+    }
+    return orig_SubCash ? orig_SubCash(s, a, m, x3, d0, d1) : false;
+}
+
+static void hook_CashUpdate(void *s, void *m) {
+    if (orig_CashUpdate) orig_CashUpdate(s, m);
+    if (!s) return;
+    if (g_hp_val > 0 && FIELD_HP_OFF >= 0x10) *(int32_t *)((uint8_t *)s + FIELD_HP_OFF) = g_hp_val;
+    if (g_cash_q > 0 && RVA_ADD_CASH > 0) {
+        int32_t bonus = g_cash_q; g_cash_q = 0;
+        ((AddCash1Fn)(0x100000000ULL + getSlide() + RVA_ADD_CASH))(s, bonus, NULL);
+    }
+    if (g_cash_val > 0 && FIELD_CASH_OFF >= 0x10) *(int32_t *)((uint8_t *)s + FIELD_CASH_OFF) = g_cash_val;
+    if (g_vis_trig && RVA_SETUP_BOXES > 0) {
+        g_vis_trig = 0;
+        ((SetupBoxes2Fn)(0x100000000ULL + getSlide() + RVA_SETUP_BOXES))(s, g_vis_on ? 1 : 0, 0, NULL, 0, 0, 0);
+    }
+    if (g_room_lock_on) {
+        if (++g_lock_tick >= 20) {
+            g_lock_tick = 0;
+            OGSEnforceRoomLock();
+        }
+    }
+}
+
+static void hook_Wpn(void *s, uintptr_t p1, uintptr_t p2, uintptr_t p3, void *m, double d0, double d1, double d2, double d3) {
+    if (orig_WpnHook) orig_WpnHook(s, p1, p2, p3, m, d0, d1, d2, d3);
+    if (s && g_ammo_on && RVA_REFILL_AMMO > 0) ((Refill0Fn)(0x100000000ULL + getSlide() + RVA_REFILL_AMMO))(s, NULL);
+}
+
+static void hook_SetupBoxes(void *s, uintptr_t p1, uintptr_t p2, void *m, double d0, double d1, double d2) {
+    if (g_vis_on) p1 = 1;
+    if (orig_SetupBoxes) orig_SetupBoxes(s, p1, p2, m, d0, d1, d2);
+}
+
+static void installHooks() {
+    uintptr_t base = 0x100000000ULL + getSlide();
+    if (TBL_CASH_UPDATE) { void **sl = (void **)(base + TBL_CASH_UPDATE); orig_CashUpdate = (Update0Fn)*sl; *sl = (void *)&hook_CashUpdate; }
+    if (TBL_SUB_CASH)    { void **sl = (void **)(base + TBL_SUB_CASH);    orig_SubCash    = (SubCash1Fn)*sl; *sl = (void *)&hook_SubCash; }
+    if (TBL_GET_DMG)     { void **sl = (void **)(base + TBL_GET_DMG);     orig_GetDMG     = (GetDMG2Fn)*sl;  *sl = (void *)&hook_GetDMG; }
+    if (TBL_WPN_HOOK)    { void **sl = (void **)(base + TBL_WPN_HOOK);    orig_WpnHook    = (WpnHookFn)*sl;  *sl = (void *)&hook_Wpn; }
+    if (TBL_SETUP_BOXES) { void **sl = (void **)(base + TBL_SETUP_BOXES); orig_SetupBoxes = (SetupBoxes2Fn)*sl; *sl = (void *)&hook_SetupBoxes; }
+}
+
+@interface OGSPassthroughContainer : UIView
+@property (weak, nonatomic) UIButton *floatingButton;
+@property (weak, nonatomic) UIView *menuPanel;
 @end
-__attribute__((constructor)) static void ogs_init(void) {
- dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)(4*NSEC_PER_SEC)),dispatch_get_main_queue(),^{[[OGSMenu shared] show];});
+@implementation OGSPassthroughContainer
+- (BOOL)pointInside:(CGPoint)p withEvent:(UIEvent *)e {
+    if (self.floatingButton && !self.floatingButton.hidden && [self.floatingButton pointInside:[self convertPoint:p toView:self.floatingButton] withEvent:e]) return YES;
+    if (self.menuPanel && !self.menuPanel.hidden && [self.menuPanel pointInside:[self convertPoint:p toView:self.menuPanel] withEvent:e]) return YES;
+    return NO;
+}
+@end
+
+@interface OGSModMenu : NSObject
+@property (strong, nonatomic) OGSPassthroughContainer *containerView;
+@property (strong, nonatomic) UIButton *floatingButton;
+@property (strong, nonatomic) UIView *menuPanel;
+@property (strong, nonatomic) UILabel *statusLabel;
+@property (assign, nonatomic) NSInteger hpStep, cashStep, timeStep;
+@property (assign, nonatomic) BOOL ammoActive, visionActive, roomLockActive;
++ (instancetype)sharedInstance;
+- (void)setupMenu;
+@end
+
+@implementation OGSModMenu
++ (instancetype)sharedInstance {
+    static OGSModMenu *inst = nil;
+    static dispatch_once_t t;
+    dispatch_once(&t, ^{ inst = [[OGSModMenu alloc] init]; });
+    return inst;
+}
+- (UIWindow *)gameMainWindow {
+    for (UIScene *s in [UIApplication sharedApplication].connectedScenes)
+        if ([s isKindOfClass:[UIWindowScene class]])
+            for (UIWindow *w in ((UIWindowScene *)s).windows) if (w.isKeyWindow || !w.hidden) return w;
+    return [UIApplication sharedApplication].windows.firstObject;
+}
+- (UIButton *)makeBtn:(CGRect)f title:(NSString *)t action:(SEL)a {
+    UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
+    b.frame = f;
+    b.backgroundColor = [UIColor colorWithRed:0.20 green:0.21 blue:0.25 alpha:1.0];
+    [b setTitle:t forState:UIControlStateNormal];
+    [b setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    b.titleLabel.font = [UIFont boldSystemFontOfSize:13];
+    b.layer.cornerRadius = 8.0;
+    [b addTarget:self action:a forControlEvents:UIControlEventTouchUpInside];
+    return b;
+}
+- (void)setupMenu {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (self.containerView) return;
+        UIWindow *gw = [self gameMainWindow];
+        if (!gw) return;
+        self.containerView = [[OGSPassthroughContainer alloc] initWithFrame:gw.bounds];
+        self.floatingButton = [UIButton buttonWithType:UIButtonTypeCustom];
+        self.floatingButton.frame = CGRectMake(25, 130, 58, 58);
+        self.floatingButton.backgroundColor = [UIColor blackColor];
+        self.floatingButton.opaque = YES;
+        [self.floatingButton setTitle:@"OGS" forState:UIControlStateNormal];
+        self.floatingButton.layer.cornerRadius = 29.0;
+        self.floatingButton.layer.borderWidth = 2.5f;
+        self.floatingButton.layer.borderColor = [UIColor systemRedColor].CGColor;
+        [self.floatingButton addTarget:self action:@selector(toggleMenu) forControlEvents:UIControlEventTouchUpInside];
+        [self.floatingButton addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)]];
+        [self.containerView addSubview:self.floatingButton];
+
+        self.menuPanel = [[UIView alloc] initWithFrame:CGRectMake(95, 20, 275, 425)];
+        self.menuPanel.backgroundColor = [UIColor colorWithRed:0.10 green:0.10 blue:0.12 alpha:1.0];
+        self.menuPanel.layer.cornerRadius = 14.0;
+        self.menuPanel.layer.borderWidth = 2.0f;
+        self.menuPanel.layer.borderColor = [UIColor systemRedColor].CGColor;
+        self.menuPanel.hidden = YES;
+
+        UILabel *tl = [[UILabel alloc] initWithFrame:CGRectMake(15, 10, 245, 26)];
+        tl.text = @"لوحة تحكم OGS الفعالة";
+        tl.textColor = [UIColor whiteColor];
+        tl.textAlignment = NSTextAlignmentCenter;
+        tl.font = [UIFont boldSystemFontOfSize:16];
+        [self.menuPanel addSubview:tl];
+
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(15, 44, 245, 40) title:@"الدم والقوة: افتراضي" action:@selector(cycleHP:)]];
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(15, 92, 245, 40) title:@"الفلوس والشراء: افتراضي" action:@selector(cycleCash:)]];
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(15, 140, 245, 40) title:@"الذخيرة بدون تعشيق: متوقف" action:@selector(toggleAmmo:)]];
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(15, 188, 245, 40) title:@"الرؤية خلف الجدران: متوقف" action:@selector(toggleVision:)]];
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(15, 236, 245, 40) title:@"سرعة الوقت: 1.0x طبيعي" action:@selector(cycleTime:)]];
+
+        // صف التحكم باللاعبين: زر اختيار اللاعب يميناً + زر طرد اللاعب المحدد يساراً
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(138, 284, 122, 40) title:@"تحديد لاعب: #1" action:@selector(roomDiagnostic:)]];
+        UIButton *kickBtn = [self makeBtn:CGRectMake(15, 284, 115, 40) title:@"طرد المحدد" action:@selector(kickSelectedPlayer:)];
+        kickBtn.backgroundColor = [UIColor colorWithRed:0.65 green:0.12 blue:0.15 alpha:1.0];
+        [self.menuPanel addSubview:kickBtn];
+
+        // زر قفل الغرفة ومنع دخول أي شخص جديد أو مطرود
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(15, 332, 245, 40) title:@"قفل الروم (منع دخول جدد): متوقف" action:@selector(toggleRoomLock:)]];
+
+        self.statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 380, 255, 35)];
+        self.statusLabel.text = @"جميع الميزات متصلة وفعالة";
+        self.statusLabel.textColor = [UIColor systemGreenColor];
+        self.statusLabel.textAlignment = NSTextAlignmentCenter;
+        self.statusLabel.font = [UIFont boldSystemFontOfSize:10.5];
+        [self.menuPanel addSubview:self.statusLabel];
+
+        [self.containerView addSubview:self.menuPanel];
+        self.containerView.floatingButton = self.floatingButton;
+        self.containerView.menuPanel = self.menuPanel;
+        [gw addSubview:self.containerView];
+        [gw bringSubviewToFront:self.containerView];
+    });
+}
+- (void)toggleMenu { self.menuPanel.hidden = !self.menuPanel.hidden; }
+- (void)handlePan:(UIPanGestureRecognizer *)g {
+    CGPoint t = [g translationInView:self.containerView];
+    g.view.center = CGPointMake(g.view.center.x + t.x, g.view.center.y + t.y);
+    [g setTranslation:CGPointZero inView:self.containerView];
+}
+- (void)cycleHP:(UIButton *)s {
+    int32_t v[] = {100, 200, 300, 1000, 10000, 0};
+    int32_t val = v[self.hpStep++ % 6];
+    g_hp_val = val;
+    [s setTitle:(val > 0 ? [NSString stringWithFormat:@"الدم والقوة: %d", val] : @"الدم والقوة: افتراضي") forState:UIControlStateNormal];
+}
+- (void)cycleCash:(UIButton *)s {
+    int32_t v[] = {100, 200, 300, 1000, 10000, 0};
+    int32_t val = v[self.cashStep++ % 6];
+    g_cash_val = val;
+    g_cash_q = val;
+    [s setTitle:(val > 0 ? [NSString stringWithFormat:@"الفلوس والشراء: +%d", val] : @"الفلوس والشراء: افتراضي") forState:UIControlStateNormal];
+}
+- (void)toggleAmmo:(UIButton *)s {
+    self.ammoActive = !self.ammoActive;
+    g_ammo_on = self.ammoActive ? 1 : 0;
+    [s setTitle:(self.ammoActive ? @"الذخيرة بدون تعشيق: مفعّل" : @"الذخيرة بدون تعشيق: متوقف") forState:UIControlStateNormal];
+}
+- (void)toggleVision:(UIButton *)s {
+    self.visionActive = !self.visionActive;
+    g_vis_on = self.visionActive ? 1 : 0;
+    g_vis_trig = 1;
+    [s setTitle:(self.visionActive ? @"الرؤية خلف الجدران: مفعّل" : @"الرؤية خلف الجدران: متوقف") forState:UIControlStateNormal];
+}
+- (void)cycleTime:(UIButton *)s {
+    float sc[] = {1.0f, 0.5f, 0.0f, 2.0f};
+    NSArray *lb = @[@"1.0x طبيعي", @"0.5x بطيء", @"0.0x تجميد", @"2.0x سريع"];
+    NSInteger i = self.timeStep++ % 4;
+    if (RVA_SET_TIMESCALE) ((SetTime1Fn)(0x100000000ULL + getSlide() + RVA_SET_TIMESCALE))(sc[i], NULL);
+    [s setTitle:[NSString stringWithFormat:@"سرعة الوقت: %@", lb[i]] forState:UIControlStateNormal];
+}
+- (void)roomDiagnostic:(UIButton *)sender {
+    OGSSelectNextPeer();
+    NSString *report = OGSRoomDiagnosticText();
+    if (self.statusLabel) self.statusLabel.text = report;
+    [sender setTitle:[NSString stringWithFormat:@"تحديد لاعب: #%u", g_selected_peer + 1]
+            forState:UIControlStateNormal];
+}
+- (void)kickSelectedPlayer:(UIButton *)sender {
+    bool ok = OGSKickSelectedPeer();
+    if (self.statusLabel) {
+        self.statusLabel.text = ok
+            ? [NSString stringWithFormat:@"تم طرد اللاعب المحدد (#%u) من الغرفة", g_selected_peer + 1]
+            : @"لا يوجد لاعب محدد أو لست الهوست";
+    }
+}
+- (void)toggleRoomLock:(UIButton *)sender {
+    self.roomLockActive = !self.roomLockActive;
+    if (self.roomLockActive) {
+        g_allowed_peers = OGSGetPeerCount(NULL);
+        g_room_lock_on = 1;
+        [sender setTitle:@"قفل الروم (منع دخول جدد): مفعّل" forState:UIControlStateNormal];
+        if (self.statusLabel) {
+            self.statusLabel.text = [NSString stringWithFormat:@"تم قفل الروم على %u لاعبين (طرد تلقائي للجدد)", g_allowed_peers];
+        }
+    } else {
+        g_room_lock_on = 0;
+        [sender setTitle:@"قفل الروم (منع دخول جدد): متوقف" forState:UIControlStateNormal];
+        if (self.statusLabel) self.statusLabel.text = OGSRoomDiagnosticText();
+    }
+}
+@end
+
+__attribute__((constructor)) static void ogs_init() {
+    installHooks();
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [[OGSModMenu sharedInstance] setupMenu];
+    });
 }
