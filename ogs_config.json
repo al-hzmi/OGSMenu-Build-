@@ -1,5 +1,5 @@
 {
-  "menu_title": "OGS v9: الهوست + الطرد + الشات + سحابي",
+  "menu_title": "OGS v10.2: السيطرة المطلقة + ضد الكراش",
   "kick_message": " تم طرده من الغرفة ",
   "panel_width": 315,
   "panel_height": 252,
@@ -17,6 +17,7 @@
     "rva_set_timescale": "0x198ac4c",
     "tbl_peer_sync": "0x2390a98",
     "tbl_set_master": "0x2390aa0",
+    "tbl_net_peer_set_master": "0x238ff50",
     "tbl_on_disconnect": "0x2391930"
   }
 }
