@@ -88,7 +88,7 @@ static OnDisconnectFn   orig_OnDisconnect   = NULL;
 typedef struct {
     volatile bool     inRoom;
     volatile bool     isMaster;
-    volatile bool     wasMasterInCurrentRoom; // لكشف أي هكر يسحب الهوست منك بعد امتلاكه
+    volatile bool     wasMasterInCurrentRoom;
     volatile uint32_t selectedPeer;
     volatile float    gameSpeed;
     volatile bool     speedDirty;
@@ -373,14 +373,12 @@ static void OGSRequestSpeed(float speed) {
     speed = fmaxf(0.1f, fminf(speed, 20.0f));
     gOGS.gameSpeed = speed;
     __atomic_store_n(&gOGS.speedDirty, true, __ATOMIC_RELEASE);
-    // تطبيق مباشر وفوري على الخيط الرئيسي لحظة ضغط الزر
     OGSApplyTimescaleNow(speed);
 }
 
 static void OGSProcessSpeed(void) {
     bool dirty = __atomic_exchange_n(&gOGS.speedDirty, false, __ATOMIC_ACQ_REL);
     float speed = gOGS.gameSpeed;
-    // إذا كانت السرعة غير 1.0، نعيد فرضها باستمرار حتى لا تلغيها اللعبة عند الرسبون
     if (dirty || fabsf(speed - 1.0f) > 0.01f) {
         OGSApplyTimescaleNow(speed);
     }
@@ -429,7 +427,7 @@ static void OGSProcessSpeed(void) {
 @end
 
 // ============================================================
-// MARK: - Instant 60-FPS Anti-Hijack & Room Protection Engine
+// MARK: - 60-FPS Frame-Level Anti-Hijack & Kick Engine
 // ============================================================
 static volatile bool s_inSnapshotUpdate = false;
 
@@ -468,14 +466,12 @@ static void OGSUpdateRoomSnapshot(void) {
     OGSModMenu *menu = [OGSModMenu sharedInstance];
 
     if (master) {
-        // بمجرد أن نصبح الهوست في هذه الغرفة، نفعّل فخ صيد السارقين
         gOGS.wasMasterInCurrentRoom = true;
     } else if (gOGS.autoHostOn || gOGS.forceHostReq > 0 || gOGS.kickRetries > 0) {
         gOGS.forceHostReq = 0;
         void *myPlayer = OGSFindLocalPlayer();
 
-        // إذا كنا الهوست سابقاً في هذه الغرفة وسحبه لاعب آخر منا للتو -> هذا هكر سارق!
-        // نسجل رقمه واسمه فوراً في الحظر والطرد المتتبع ليُطرد فور عودة الهوست لنا في الإطار التالي!
+        // إذا سحب أي هكر الهوست منا، نلتقط رقمه واسمه فوراً ونحظره ونطرده بمعدل 60 مرة في الثانية!
         if (gOGS.autoHostOn && gOGS.wasMasterInCurrentRoom && masterPlayer && masterPlayer != myPlayer) {
             OGSPeerSnapshot thiefSnap;
             if (OGSReadPeer(masterPlayer, masterPlayer, &thiefSnap)) {
@@ -488,15 +484,16 @@ static void OGSUpdateRoomSnapshot(void) {
                     snprintf(gOGS.kickTargetName, sizeof(gOGS.kickTargetName), "%s", normThief.UTF8String);
                     snprintf(gOGS.lastHijackerName, sizeof(gOGS.lastHijackerName), "%s", thiefSnap.name);
                 }
-                gOGS.kickRetries = 30;
+                gOGS.kickRetries = 90;
             }
         }
 
-        // استعادة الهوست لحسابك فوراً
         if (myPlayer) {
             OGSSetMaster(myPlayer);
+            // نفعّل الفخ فور أول سحب للهوست حتى لو دخلت غرفة الهكر نفسه!
+            gOGS.wasMasterInCurrentRoom = true;
         }
-        if (masterPlayer && masterPlayer != myPlayer && gOGS.wasMasterInCurrentRoom) {
+        if (masterPlayer && masterPlayer != myPlayer) {
             OGSCloseConnRaw(masterPlayer);
         }
     }
@@ -517,7 +514,6 @@ static void OGSUpdateRoomSnapshot(void) {
         NSString *pName = [NSString stringWithUTF8String:peerSnap.name];
         NSString *normName = OGSNormalizeKey(pName);
 
-        // أ) تنفيذ الطرد المتتبع المضمون (يطرد الهدف أو السارق فور استعادة الهوست)
         if (gOGS.kickRetries > 0) {
             bool matchID = (gOGS.kickTargetID > 0 && peerSnap.actorID == gOGS.kickTargetID);
             bool matchName = (gOGS.kickTargetName[0] != '\0' && strcmp(normName.UTF8String, gOGS.kickTargetName) == 0);
@@ -531,7 +527,6 @@ static void OGSUpdateRoomSnapshot(void) {
             }
         }
 
-        // ب) تنفيذ الحظر وقفل الروم الفوري
         if ([menu shouldAutoKickPeerWithName:normName actorID:peerSnap.actorID]) {
             if (!master) {
                 void *me = OGSFindLocalPlayer();
@@ -625,7 +620,7 @@ static void hook_SendChatRemote(void *self, void *senderStr, void *msgStr, int32
             if (utf8) {
                 snprintf(gOGS.kickTargetName, sizeof(gOGS.kickTargetName), "%s", utf8);
                 gOGS.kickTargetID = -1;
-                gOGS.kickRetries = 20;
+                gOGS.kickRetries = 60;
             }
         }
         return;
@@ -633,21 +628,19 @@ static void hook_SendChatRemote(void *self, void *senderStr, void *msgStr, int32
     if (orig_SendChatRemote) orig_SendChatRemote(self, senderStr, msgStr, p3, p4, method);
 }
 
-static volatile int32_t s_frameCounter = 0;
-
 static void hook_ChatUpdate(void *self, void *method) {
     if (orig_ChatUpdate) orig_ChatUpdate(self, method);
     OGSProcessSpeed();
-    // فحص فوري كل إطارين (30 مرة في الثانية) لقطع الطريق على أي هكر يحاول سحب الهوست
-    if (++s_frameCounter >= 2) {
-        s_frameCounter = 0;
-        OGSUpdateRoomSnapshot();
-    }
+    // فحص فوري في كل إطار (60 مرة في الثانية) لضمان التفوق على أي أداة لدى الهكر
+    OGSUpdateRoomSnapshot();
 }
 
 static void hook_CashUpdate(void *self, void *method) {
     if (orig_CashUpdate) orig_CashUpdate(self, method);
     OGSProcessSpeed();
+    if (gOGS.kickRetries > 0 || !gOGS.isMaster) {
+        OGSUpdateRoomSnapshot();
+    }
 }
 
 static void OGSInstallHooks(void) {
@@ -779,7 +772,7 @@ static uintptr_t OGSParseHexOffset(id val, uintptr_t fallback) {
         self.menuPanel.hidden = YES;
 
         self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 5, 260, 18)];
-        self.titleLabel.text = @"OGS v9.2: صائد السارقين + السرعة + سحابي";
+        self.titleLabel.text = @"OGS v9.3: صائد السارقين 60FPS + السرعة";
         self.titleLabel.textColor = [UIColor whiteColor];
         self.titleLabel.textAlignment = NSTextAlignmentCenter;
         self.titleLabel.font = [UIFont boldSystemFontOfSize:11.0];
@@ -846,8 +839,7 @@ static uintptr_t OGSParseHexOffset(id val, uintptr_t fallback) {
         [gw addSubview:self.containerView];
         [gw bringSubviewToFront:self.containerView];
 
-        // مؤقت فائق السرعة (كل 0.08 ثانية = 12.5 مرة في الثانية) لضمان صيد السارق وتثبيت السرعة
-        self.fastGuardTimer = [NSTimer scheduledTimerWithTimeInterval:0.08 target:self selector:@selector(onFastGuardTick) userInfo:nil repeats:YES];
+        self.fastGuardTimer = [NSTimer scheduledTimerWithTimeInterval:0.06 target:self selector:@selector(onFastGuardTick) userInfo:nil repeats:YES];
 
         [self fetchGitHubCloudConfigWithFeedback:NO];
     });
@@ -1005,13 +997,13 @@ static uint32_t s_uiRefreshDiv = 0;
     }
 
     if (gOGS.kickRetries > 0) {
-        self.statusLabel.text = @"جاري طرد الهدف/السارق من السيرفر...";
+        self.statusLabel.text = @"هجوم مضاد: جاري طرد الهدف من السيرفر...";
     } else if (gOGS.lastHijackerName[0] != '\0') {
         NSString *hj = [NSString stringWithUTF8String:gOGS.lastHijackerName];
-        self.statusLabel.text = [NSString stringWithFormat:@"تم صيد وطرد سارق الهوست: %@", hj ?: @""];
+        self.statusLabel.text = [NSString stringWithFormat:@"تم صيد وحظر سارق الهوست: %@", hj ?: @""];
     } else {
         self.statusLabel.text = [NSString stringWithFormat:@"%@ | بالروم: %u | المحظورين: %lu",
-                                 snapshot.inRoom ? (snapshot.isMaster ? @"الهوست: أنت 👑" : @"حماية نشطة...") : @"غير متصل",
+                                 snapshot.inRoom ? (snapshot.isMaster ? @"الهوست: أنت 👑" : @"حماية 60FPS نشطة") : @"غير متصل",
                                  count,
                                  (unsigned long)self.bannedNames.count];
     }
@@ -1049,7 +1041,6 @@ static uint32_t s_uiRefreshDiv = 0;
     [self refreshUI];
 }
 
-// زر طوارئ لطرد جميع الموجودين في الروم بضغطة واحدة
 - (void)kickAllPlayers:(UIButton *)sender {
     uintptr_t masterStateAddress = OGSResolveRVA(gOffsets.rvaIsMaster);
     Bool0Fn isMasterFn = (Bool0Fn)masterStateAddress;
@@ -1101,7 +1092,7 @@ static uint32_t s_uiRefreshDiv = 0;
     if (utf8) {
         snprintf(gOGS.kickTargetName, sizeof(gOGS.kickTargetName), "%s", utf8);
     }
-    gOGS.kickRetries = 25;
+    gOGS.kickRetries = 60;
     OGSUpdateRoomSnapshot();
 }
 
@@ -1199,14 +1190,15 @@ static uint32_t s_uiRefreshDiv = 0;
         if (val >= 0.1f && val <= 20.0f) [self applySpeed:val];
     }]];
     [alert addAction:[UIAlertAction actionWithTitle:@"إلغاء" style:UIAlertActionStyleCancel handler:nil]];
-    [rootVC presentViewController:alert animated:YES completion:nil]];
+    [rootVC presentViewController:alert animated:YES completion:nil];
 }
 @end
 
 __attribute__((constructor))
 static void ogs_init(void) {
-    // تثبيت الخطافات فوراً عند بدء التحميل لضمان عمل السرعة والشات 100%
-    OGSInstallHooks();
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        OGSInstallHooks();
+    });
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         OGSInstallHooks();
         [[OGSModMenu sharedInstance] setupMenu];
