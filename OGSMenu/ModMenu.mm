@@ -192,6 +192,23 @@ static OGSRuntimeState gOGS = {
     .customKickPhrase   = " تم طرده من الغرفة "
 };
 
+static os_unfair_lock gRuntimeFloatLock = OS_UNFAIR_LOCK_INIT;
+
+static float OGSLoadGameSpeed(void)
+{
+    os_unfair_lock_lock(&gRuntimeFloatLock);
+    float value = gOGS.gameSpeed;
+    os_unfair_lock_unlock(&gRuntimeFloatLock);
+    return value;
+}
+
+static void OGSStoreGameSpeed(float value)
+{
+    os_unfair_lock_lock(&gRuntimeFloatLock);
+    gOGS.gameSpeed = value;
+    os_unfair_lock_unlock(&gRuntimeFloatLock);
+}
+
 // ============================================================
 // MARK: - Image resolver
 // ============================================================
@@ -362,7 +379,7 @@ static NSString *OGSReadIl2CppString(void *object)
         sizeof(unichar);
 
     unichar *buffer =
-        calloc(
+        (unichar *)calloc(
             (size_t)length,
             sizeof(unichar)
         );
@@ -874,11 +891,7 @@ static void OGSRequestSpeed(
             )
         );
 
-    __atomic_store_n(
-        &gOGS.gameSpeed,
-        speed,
-        __ATOMIC_RELEASE
-    );
+    OGSStoreGameSpeed(speed);
 
     __atomic_store_n(
         &gOGS.speedDirty,
@@ -900,10 +913,7 @@ static void OGSProcessSpeed(void)
         return;
 
     float speed =
-        __atomic_load_n(
-            &gOGS.gameSpeed,
-            __ATOMIC_ACQUIRE
-        );
+        OGSLoadGameSpeed();
 
     OGSApplyTimescaleNow(
         speed
@@ -1041,100 +1051,77 @@ static void OGSUpdateRoomSnapshot(void)
             __ATOMIC_ACQ_REL))
         return;
 
-    OGSRoomSnapshot snapshot =
-        {0};
+    OGSRoomSnapshot snapshot = {0};
 
     uintptr_t inRoomAddress =
-        OGSResolveRVA(
-            gOffsets.rvaInRoom
-        );
-
+        OGSResolveRVA(gOffsets.rvaInRoom);
     uintptr_t masterStateAddress =
-        OGSResolveRVA(
-            gOffsets.rvaIsMaster
-        );
-
+        OGSResolveRVA(gOffsets.rvaIsMaster);
     uintptr_t masterPlayerAddress =
-        OGSResolveRVA(
-            gOffsets.rvaGetMasterPeer
-        );
+        OGSResolveRVA(gOffsets.rvaGetMasterPeer);
 
-    if (!inRoomAddress ||
-        !masterStateAddress ||
-        !masterPlayerAddress)
-        goto finish;
+    if (inRoomAddress &&
+        masterStateAddress &&
+        masterPlayerAddress) {
 
-    Bool0Fn inRoomFn =
-        (Bool0Fn)inRoomAddress;
+        Bool0Fn inRoomFn =
+            (Bool0Fn)inRoomAddress;
+        Bool0Fn isMasterFn =
+            (Bool0Fn)masterStateAddress;
+        Object0Fn masterFn =
+            (Object0Fn)masterPlayerAddress;
 
-    Bool0Fn isMasterFn =
-        (Bool0Fn)masterStateAddress;
-
-    Object0Fn masterFn =
-        (Object0Fn)masterPlayerAddress;
-
-    snapshot.inRoom =
-        inRoomFn(NULL);
-
-    __atomic_store_n(
-        &gOGS.inRoom,
-        snapshot.inRoom,
-        __ATOMIC_RELEASE
-    );
-
-    if (!snapshot.inRoom) {
+        snapshot.inRoom = inRoomFn(NULL);
 
         __atomic_store_n(
-            &gOGS.isMaster,
-            false,
+            &gOGS.inRoom,
+            snapshot.inRoom,
             __ATOMIC_RELEASE
         );
 
-        goto finish;
+        if (snapshot.inRoom) {
+            snapshot.isMaster = isMasterFn(NULL);
+
+            __atomic_store_n(
+                &gOGS.isMaster,
+                snapshot.isMaster,
+                __ATOMIC_RELEASE
+            );
+
+            void *master = masterFn(NULL);
+            void *players[OGS_MAX_PEERS] = {0};
+
+            uint32_t count =
+                OGSReadPlayerArray(
+                    gOffsets.rvaGetPeers,
+                    players
+                );
+
+            for (uint32_t i = 0;
+                 i < count &&
+                 snapshot.count < OGS_MAX_PEERS;
+                 i++) {
+
+                OGSPeerSnapshot peer = {0};
+
+                if (!OGSReadPeer(
+                        players[i],
+                        master,
+                        &peer))
+                    continue;
+
+                snapshot.peers[
+                    snapshot.count++
+                ] = peer;
+            }
+        } else {
+            __atomic_store_n(
+                &gOGS.isMaster,
+                false,
+                __ATOMIC_RELEASE
+            );
+        }
     }
-
-    snapshot.isMaster =
-        isMasterFn(NULL);
-
-    __atomic_store_n(
-        &gOGS.isMaster,
-        snapshot.isMaster,
-        __ATOMIC_RELEASE
-    );
-
-    void *master =
-        masterFn(NULL);
-
-    void *players[
-        OGS_MAX_PEERS
-    ];
-
-    uint32_t count =
-        OGSReadPlayerArray(
-            gOffsets.rvaGetPeers,
-            players
-        );
-
-    for (uint32_t i = 0;
-         i < count &&
-         snapshot.count <
-            OGS_MAX_PEERS;
-         i++) {
-
-        OGSPeerSnapshot peer;
-
-        if (!OGSReadPeer(
-                players[i],
-                master,
-                &peer))
-            continue;
-
-        snapshot.peers[
-            snapshot.count++
-        ] = peer;
-    }
-
-finish:
 
     snapshot.generation =
         __atomic_fetch_add(
@@ -1143,9 +1130,7 @@ finish:
             __ATOMIC_RELAXED
         ) + 1;
 
-    OGSPublishSnapshot(
-        &snapshot
-    );
+    OGSPublishSnapshot(&snapshot);
 
     __atomic_store_n(
         &gSnapshotBusy,
@@ -2943,10 +2928,7 @@ static void OGSRuntimeTick(void)
     );
 
     float actual =
-        __atomic_load_n(
-            &gOGS.gameSpeed,
-            __ATOMIC_ACQUIRE
-        );
+        OGSLoadGameSpeed();
 
     [self.speedSetButton
         setTitle:
@@ -2962,10 +2944,7 @@ static void OGSRuntimeTick(void)
     (UIButton *)sender
 {
     float speed =
-        __atomic_load_n(
-            &gOGS.gameSpeed,
-            __ATOMIC_ACQUIRE
-        );
+        OGSLoadGameSpeed();
 
     [self
         applySpeed:
@@ -2976,10 +2955,7 @@ static void OGSRuntimeTick(void)
     (UIButton *)sender
 {
     float speed =
-        __atomic_load_n(
-            &gOGS.gameSpeed,
-            __ATOMIC_ACQUIRE
-        );
+        OGSLoadGameSpeed();
 
     [self
         applySpeed:
@@ -3016,10 +2992,7 @@ static void OGSRuntimeTick(void)
         ^(UITextField *field) {
 
             float speed =
-                __atomic_load_n(
-                    &gOGS.gameSpeed,
-                    __ATOMIC_ACQUIRE
-                );
+                OGSLoadGameSpeed();
 
             field.text =
                 [NSString
