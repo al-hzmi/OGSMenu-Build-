@@ -54,18 +54,9 @@ static SendChatRemoteFn orig_SendChatRemote = NULL;
 static OnDisconnectFn   orig_OnDisconnect   = NULL;
 
 // ============================================================
-// MARK: - Atomic Runtime State (C++ Safe)
+// MARK: - Runtime State
 // ============================================================
-typedef NS_ENUM(uint8_t, OGSRuntimePhase) {
-    OGSRuntimePhaseBoot = 0,
-    OGSRuntimePhaseWaitingImage,
-    OGSRuntimePhaseResolving,
-    OGSRuntimePhaseReady,
-    OGSRuntimePhaseDegraded
-};
-
 typedef struct {
-    volatile uint8_t  phase;
     volatile bool     inRoom;
     volatile bool     isMaster;
     volatile uint32_t selectedPeer;
@@ -83,7 +74,6 @@ typedef struct {
 } OGSRuntimeState;
 
 static OGSRuntimeState gOGS = {
-    .phase          = OGSRuntimePhaseBoot,
     .inRoom         = false,
     .isMaster       = false,
     .selectedPeer   = 0,
@@ -101,8 +91,35 @@ static OGSRuntimeState gOGS = {
 };
 
 // ============================================================
-// MARK: - Safe Memory Layer (iOS Mach VM)
+// MARK: - Safe Memory Layer & Base Resolver
 // ============================================================
+static volatile uintptr_t gImageBase = 0;
+
+static uintptr_t OGSFindGameImage(void) {
+    uintptr_t cached = __atomic_load_n(&gImageBase, __ATOMIC_ACQUIRE);
+    if (cached) return cached;
+
+    uint32_t count = _dyld_image_count();
+    for (uint32_t i = 0; i < count; i++) {
+        const char *name = _dyld_get_image_name(i);
+        if (name && strstr(name, "/fps.app/fps")) {
+            uintptr_t base = 0x100000000ULL + _dyld_get_image_vmaddr_slide(i);
+            __atomic_store_n(&gImageBase, base, __ATOMIC_RELEASE);
+            return base;
+        }
+    }
+    uintptr_t fallback = 0x100000000ULL + _dyld_get_image_vmaddr_slide(0);
+    __atomic_store_n(&gImageBase, fallback, __ATOMIC_RELEASE);
+    return fallback;
+}
+
+static uintptr_t OGSResolveRVA(uintptr_t rva) {
+    if (!rva) return 0;
+    uintptr_t base = OGSFindGameImage();
+    if (!base || (UINTPTR_MAX - base < rva)) return 0;
+    return base + rva;
+}
+
 static bool OGSReadMemory(uintptr_t address, void *output, size_t size) {
     if (address < 0x100000000ULL || !output || size == 0) return false;
     vm_size_t copied = 0;
@@ -127,35 +144,6 @@ static bool OGSReadPointer(uintptr_t address, void **output) {
     if (value < 0x100000000ULL) return false;
     *output = (void *)value;
     return true;
-}
-
-// ============================================================
-// MARK: - Mach-O Resolver
-// ============================================================
-static volatile uintptr_t gImageBase = 0;
-
-static uintptr_t OGSFindGameImage(void) {
-    uintptr_t cached = __atomic_load_n(&gImageBase, __ATOMIC_ACQUIRE);
-    if (cached) return cached;
-
-    uint32_t count = _dyld_image_count();
-    for (uint32_t i = 0; i < count; i++) {
-        const char *name = _dyld_get_image_name(i);
-        if (!name || !strstr(name, "/fps.app/fps")) continue;
-        const struct mach_header *header = _dyld_get_image_header(i);
-        if (!header) continue;
-        uintptr_t base = (uintptr_t)header;
-        __atomic_store_n(&gImageBase, base, __ATOMIC_RELEASE);
-        return base;
-    }
-    return 0;
-}
-
-static uintptr_t OGSResolveRVA(uintptr_t rva) {
-    if (!rva) return 0;
-    uintptr_t base = OGSFindGameImage();
-    if (!base || (UINTPTR_MAX - base < rva)) return 0;
-    return base + rva;
 }
 
 // ============================================================
@@ -388,6 +376,7 @@ static void OGSProcessSpeed(void) {
 @property (strong, nonatomic) NSTimer *masterTimer;
 + (instancetype)sharedInstance;
 - (void)setupMenu;
+- (void)ensureMenuVisible;
 - (BOOL)shouldAutoKickPeerWithName:(NSString *)normName actorID:(int32_t)actID;
 @end
 
@@ -404,14 +393,13 @@ static void OGSUpdateRoomSnapshot(void) {
     uintptr_t masterPlayerAddress = OGSResolveRVA(RVA_GET_MASTER_PEER);
 
     if (!inRoomAddress || !masterStateAddress || !masterPlayerAddress) {
-        __atomic_store_n(&gOGS.phase, OGSRuntimePhaseDegraded, __ATOMIC_RELEASE);
         __atomic_store_n(&s_inSnapshotUpdate, false, __ATOMIC_RELEASE);
         return;
     }
 
-    Bool0Fn inRoomFn     = (Bool0Fn)inRoomAddress;
-    Bool0Fn isMasterFn   = (Bool0Fn)masterStateAddress;
-    Object0Fn masterFn   = (Object0Fn)masterPlayerAddress;
+    Bool0Fn inRoomFn   = (Bool0Fn)inRoomAddress;
+    Bool0Fn isMasterFn = (Bool0Fn)masterStateAddress;
+    Object0Fn masterFn = (Object0Fn)masterPlayerAddress;
 
     bool inRoom = inRoomFn(NULL);
     OGSRoomSnapshot *snapshot = OGSBeginSnapshotWrite();
@@ -429,7 +417,6 @@ static void OGSUpdateRoomSnapshot(void) {
     bool master = isMasterFn(NULL);
     void *masterPlayer = masterFn(NULL);
 
-    // 1. حماية الهوست التلقائية واستعادته فوراً عند الحاجة
     if ((gOGS.autoHostOn || gOGS.forceHostReq > 0 || gOGS.kickRetries > 0) && !master) {
         gOGS.forceHostReq = 0;
         void *myPlayer = OGSFindLocalPlayer();
@@ -444,7 +431,6 @@ static void OGSUpdateRoomSnapshot(void) {
     snapshot->isMaster = master;
     __atomic_store_n(&gOGS.isMaster, master, __ATOMIC_RELEASE);
 
-    // 2. قراءة اللاعبين وتحديث الـ Snapshot وتطبيق الطرد المتتبع والحظر
     void *players[OGS_MAX_PEERS];
     uint32_t count = OGSReadPlayerArray(RVA_GET_PEERS, players);
     OGSModMenu *menu = [OGSModMenu sharedInstance];
@@ -459,7 +445,6 @@ static void OGSUpdateRoomSnapshot(void) {
         NSString *pName = [NSString stringWithUTF8String:peerSnap.name];
         NSString *normName = OGSNormalizeKey(pName);
 
-        // أ) تنفيذ الطرد المتتبع المضمون
         if (gOGS.kickRetries > 0) {
             bool matchID = (gOGS.kickTargetID > 0 && peerSnap.actorID == gOGS.kickTargetID);
             bool matchName = (gOGS.kickTargetName[0] != '\0' && strcmp(normName.UTF8String, gOGS.kickTargetName) == 0);
@@ -473,7 +458,6 @@ static void OGSUpdateRoomSnapshot(void) {
             }
         }
 
-        // ب) تنفيذ الحظر وقفل الروم
         if ([menu shouldAutoKickPeerWithName:normName actorID:peerSnap.actorID]) {
             if (!master) {
                 void *me = OGSFindLocalPlayer();
@@ -498,7 +482,7 @@ static void OGSUpdateRoomSnapshot(void) {
 }
 
 // ============================================================
-// MARK: - Game Hooks (Single Update Point + Chat + Disconnect)
+// MARK: - Game Hooks
 // ============================================================
 static void *OGSCreateFreshKickString(void *templateIl2CppStr) {
     if (!templateIl2CppStr || (uintptr_t)templateIl2CppStr < 0x100000000ULL) return NULL;
@@ -555,9 +539,8 @@ static void hook_OnPhotonPlayerDisconnected(void *self, void *player, void *meth
 
 static void hook_SendChatRemote(void *self, void *senderStr, void *msgStr, int32_t p3, int32_t p4, void *method) {
     if (gOGS.chatMode == 1) {
-        return; // كتم رسائل اللاعبين
+        return;
     } else if (gOGS.chatMode == 2) {
-        // طرد تلقائي لأي لاعب يرسل رسالة في الشات
         NSString *senderName = OGSReadIl2CppString(senderStr);
         if (senderName.length > 0) {
             NSString *normSender = OGSNormalizeKey(senderName);
@@ -573,7 +556,6 @@ static void hook_SendChatRemote(void *self, void *senderStr, void *msgStr, int32
     if (orig_SendChatRemote) orig_SendChatRemote(self, senderStr, msgStr, p3, p4, method);
 }
 
-// نقطة التحديث الموحدة (Single Update Point)
 static volatile int32_t s_chatFrameTick = 0;
 
 static void hook_ChatUpdate(void *self, void *method) {
@@ -587,6 +569,7 @@ static void hook_ChatUpdate(void *self, void *method) {
 
 static void hook_CashUpdate(void *self, void *method) {
     if (orig_CashUpdate) orig_CashUpdate(self, method);
+    OGSProcessSpeed();
 }
 
 static void OGSInstallHooks(void) {
@@ -622,9 +605,16 @@ static void OGSInstallHooks(void) {
 }
 
 - (UIWindow *)gameMainWindow {
-    for (UIScene *s in [UIApplication sharedApplication].connectedScenes)
-        if ([s isKindOfClass:[UIWindowScene class]])
-            for (UIWindow *w in ((UIWindowScene *)s).windows) if (w.isKeyWindow || !w.hidden) return w;
+    UIWindow *bestWindow = nil;
+    for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
+        if ([s isKindOfClass:[UIWindowScene class]]) {
+            for (UIWindow *w in ((UIWindowScene *)s).windows) {
+                if (w.isKeyWindow) return w;
+                if (!w.hidden && w.alpha > 0.01f) bestWindow = w;
+            }
+        }
+    }
+    if (bestWindow) return bestWindow;
     return [UIApplication sharedApplication].windows.firstObject;
 }
 
@@ -640,13 +630,33 @@ static void OGSInstallHooks(void) {
     return b;
 }
 
+// حارس ظهور الزر: يعيد الزر لأعلى الشاشة دائماً حتى لو غيرت اللعبة النافذة أو المشهد
+- (void)ensureMenuVisible {
+    UIWindow *gw = [self gameMainWindow];
+    if (!gw || !self.containerView) return;
+
+    if (self.containerView.superview != gw) {
+        [gw addSubview:self.containerView];
+    }
+    if (!CGRectEqualToRect(self.containerView.frame, gw.bounds)) {
+        self.containerView.frame = gw.bounds;
+    }
+    self.containerView.hidden = NO;
+    self.floatingButton.hidden = NO;
+    [gw bringSubviewToFront:self.containerView];
+}
+
 - (void)setupMenu {
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (self.containerView) return;
+        if (self.containerView) {
+            [self ensureMenuVisible];
+            return;
+        }
         UIWindow *gw = [self gameMainWindow];
         if (!gw) return;
 
         self.containerView = [[OGSPassthroughContainer alloc] initWithFrame:gw.bounds];
+        self.containerView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
 
         self.floatingButton = [UIButton buttonWithType:UIButtonTypeCustom];
         self.floatingButton.frame = CGRectMake(18, 95, 48, 48);
@@ -669,7 +679,7 @@ static void OGSInstallHooks(void) {
         self.menuPanel.hidden = YES;
 
         UILabel *tl = [[UILabel alloc] initWithFrame:CGRectMake(10, 5, 295, 18)];
-        tl.text = @"OGS v8: الهوست + الطرد المؤكد + الشات + السرعة";
+        tl.text = @"OGS v8.1: الهوست + الطرد المؤكد + الشات + السرعة";
         tl.textColor = [UIColor whiteColor];
         tl.textAlignment = NSTextAlignmentCenter;
         tl.font = [UIFont boldSystemFontOfSize:11.5];
@@ -735,12 +745,12 @@ static void OGSInstallHooks(void) {
 }
 
 - (void)onMasterTick {
+    [self ensureMenuVisible];
     OGSUpdateRoomSnapshot();
     if (!self.menuPanel || self.menuPanel.hidden) return;
     [self refreshUI];
 }
 
-// قراءة معتمدة 100% على الـ Snapshot المعزول (بدون لمس مؤشرات اللعبة)
 - (void)refreshUI {
     OGSRoomSnapshot snapshot = OGSCurrentSnapshot();
     uint32_t count = snapshot.count;
@@ -937,37 +947,10 @@ static void OGSInstallHooks(void) {
 }
 @end
 
-// ============================================================
-// MARK: - Smart Runtime Bootstrap
-// ============================================================
-static void OGSWaitForRuntime(void) {
-    __atomic_store_n(&gOGS.phase, OGSRuntimePhaseWaitingImage, __ATOMIC_RELEASE);
-    __block void (^probe)(void);
-    probe = ^{
-        uintptr_t base = OGSFindGameImage();
-        if (!base) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 250 * NSEC_PER_MSEC), dispatch_get_main_queue(), probe);
-            return;
-        }
-        __atomic_store_n(&gOGS.phase, OGSRuntimePhaseResolving, __ATOMIC_RELEASE);
-        if (!OGSResolveRVA(RVA_IN_ROOM) ||
-            !OGSResolveRVA(RVA_PLAYER_GET_ID) ||
-            !OGSResolveRVA(RVA_PLAYER_GET_NAME)) {
-            __atomic_store_n(&gOGS.phase, OGSRuntimePhaseDegraded, __ATOMIC_RELEASE);
-            return;
-        }
-        OGSInstallHooks();
-        __atomic_store_n(&gOGS.phase, OGSRuntimePhaseReady, __ATOMIC_RELEASE);
-        [[OGSModMenu sharedInstance] setupMenu];
-    };
-    probe();
-}
-
 __attribute__((constructor))
 static void ogs_init(void) {
-    @autoreleasepool {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            OGSWaitForRuntime();
-        });
-    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        OGSInstallHooks();
+        [[OGSModMenu sharedInstance] setupMenu];
+    });
 }
