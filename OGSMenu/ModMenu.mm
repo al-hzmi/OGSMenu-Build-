@@ -1,58 +1,81 @@
 #import <UIKit/UIKit.h>
 #include <mach-o/dyld.h>
+#include <mach/mach.h>
 #include <stdint.h>
 #include <string.h>
 
-static const uintptr_t TBL_CASH_UPDATE   = 0x23918b8;
-static const uintptr_t RVA_ADD_CASH      = 0x13fa064;
-static const uintptr_t TBL_SUB_CASH      = 0x2391988;
-static const uintptr_t RVA_SETUP_BOXES   = 0x13e5554;
-static const uintptr_t TBL_SETUP_BOXES   = 0x23912a0;
-static const uintptr_t TBL_GET_DMG       = 0x2391388;
-static const uintptr_t TBL_WPN_HOOK      = 0x238ea10;
-static const uintptr_t RVA_REFILL_AMMO   = 0x1382c10;
-static const uintptr_t RVA_SET_TIMESCALE = 0x198ac4c;
-static const uint32_t  FIELD_CASH_OFF    = 0x0;
-static const uint32_t  FIELD_HP_OFF      = 0x0;
-
-// عناوين PhotonNetwork لإدارة الغرفة والطرد
-static const uintptr_t RVA_IN_ROOM       = 0x013CC38C;
-static const uintptr_t RVA_IS_MASTER     = 0x013CC2BC;
-static const uintptr_t RVA_GET_PEERS     = 0x013CAF78;
-static const uintptr_t RVA_CLOSE_CONN    = 0x013D2E84;
-
-typedef void (*Update0Fn)(void *, void *);
-typedef void (*Refill0Fn)(void *, void *);
-typedef void (*AddCash1Fn)(void *, int32_t, void *);
-typedef bool (*SubCash1Fn)(void *, int32_t, void *, uintptr_t, double, double);
-typedef int32_t (*GetDMG2Fn)(void *, uintptr_t, uintptr_t, void *, double, double, double);
-typedef void (*SetupBoxes2Fn)(void *, uintptr_t, uintptr_t, void *, double, double, double);
-typedef void (*WpnHookFn)(void *, uintptr_t, uintptr_t, uintptr_t, void *, double, double, double, double);
-typedef void (*SetTime1Fn)(float, void *);
+// عناوين PhotonNetwork الخاصة بالغرفة واللاعبين والطرد فقط
+static const uintptr_t RVA_IN_ROOM    = 0x013CC38C;
+static const uintptr_t RVA_IS_MASTER  = 0x013CC2BC;
+static const uintptr_t RVA_GET_PEERS  = 0x013CAF78;
+static const uintptr_t TBL_PEER_SYNC  = 0x2390a98; // جدول CloseConnection(PhotonPlayer)
 
 typedef bool  (*DiagBool0Fn)(void *);
 typedef void* (*DiagGetPeers0Fn)(void *);
-typedef bool  (*PhotonCloseConn1Fn)(void *, void *);
-
-static Update0Fn     orig_CashUpdate = NULL;
-static SubCash1Fn    orig_SubCash    = NULL;
-static GetDMG2Fn     orig_GetDMG     = NULL;
-static SetupBoxes2Fn orig_SetupBoxes = NULL;
-static WpnHookFn     orig_WpnHook    = NULL;
+typedef bool  (*DiagPeerSync1Fn)(void *, void *);
 
 static volatile uint32_t g_selected_peer = 0;
-static volatile int32_t  g_room_lock_on  = 0;
-static volatile uint32_t g_allowed_peers = 0;
-static volatile int32_t  g_lock_tick     = 0;
-static volatile int32_t  g_hp_val = 0, g_cash_val = 0, g_cash_q = 0, g_ammo_on = 0, g_vis_on = 0, g_vis_trig = 0;
 
-// تعريف getSlide أولاً قبل استخدامها في دوال الغرفة
 static uintptr_t getSlide() {
     for (uint32_t i = 0; i < _dyld_image_count(); i++) {
         const char *n = _dyld_get_image_name(i);
         if (n && strstr(n, "/fps.app/fps")) return _dyld_get_image_vmaddr_slide(i);
     }
     return _dyld_get_image_vmaddr_slide(0);
+}
+
+// قراءة آمنة للذاكرة بدون كراش لاستخراج اسم اللاعب من كائن PhotonPlayer
+static bool safeReadMem(uintptr_t addr, void *buf, size_t len) {
+    if (addr < 0x100000000ULL) return false;
+    vm_size_t outSize = 0;
+    kern_return_t kr = vm_read_overwrite(mach_task_self(), (vm_address_t)addr, (vm_size_t)len, (vm_address_t)buf, &outSize);
+    return (kr == KERN_SUCCESS && outSize == len);
+}
+
+static NSString *OGSGetPlayerNameAndID(void *peerObj, int32_t *outActorID) {
+    if (outActorID) *outActorID = 0;
+    if (!peerObj) return @"غير معروف";
+
+    uintptr_t baseObj = (uintptr_t)peerObj;
+    int32_t actorID = 0;
+    if (safeReadMem(baseObj + 0x10, &actorID, sizeof(int32_t))) {
+        if (actorID > 0 && actorID < 10000 && outActorID) {
+            *outActorID = actorID;
+        }
+    }
+
+    // فحص الحقول النصية داخل PhotonPlayer لاستخراج Il2CppString الخاص بالاسم
+    const uintptr_t candidateOffsets[] = {0x18, 0x20, 0x28, 0x10, 0x30, 0x38};
+    for (size_t i = 0; i < sizeof(candidateOffsets)/sizeof(candidateOffsets[0]); i++) {
+        uintptr_t strPtr = 0;
+        if (!safeReadMem(baseObj + candidateOffsets[i], &strPtr, sizeof(uintptr_t))) continue;
+        if (strPtr < 0x100000000ULL) continue;
+
+        int32_t strLen = 0;
+        if (!safeReadMem(strPtr + 0x10, &strLen, sizeof(int32_t))) continue;
+        if (strLen <= 0 || strLen > 36) continue;
+
+        uint16_t chars[40] = {0};
+        if (!safeReadMem(strPtr + 0x14, chars, (size_t)(strLen + 1) * sizeof(uint16_t))) continue;
+        if (chars[strLen] != 0) continue; // يجب أن ينتهي النص بـ Null Terminator
+
+        bool validChars = true;
+        for (int32_t c = 0; c < strLen; c++) {
+            if (chars[c] < 0x20 || chars[c] == 0xFFFE || chars[c] == 0xFFFF) {
+                validChars = false;
+                break;
+            }
+        }
+        if (validChars) {
+            NSString *name = [NSString stringWithCharacters:chars length:(NSUInteger)strLen];
+            if (name.length > 0) return name;
+        }
+    }
+
+    if (actorID > 0 && actorID < 10000) {
+        return [NSString stringWithFormat:@"ID:%d", actorID];
+    }
+    return [NSString stringWithFormat:@"Player_%p", peerObj];
 }
 
 static uint32_t OGSGetPeerCount(void ***outItems) {
@@ -64,7 +87,8 @@ static uint32_t OGSGetPeerCount(void ***outItems) {
     void *arr = getPeers(NULL);
     if (!arr) return 0;
 
-    uintptr_t n = *(uintptr_t *)((uint8_t *)arr + 0x18);
+    uintptr_t n = 0;
+    if (!safeReadMem((uintptr_t)arr + 0x18, &n, sizeof(uintptr_t))) return 0;
     if (n == 0 || n > 64) return 0;
 
     if (outItems) {
@@ -73,121 +97,20 @@ static uint32_t OGSGetPeerCount(void ***outItems) {
     return (uint32_t)n;
 }
 
-static NSString *OGSRoomDiagnosticText(void) {
+static bool OGSDisconnectPeerObject(void *peerObj) {
+    if (!peerObj) return false;
     uintptr_t base = 0x100000000ULL + getSlide();
-    DiagBool0Fn inRoom = (DiagBool0Fn)(base + RVA_IN_ROOM);
-    DiagBool0Fn isMaster = (DiagBool0Fn)(base + RVA_IS_MASTER);
-    bool room = inRoom ? inRoom(NULL) : false;
-    bool master = isMaster ? isMaster(NULL) : false;
-    uint32_t peerCount = OGSGetPeerCount(NULL);
-
-    if (peerCount == 0) g_selected_peer = 0;
-    else if (g_selected_peer >= peerCount) g_selected_peer = 0;
-
-    return [NSString stringWithFormat:@"الغرفة: %@ | الهوست: %@ | اللاعبين: %u | المحدد: %@",
-            room ? @"متصل" : @"لا",
-            master ? @"أنت" : @"لا",
-            peerCount,
-            peerCount ? [NSString stringWithFormat:@"%u/%u", g_selected_peer + 1, peerCount] : @"لا يوجد"];
-}
-
-static void OGSSelectNextPeer(void) {
-    uint32_t n = OGSGetPeerCount(NULL);
-    if (n == 0) {
-        g_selected_peer = 0;
-        return;
-    }
-    g_selected_peer = (g_selected_peer + 1) % n;
-}
-
-static bool OGSKickSelectedPeer(void) {
-    void **items = NULL;
-    uint32_t count = OGSGetPeerCount(&items);
-    if (count == 0 || !items) return false;
-
-    if (g_selected_peer >= count) g_selected_peer = 0;
-    void *targetPlayer = items[g_selected_peer];
-    if (!targetPlayer) return false;
-
-    uintptr_t base = 0x100000000ULL + getSlide();
-    PhotonCloseConn1Fn closeConn = (PhotonCloseConn1Fn)(base + RVA_CLOSE_CONN);
-    closeConn(targetPlayer, NULL);
+    void *fnPtr = *(void **)(base + TBL_PEER_SYNC);
+    if (!fnPtr) return false;
+    ((DiagPeerSync1Fn)fnPtr)(peerObj, NULL);
     return true;
-}
-
-static void OGSEnforceRoomLock(void) {
-    void **items = NULL;
-    uint32_t count = OGSGetPeerCount(&items);
-    if (count == 0 || !items) return;
-
-    // إذا دخل أي لاعب جديد فوق العدد المسموح به عند تفعيل القفل، يُطرد فوراً
-    if (count > g_allowed_peers) {
-        uintptr_t base = 0x100000000ULL + getSlide();
-        PhotonCloseConn1Fn closeConn = (PhotonCloseConn1Fn)(base + RVA_CLOSE_CONN);
-        for (uint32_t i = g_allowed_peers; i < count; i++) {
-            if (items[i]) {
-                closeConn(items[i], NULL);
-            }
-        }
-    }
-}
-
-static int32_t hook_GetDMG(void *s, uintptr_t p1, uintptr_t p2, void *m, double d0, double d1, double d2) {
-    return g_hp_val > 0 ? g_hp_val : (orig_GetDMG ? orig_GetDMG(s, p1, p2, m, d0, d1, d2) : 0);
-}
-
-static bool hook_SubCash(void *s, int32_t a, void *m, uintptr_t x3, double d0, double d1) {
-    if (g_cash_val > 0 && s) {
-        if (RVA_ADD_CASH > 0) ((AddCash1Fn)(0x100000000ULL + getSlide() + RVA_ADD_CASH))(s, g_cash_val, NULL);
-        return true;
-    }
-    return orig_SubCash ? orig_SubCash(s, a, m, x3, d0, d1) : false;
-}
-
-static void hook_CashUpdate(void *s, void *m) {
-    if (orig_CashUpdate) orig_CashUpdate(s, m);
-    if (!s) return;
-    if (g_hp_val > 0 && FIELD_HP_OFF >= 0x10) *(int32_t *)((uint8_t *)s + FIELD_HP_OFF) = g_hp_val;
-    if (g_cash_q > 0 && RVA_ADD_CASH > 0) {
-        int32_t bonus = g_cash_q; g_cash_q = 0;
-        ((AddCash1Fn)(0x100000000ULL + getSlide() + RVA_ADD_CASH))(s, bonus, NULL);
-    }
-    if (g_cash_val > 0 && FIELD_CASH_OFF >= 0x10) *(int32_t *)((uint8_t *)s + FIELD_CASH_OFF) = g_cash_val;
-    if (g_vis_trig && RVA_SETUP_BOXES > 0) {
-        g_vis_trig = 0;
-        ((SetupBoxes2Fn)(0x100000000ULL + getSlide() + RVA_SETUP_BOXES))(s, g_vis_on ? 1 : 0, 0, NULL, 0, 0, 0);
-    }
-    if (g_room_lock_on) {
-        if (++g_lock_tick >= 20) {
-            g_lock_tick = 0;
-            OGSEnforceRoomLock();
-        }
-    }
-}
-
-static void hook_Wpn(void *s, uintptr_t p1, uintptr_t p2, uintptr_t p3, void *m, double d0, double d1, double d2, double d3) {
-    if (orig_WpnHook) orig_WpnHook(s, p1, p2, p3, m, d0, d1, d2, d3);
-    if (s && g_ammo_on && RVA_REFILL_AMMO > 0) ((Refill0Fn)(0x100000000ULL + getSlide() + RVA_REFILL_AMMO))(s, NULL);
-}
-
-static void hook_SetupBoxes(void *s, uintptr_t p1, uintptr_t p2, void *m, double d0, double d1, double d2) {
-    if (g_vis_on) p1 = 1;
-    if (orig_SetupBoxes) orig_SetupBoxes(s, p1, p2, m, d0, d1, d2);
-}
-
-static void installHooks() {
-    uintptr_t base = 0x100000000ULL + getSlide();
-    if (TBL_CASH_UPDATE) { void **sl = (void **)(base + TBL_CASH_UPDATE); orig_CashUpdate = (Update0Fn)*sl; *sl = (void *)&hook_CashUpdate; }
-    if (TBL_SUB_CASH)    { void **sl = (void **)(base + TBL_SUB_CASH);    orig_SubCash    = (SubCash1Fn)*sl; *sl = (void *)&hook_SubCash; }
-    if (TBL_GET_DMG)     { void **sl = (void **)(base + TBL_GET_DMG);     orig_GetDMG     = (GetDMG2Fn)*sl;  *sl = (void *)&hook_GetDMG; }
-    if (TBL_WPN_HOOK)    { void **sl = (void **)(base + TBL_WPN_HOOK);    orig_WpnHook    = (WpnHookFn)*sl;  *sl = (void *)&hook_Wpn; }
-    if (TBL_SETUP_BOXES) { void **sl = (void **)(base + TBL_SETUP_BOXES); orig_SetupBoxes = (SetupBoxes2Fn)*sl; *sl = (void *)&hook_SetupBoxes; }
 }
 
 @interface OGSPassthroughContainer : UIView
 @property (weak, nonatomic) UIButton *floatingButton;
 @property (weak, nonatomic) UIView *menuPanel;
 @end
+
 @implementation OGSPassthroughContainer
 - (BOOL)pointInside:(CGPoint)p withEvent:(UIEvent *)e {
     if (self.floatingButton && !self.floatingButton.hidden && [self.floatingButton pointInside:[self convertPoint:p toView:self.floatingButton] withEvent:e]) return YES;
@@ -200,9 +123,14 @@ static void installHooks() {
 @property (strong, nonatomic) OGSPassthroughContainer *containerView;
 @property (strong, nonatomic) UIButton *floatingButton;
 @property (strong, nonatomic) UIView *menuPanel;
+@property (strong, nonatomic) UILabel *playerLabel;
 @property (strong, nonatomic) UILabel *statusLabel;
-@property (assign, nonatomic) NSInteger hpStep, cashStep, timeStep;
-@property (assign, nonatomic) BOOL ammoActive, visionActive, roomLockActive;
+@property (strong, nonatomic) UIButton *unbanButton;
+@property (strong, nonatomic) UIButton *lockButton;
+@property (strong, nonatomic) NSMutableSet<NSString *> *bannedKeys;
+@property (strong, nonatomic) NSMutableSet<NSString *> *allowedKeysWhenLocked;
+@property (assign, nonatomic) BOOL roomLockActive;
+@property (strong, nonatomic) NSTimer *guardTimer;
 + (instancetype)sharedInstance;
 - (void)setupMenu;
 @end
@@ -211,158 +139,258 @@ static void installHooks() {
 + (instancetype)sharedInstance {
     static OGSModMenu *inst = nil;
     static dispatch_once_t t;
-    dispatch_once(&t, ^{ inst = [[OGSModMenu alloc] init]; });
+    dispatch_once(&t, ^{
+        inst = [[OGSModMenu alloc] init];
+        inst.bannedKeys = [NSMutableSet set];
+        inst.allowedKeysWhenLocked = [NSMutableSet set];
+    });
     return inst;
 }
+
 - (UIWindow *)gameMainWindow {
     for (UIScene *s in [UIApplication sharedApplication].connectedScenes)
         if ([s isKindOfClass:[UIWindowScene class]])
             for (UIWindow *w in ((UIWindowScene *)s).windows) if (w.isKeyWindow || !w.hidden) return w;
     return [UIApplication sharedApplication].windows.firstObject;
 }
-- (UIButton *)makeBtn:(CGRect)f title:(NSString *)t action:(SEL)a {
+
+- (UIButton *)makeBtn:(CGRect)f title:(NSString *)t bg:(UIColor *)bg action:(SEL)a {
     UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
     b.frame = f;
-    b.backgroundColor = [UIColor colorWithRed:0.20 green:0.21 blue:0.25 alpha:1.0];
+    b.backgroundColor = bg;
     [b setTitle:t forState:UIControlStateNormal];
     [b setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    b.titleLabel.font = [UIFont boldSystemFontOfSize:13];
+    b.titleLabel.font = [UIFont boldSystemFontOfSize:12.5];
     b.layer.cornerRadius = 8.0;
     [b addTarget:self action:a forControlEvents:UIControlEventTouchUpInside];
     return b;
 }
+
 - (void)setupMenu {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (self.containerView) return;
         UIWindow *gw = [self gameMainWindow];
         if (!gw) return;
+
         self.containerView = [[OGSPassthroughContainer alloc] initWithFrame:gw.bounds];
+
+        // الزر العائم
         self.floatingButton = [UIButton buttonWithType:UIButtonTypeCustom];
-        self.floatingButton.frame = CGRectMake(25, 130, 58, 58);
+        self.floatingButton.frame = CGRectMake(20, 110, 52, 52);
         self.floatingButton.backgroundColor = [UIColor blackColor];
         self.floatingButton.opaque = YES;
         [self.floatingButton setTitle:@"OGS" forState:UIControlStateNormal];
-        self.floatingButton.layer.cornerRadius = 29.0;
-        self.floatingButton.layer.borderWidth = 2.5f;
+        self.floatingButton.titleLabel.font = [UIFont boldSystemFontOfSize:14];
+        self.floatingButton.layer.cornerRadius = 26.0;
+        self.floatingButton.layer.borderWidth = 2.0f;
         self.floatingButton.layer.borderColor = [UIColor systemRedColor].CGColor;
         [self.floatingButton addTarget:self action:@selector(toggleMenu) forControlEvents:UIControlEventTouchUpInside];
         [self.floatingButton addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)]];
         [self.containerView addSubview:self.floatingButton];
 
-        self.menuPanel = [[UIView alloc] initWithFrame:CGRectMake(95, 20, 275, 425)];
-        self.menuPanel.backgroundColor = [UIColor colorWithRed:0.10 green:0.10 blue:0.12 alpha:1.0];
+        // لوحة قصيرة ومناسبة تماماً للشاشة العرضية (الارتفاع 230 فقط)
+        self.menuPanel = [[UIView alloc] initWithFrame:CGRectMake(85, 30, 305, 230)];
+        self.menuPanel.backgroundColor = [UIColor colorWithRed:0.09 green:0.09 blue:0.11 alpha:0.96];
         self.menuPanel.layer.cornerRadius = 14.0;
         self.menuPanel.layer.borderWidth = 2.0f;
         self.menuPanel.layer.borderColor = [UIColor systemRedColor].CGColor;
         self.menuPanel.hidden = YES;
 
-        UILabel *tl = [[UILabel alloc] initWithFrame:CGRectMake(15, 10, 245, 26)];
-        tl.text = @"لوحة تحكم OGS الفعالة";
+        UILabel *tl = [[UILabel alloc] initWithFrame:CGRectMake(12, 8, 281, 22)];
+        tl.text = @"إدارة الروم: طرد وحظر اللاعبين";
         tl.textColor = [UIColor whiteColor];
         tl.textAlignment = NSTextAlignmentCenter;
-        tl.font = [UIFont boldSystemFontOfSize:16];
+        tl.font = [UIFont boldSystemFontOfSize:14];
         [self.menuPanel addSubview:tl];
 
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(15, 44, 245, 40) title:@"الدم والقوة: افتراضي" action:@selector(cycleHP:)]];
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(15, 92, 245, 40) title:@"الفلوس والشراء: افتراضي" action:@selector(cycleCash:)]];
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(15, 140, 245, 40) title:@"الذخيرة بدون تعشيق: متوقف" action:@selector(toggleAmmo:)]];
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(15, 188, 245, 40) title:@"الرؤية خلف الجدران: متوقف" action:@selector(toggleVision:)]];
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(15, 236, 245, 40) title:@"سرعة الوقت: 1.0x طبيعي" action:@selector(cycleTime:)]];
+        // شاشة عرض اسم اللاعب المحدد حالياً
+        UIView *infoBox = [[UIView alloc] initWithFrame:CGRectMake(12, 34, 281, 48)];
+        infoBox.backgroundColor = [UIColor colorWithRed:0.16 green:0.17 blue:0.20 alpha:1.0];
+        infoBox.layer.cornerRadius = 8.0;
 
-        // صف التحكم باللاعبين: زر اختيار اللاعب يميناً + زر طرد اللاعب المحدد يساراً
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(138, 284, 122, 40) title:@"تحديد لاعب: #1" action:@selector(roomDiagnostic:)]];
-        UIButton *kickBtn = [self makeBtn:CGRectMake(15, 284, 115, 40) title:@"طرد المحدد" action:@selector(kickSelectedPlayer:)];
-        kickBtn.backgroundColor = [UIColor colorWithRed:0.65 green:0.12 blue:0.15 alpha:1.0];
-        [self.menuPanel addSubview:kickBtn];
+        self.playerLabel = [[UILabel alloc] initWithFrame:CGRectMake(8, 4, 265, 22)];
+        self.playerLabel.text = @"المحدد: لا يوجد لاعبين";
+        self.playerLabel.textColor = [UIColor systemYellowColor];
+        self.playerLabel.textAlignment = NSTextAlignmentCenter;
+        self.playerLabel.font = [UIFont boldSystemFontOfSize:13.5];
+        [infoBox addSubview:self.playerLabel];
 
-        // زر قفل الغرفة ومنع دخول أي شخص جديد أو مطرود
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(15, 332, 245, 40) title:@"قفل الروم (منع دخول جدد): متوقف" action:@selector(toggleRoomLock:)]];
-
-        self.statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 380, 255, 35)];
-        self.statusLabel.text = @"جميع الميزات متصلة وفعالة";
+        self.statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(8, 26, 265, 18)];
+        self.statusLabel.text = @"الغرفة: غير متصل";
         self.statusLabel.textColor = [UIColor systemGreenColor];
         self.statusLabel.textAlignment = NSTextAlignmentCenter;
-        self.statusLabel.font = [UIFont boldSystemFontOfSize:10.5];
-        [self.menuPanel addSubview:self.statusLabel];
+        self.statusLabel.font = [UIFont systemFontOfSize:11];
+        [infoBox addSubview:self.statusLabel];
+        [self.menuPanel addSubview:infoBox];
+
+        UIColor *darkGray = [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
+        UIColor *kickOrange = [UIColor colorWithRed:0.80 green:0.35 blue:0.10 alpha:1.0];
+        UIColor *banRed = [UIColor colorWithRed:0.70 green:0.12 blue:0.15 alpha:1.0];
+
+        // الصف الأول: التنقل بين اللاعبين بالاسم
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(12, 90, 136, 38) title:@"▶ اللاعب السابق" bg:darkGray action:@selector(prevPlayer:)]];
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(157, 90, 136, 38) title:@"اللاعب التالي ◀" bg:darkGray action:@selector(nextPlayer:)]];
+
+        // الصف الثاني: طرد عادي أو طرد مع حظر نهائي
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(157, 136, 136, 40) title:@"طرد المحدد فقط" bg:kickOrange action:@selector(kickSelected:)]];
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(12, 136, 136, 40) title:@"طرد وحظر (Ban)" bg:banRed action:@selector(banSelected:)]];
+
+        // الصف الثالث: قفل الروم بالكامل + فك الحظر
+        self.lockButton = [self makeBtn:CGRectMake(157, 184, 136, 36) title:@"قفل الروم: مفتوح" bg:darkGray action:@selector(toggleRoomLock:)];
+        [self.menuPanel addSubview:self.lockButton];
+
+        self.unbanButton = [self makeBtn:CGRectMake(12, 184, 136, 36) title:@"فك حظر الكل (0)" bg:darkGray action:@selector(clearBanList:)];
+        [self.menuPanel addSubview:self.unbanButton];
 
         [self.containerView addSubview:self.menuPanel];
         self.containerView.floatingButton = self.floatingButton;
         self.containerView.menuPanel = self.menuPanel;
         [gw addSubview:self.containerView];
         [gw bringSubviewToFront:self.containerView];
+
+        // مؤقت دوري يفحص الغرفة ويطرد أي شخص محظور يحاول الدخول تلقائياً
+        self.guardTimer = [NSTimer scheduledTimerWithTimeInterval:0.35 target:self selector:@selector(onGuardTick) userInfo:nil repeats:YES];
     });
 }
-- (void)toggleMenu { self.menuPanel.hidden = !self.menuPanel.hidden; }
+
+- (void)refreshUI {
+    uintptr_t base = 0x100000000ULL + getSlide();
+    DiagBool0Fn inRoom = (DiagBool0Fn)(base + RVA_IN_ROOM);
+    DiagBool0Fn isMaster = (DiagBool0Fn)(base + RVA_IS_MASTER);
+    bool room = inRoom ? inRoom(NULL) : false;
+    bool master = isMaster ? isMaster(NULL) : false;
+
+    void **items = NULL;
+    uint32_t count = OGSGetPeerCount(&items);
+
+    if (count == 0 || !items) {
+        g_selected_peer = 0;
+        self.playerLabel.text = @"المحدد: لا يوجد لاعبين معك حالياً";
+    } else {
+        if (g_selected_peer >= count) g_selected_peer = 0;
+        int32_t actorID = 0;
+        NSString *pName = OGSGetPlayerNameAndID(items[g_selected_peer], &actorID);
+        self.playerLabel.text = [NSString stringWithFormat:@"اللاعب (%u/%u): %@", g_selected_peer + 1, count, pName];
+    }
+
+    self.statusLabel.text = [NSString stringWithFormat:@"الهوست: %@ | بالروم: %u | المحظورين: %lu",
+                             master ? @"أنت" : @"لا",
+                             count,
+                             (unsigned long)self.bannedKeys.count];
+    [self.unbanButton setTitle:[NSString stringWithFormat:@"فك حظر الكل (%lu)", (unsigned long)self.bannedKeys.count] forState:UIControlStateNormal];
+}
+
+- (void)onGuardTick {
+    void **items = NULL;
+    uint32_t count = OGSGetPeerCount(&items);
+    if (count > 0 && items) {
+        for (uint32_t i = 0; i < count; i++) {
+            void *peer = items[i];
+            if (!peer) continue;
+            int32_t actorID = 0;
+            NSString *pName = OGSGetPlayerNameAndID(peer, &actorID);
+
+            // 1. إذا كان اسم اللاعب في قائمة المحظورين، اطرده فوراً
+            if ([self.bannedKeys containsObject:pName]) {
+                OGSDisconnectPeerObject(peer);
+                continue;
+            }
+            // 2. إذا كان قفل الروم مفعلاً واللاعب ليس من ضمن الموجودين وقت القفل، اطرده فوراً
+            if (self.roomLockActive && ![self.allowedKeysWhenLocked containsObject:pName]) {
+                OGSDisconnectPeerObject(peer);
+            }
+        }
+    }
+    if (self.menuPanel && !self.menuPanel.hidden) {
+        [self refreshUI];
+    }
+}
+
+- (void)toggleMenu {
+    self.menuPanel.hidden = !self.menuPanel.hidden;
+    if (!self.menuPanel.hidden) [self refreshUI];
+}
+
 - (void)handlePan:(UIPanGestureRecognizer *)g {
     CGPoint t = [g translationInView:self.containerView];
     g.view.center = CGPointMake(g.view.center.x + t.x, g.view.center.y + t.y);
     [g setTranslation:CGPointZero inView:self.containerView];
 }
-- (void)cycleHP:(UIButton *)s {
-    int32_t v[] = {100, 200, 300, 1000, 10000, 0};
-    int32_t val = v[self.hpStep++ % 6];
-    g_hp_val = val;
-    [s setTitle:(val > 0 ? [NSString stringWithFormat:@"الدم والقوة: %d", val] : @"الدم والقوة: افتراضي") forState:UIControlStateNormal];
+
+- (void)nextPlayer:(UIButton *)s {
+    uint32_t n = OGSGetPeerCount(NULL);
+    if (n > 0) g_selected_peer = (g_selected_peer + 1) % n;
+    else g_selected_peer = 0;
+    [self refreshUI];
 }
-- (void)cycleCash:(UIButton *)s {
-    int32_t v[] = {100, 200, 300, 1000, 10000, 0};
-    int32_t val = v[self.cashStep++ % 6];
-    g_cash_val = val;
-    g_cash_q = val;
-    [s setTitle:(val > 0 ? [NSString stringWithFormat:@"الفلوس والشراء: +%d", val] : @"الفلوس والشراء: افتراضي") forState:UIControlStateNormal];
+
+- (void)prevPlayer:(UIButton *)s {
+    uint32_t n = OGSGetPeerCount(NULL);
+    if (n > 0) g_selected_peer = (g_selected_peer + n - 1) % n;
+    else g_selected_peer = 0;
+    [self refreshUI];
 }
-- (void)toggleAmmo:(UIButton *)s {
-    self.ammoActive = !self.ammoActive;
-    g_ammo_on = self.ammoActive ? 1 : 0;
-    [s setTitle:(self.ammoActive ? @"الذخيرة بدون تعشيق: مفعّل" : @"الذخيرة بدون تعشيق: متوقف") forState:UIControlStateNormal];
-}
-- (void)toggleVision:(UIButton *)s {
-    self.visionActive = !self.visionActive;
-    g_vis_on = self.visionActive ? 1 : 0;
-    g_vis_trig = 1;
-    [s setTitle:(self.visionActive ? @"الرؤية خلف الجدران: مفعّل" : @"الرؤية خلف الجدران: متوقف") forState:UIControlStateNormal];
-}
-- (void)cycleTime:(UIButton *)s {
-    float sc[] = {1.0f, 0.5f, 0.0f, 2.0f};
-    NSArray *lb = @[@"1.0x طبيعي", @"0.5x بطيء", @"0.0x تجميد", @"2.0x سريع"];
-    NSInteger i = self.timeStep++ % 4;
-    if (RVA_SET_TIMESCALE) ((SetTime1Fn)(0x100000000ULL + getSlide() + RVA_SET_TIMESCALE))(sc[i], NULL);
-    [s setTitle:[NSString stringWithFormat:@"سرعة الوقت: %@", lb[i]] forState:UIControlStateNormal];
-}
-- (void)roomDiagnostic:(UIButton *)sender {
-    OGSSelectNextPeer();
-    NSString *report = OGSRoomDiagnosticText();
-    if (self.statusLabel) self.statusLabel.text = report;
-    [sender setTitle:[NSString stringWithFormat:@"تحديد لاعب: #%u", g_selected_peer + 1]
-            forState:UIControlStateNormal];
-}
-- (void)kickSelectedPlayer:(UIButton *)sender {
-    bool ok = OGSKickSelectedPeer();
-    if (self.statusLabel) {
-        self.statusLabel.text = ok
-            ? [NSString stringWithFormat:@"تم طرد اللاعب المحدد (#%u) من الغرفة", g_selected_peer + 1]
-            : @"لا يوجد لاعب محدد أو لست الهوست";
+
+- (void)kickSelected:(UIButton *)s {
+    void **items = NULL;
+    uint32_t count = OGSGetPeerCount(&items);
+    if (count == 0 || !items) {
+        self.statusLabel.text = @"لا يوجد لاعب لطرده حالياً";
+        return;
     }
+    if (g_selected_peer >= count) g_selected_peer = 0;
+    int32_t actorID = 0;
+    NSString *pName = OGSGetPlayerNameAndID(items[g_selected_peer], &actorID);
+    OGSDisconnectPeerObject(items[g_selected_peer]);
+    self.statusLabel.text = [NSString stringWithFormat:@"تم طرد: %@", pName];
 }
-- (void)toggleRoomLock:(UIButton *)sender {
+
+- (void)banSelected:(UIButton *)s {
+    void **items = NULL;
+    uint32_t count = OGSGetPeerCount(&items);
+    if (count == 0 || !items) {
+        self.statusLabel.text = @"لا يوجد لاعب لحظره حالياً";
+        return;
+    }
+    if (g_selected_peer >= count) g_selected_peer = 0;
+    int32_t actorID = 0;
+    NSString *pName = OGSGetPlayerNameAndID(items[g_selected_peer], &actorID);
+    [self.bannedKeys addObject:pName];
+    OGSDisconnectPeerObject(items[g_selected_peer]);
+    [self refreshUI];
+    self.statusLabel.text = [NSString stringWithFormat:@"تم طرد وحظر: %@", pName];
+}
+
+- (void)toggleRoomLock:(UIButton *)s {
     self.roomLockActive = !self.roomLockActive;
+    [self.allowedKeysWhenLocked removeAllObjects];
+
     if (self.roomLockActive) {
-        g_allowed_peers = OGSGetPeerCount(NULL);
-        g_room_lock_on = 1;
-        [sender setTitle:@"قفل الروم (منع دخول جدد): مفعّل" forState:UIControlStateNormal];
-        if (self.statusLabel) {
-            self.statusLabel.text = [NSString stringWithFormat:@"تم قفل الروم على %u لاعبين (طرد تلقائي للجدد)", g_allowed_peers];
+        void **items = NULL;
+        uint32_t count = OGSGetPeerCount(&items);
+        for (uint32_t i = 0; i < count; i++) {
+            if (items && items[i]) {
+                NSString *pName = OGSGetPlayerNameAndID(items[i], NULL);
+                [self.allowedKeysWhenLocked addObject:pName];
+            }
         }
+        [s setTitle:@"قفل الروم: مقفل 🔒" forState:UIControlStateNormal];
+        s.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
     } else {
-        g_room_lock_on = 0;
-        [sender setTitle:@"قفل الروم (منع دخول جدد): متوقف" forState:UIControlStateNormal];
-        if (self.statusLabel) self.statusLabel.text = OGSRoomDiagnosticText();
+        [s setTitle:@"قفل الروم: مفتوح" forState:UIControlStateNormal];
+        s.backgroundColor = [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
     }
+    [self refreshUI];
+}
+
+- (void)clearBanList:(UIButton *)s {
+    [self.bannedKeys removeAllObjects];
+    [self refreshUI];
+    self.statusLabel.text = @"تم مسح قائمة المحظورين بالكامل";
 }
 @end
 
 __attribute__((constructor)) static void ogs_init() {
-    installHooks();
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         [[OGSModMenu sharedInstance] setupMenu];
     });
