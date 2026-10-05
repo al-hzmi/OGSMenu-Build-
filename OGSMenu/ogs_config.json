@@ -1,0 +1,22 @@
+{
+  "menu_title": "OGS v9: الهوست + الطرد + الشات + سحابي",
+  "kick_message": " تم طرده من الغرفة ",
+  "panel_width": 315,
+  "panel_height": 252,
+  "default_speed": 1.0,
+  "banned_names": [],
+  "banned_ids": [],
+  "offsets": {
+    "rva_in_room": "0x013CC38C",
+    "rva_is_master": "0x013CC2BC",
+    "rva_get_master_peer": "0x013CACA4",
+    "rva_all_players": "0x013CAEC4",
+    "rva_get_peers": "0x013CAF78",
+    "rva_player_get_name": "0x013D7534",
+    "rva_player_get_id": "0x013CC384",
+    "rva_set_timescale": "0x198ac4c",
+    "tbl_peer_sync": "0x2390a98",
+    "tbl_set_master": "0x2390aa0",
+    "tbl_on_disconnect": "0x2391930"
+  }
+}
