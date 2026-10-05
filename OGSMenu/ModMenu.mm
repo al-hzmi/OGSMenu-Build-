@@ -5,34 +5,55 @@
 #include <string.h>
 #include <stdlib.h>
 
-// جداول وعناوين اللعب الأساسية (الدمج 999، الذخيرة، التحديث، السرعة)
+// جداول وعناوين اللعب الأساسية
 static const uintptr_t TBL_CASH_UPDATE       = 0x23918b8;
 static const uintptr_t TBL_GET_DMG           = 0x2391388;
 static const uintptr_t TBL_WPN_HOOK          = 0x238ea10;
 static const uintptr_t RVA_REFILL_AMMO       = 0x1382c10;
 static const uintptr_t RVA_SET_TIMESCALE     = 0x198ac4c;
 
+// عناوين الأسلحة وقنبلة الشنطة C4 (Type 4720)
+static const uintptr_t RVA_SWITCH_WEAPON     = 0x013EAA78; // Type4720::SwitchWeapon
+static const uintptr_t RVA_GET_WPN_SELECT    = 0x013EBD90; // Type4720::GetWeaponToSelect
+static const uintptr_t RVA_SWITCH_C4         = 0x013EC1AC; // Type4720::SwitchWeaponC4
+static const uintptr_t RVA_SWITCH_GRENADE    = 0x013EC238; // Type4720::SwitchWeaponGrenade
+static const uintptr_t RVA_SWITCH_C4_SHOW    = 0x013EC350; // Type4720::SwitchWeaponC4Show
+
+// عناوين وجداول الشات (Type 4635)
+static const uintptr_t TBL_CHAT_UPDATE       = 0x238fd68;  // Type4635::Update
+static const uintptr_t TBL_SEND_CHAT_REMOTE  = 0x238fd80;  // Type4635::SendChatRemote
+static const uintptr_t RVA_SEND_CHAT         = 0x013A8C68; // Type4635::SendChat
+
 // عناوين PhotonNetwork و PhotonPlayer
-static const uintptr_t RVA_IN_ROOM           = 0x013CC38C;
-static const uintptr_t RVA_IS_MASTER         = 0x013CC2BC;
-static const uintptr_t RVA_ALL_PLAYERS       = 0x013CAEC4;
-static const uintptr_t RVA_GET_PEERS         = 0x013CAF78;
+static const uintptr_t RVA_IN_ROOM           = 0x013CC38C; // PhotonNetwork::get_inRoom()
+static const uintptr_t RVA_IS_MASTER         = 0x013CC2BC; // PhotonNetwork::get_isMasterClient()
+static const uintptr_t RVA_GET_MASTER_PEER   = 0x013CACA4; // PhotonNetwork::get_masterClient()
+static const uintptr_t RVA_ALL_PLAYERS       = 0x013CAEC4; // PhotonNetwork::get_playerList()
+static const uintptr_t RVA_GET_PEERS         = 0x013CAF78; // PhotonNetwork::get_otherPlayers()
 
-static const uintptr_t RVA_PLAYER_GET_NAME   = 0x013D7534;
-static const uintptr_t RVA_PLAYER_GET_USERID = 0x013D692C;
-static const uintptr_t RVA_PLAYER_GET_ID     = 0x013CC384;
-static const uintptr_t RVA_PLAYER_IS_MASTER  = 0x013D305C;
-static const uintptr_t RVA_ARABIC_FIX        = 0x0130F538;
+static const uintptr_t RVA_PLAYER_GET_NAME   = 0x013D7534; // PhotonPlayer::get_name()
+static const uintptr_t RVA_PLAYER_GET_USERID = 0x013D692C; // PhotonPlayer::get_UserId()
+static const uintptr_t RVA_PLAYER_GET_ID     = 0x013CC384; // PhotonPlayer::get_ID()
+static const uintptr_t RVA_PLAYER_IS_MASTER  = 0x013D305C; // PhotonPlayer::get_IsMasterClient()
+static const uintptr_t RVA_ARABIC_FIX        = 0x0130F538; // Type4294::Fix(Il2CppString*)
 
-static const uintptr_t TBL_PEER_SYNC         = 0x2390a98; // CloseConnection
-static const uintptr_t TBL_SET_MASTER        = 0x2390aa0; // SetMasterClient
-static const uintptr_t TBL_ON_DISCONNECT     = 0x2391930; // OnPhotonPlayerDisconnected
+static const uintptr_t TBL_PEER_SYNC         = 0x2390a98;  // CloseConnection(PhotonPlayer)
+static const uintptr_t TBL_SET_MASTER        = 0x2390aa0;  // SetMasterClient(PhotonPlayer)
+static const uintptr_t TBL_ON_DISCONNECT     = 0x2391930;  // OnPhotonPlayerDisconnected(PhotonPlayer)
 
 typedef void    (*Update0Fn)(void *, void *);
 typedef void    (*Refill0Fn)(void *, void *);
 typedef int32_t (*GetDMG2Fn)(void *, uintptr_t, uintptr_t, void *, double, double, double);
 typedef void    (*WpnHookFn)(void *, uintptr_t, uintptr_t, uintptr_t, void *, double, double, double, double);
 typedef void    (*SetTime1Fn)(float, void *);
+
+typedef void    (*SwitchWpnFn)(void *, void *, int32_t, void *);
+typedef void*   (*GetWpnSelectFn)(void *, void *);
+typedef void    (*SwitchC4Fn)(void *, void *);
+typedef void    (*SwitchC4ShowFn)(void *, int32_t, void *);
+
+typedef void    (*SendChatFn)(void *, void *, void *, int32_t, int32_t, void *);
+typedef void    (*SendChatRemoteFn)(void *, void *, void *, int32_t, int32_t, void *);
 
 typedef bool    (*DiagBool0Fn)(void *);
 typedef void*   (*DiagGetPeers0Fn)(void *);
@@ -43,17 +64,29 @@ typedef bool    (*PlayerIsMasterFn)(void *, void *);
 typedef void*   (*ArabicFixFn)(void *, void *);
 typedef void    (*OnDisconnectFn)(void *, void *, void *);
 
-static Update0Fn      orig_CashUpdate   = NULL;
-static GetDMG2Fn      orig_GetDMG       = NULL;
-static WpnHookFn      orig_WpnHook      = NULL;
-static OnDisconnectFn orig_OnDisconnect = NULL;
+static Update0Fn        orig_CashUpdate     = NULL;
+static Update0Fn        orig_ChatUpdate     = NULL;
+static SendChatRemoteFn orig_SendChatRemote = NULL;
+static GetDMG2Fn        orig_GetDMG         = NULL;
+static WpnHookFn        orig_WpnHook        = NULL;
+static OnDisconnectFn   orig_OnDisconnect   = NULL;
+static SwitchWpnFn      orig_SwitchWeapon   = NULL;
+static GetWpnSelectFn   orig_GetWpnSelect   = NULL;
 
 static volatile uint32_t g_selected_peer   = 0;
-static volatile int32_t  g_super_weapon_on = 1; // مفعّل تلقائياً أول ما تدخل اللعبة (دمج 999 + ذخيرة)
+static volatile int32_t  g_auto_host_on    = 1; // احتكار الهوست وطرد السارق مفعّل تلقائياً
+static volatile int32_t  g_chat_mode       = 0; // 0 = عادي | 1 = كتم عندي | 2 = طرد أي شخص يكتب
+static volatile int32_t  g_wpn_mode        = 1; // 1 = دمج 999 | 2 = قنبلة C4 + دمج 999 | 3 = قنابل + دمج 999 | 0 = عادي
+static volatile int32_t  g_c4_trigger      = 0;
 static volatile float    g_custom_speed    = 1.0f;
 static volatile int32_t  g_speed_dirty     = 0;
 static volatile int32_t  g_kick_msg_armed  = 0;
-static volatile int32_t  g_guard_frame_cnt = 0;
+static volatile int32_t  g_guard_tick      = 0;
+static volatile int32_t  g_host_tick       = 0;
+
+static void *g_chatInstance        = NULL;
+static void *g_wpnSwitcher         = NULL;
+static void *g_templateIl2CppStr   = NULL;
 static void *g_customKickIl2CppStr = NULL;
 
 static uintptr_t getSlide() {
@@ -75,14 +108,35 @@ static NSString *OGSReadIl2CppString(void *strPtr) {
     if (!strPtr || (uintptr_t)strPtr < 0x100000000ULL) return nil;
     int32_t strLen = 0;
     if (!safeReadMem((uintptr_t)strPtr + 0x10, &strLen, sizeof(int32_t))) return nil;
-    if (strLen <= 0 || strLen > 64) return nil;
+    if (strLen <= 0 || strLen > 80) return nil;
 
-    uint16_t chars[68] = {0};
+    uint16_t chars[84] = {0};
     if (!safeReadMem((uintptr_t)strPtr + 0x14, chars, (size_t)strLen * sizeof(uint16_t))) return nil;
+    g_templateIl2CppStr = strPtr;
     return [NSString stringWithCharacters:chars length:(NSUInteger)strLen];
 }
 
-// تنظيف الاسم من المسافات لضمان تطابق الحظر 100%
+// إنشاء نص Il2CppString سليم لإرساله في الشات العام
+static void *OGSCreateIl2CppString(NSString *nsStr) {
+    if (!nsStr) nsStr = @"";
+    if (!g_templateIl2CppStr || (uintptr_t)g_templateIl2CppStr < 0x100000000ULL) return NULL;
+
+    uint8_t header[16] = {0};
+    if (!safeReadMem((uintptr_t)g_templateIl2CppStr, header, 16)) return NULL;
+
+    NSUInteger len = nsStr.length;
+    if (len > 100) len = 100;
+    uint8_t *rawObj = (uint8_t *)calloc(1, 0x14 + (len + 4) * sizeof(uint16_t));
+    if (!rawObj) return NULL;
+
+    memcpy(rawObj, header, 16);
+    *(int32_t *)(rawObj + 0x10) = (int32_t)len;
+    if (len > 0) {
+        [nsStr getCharacters:(unichar *)(rawObj + 0x14) range:NSMakeRange(0, len)];
+    }
+    return rawObj;
+}
+
 static NSString *OGSNormalizeKey(NSString *raw) {
     if (!raw) return @"";
     return [[raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] lowercaseString];
@@ -120,6 +174,33 @@ static NSString *OGSGetPlayerIdentity(void *peerObj, NSString **outBanKey, int32
         }
     }
     return realName;
+}
+
+// إرسال رسالة في شات الروم العام يراها كل اللاعبين (باستخدام معاملات 0x13A7E80)
+static void OGSBroadcastRoomChat(NSString *senderTitle, NSString *messageText) {
+    if (!g_chatInstance || (uintptr_t)g_chatInstance < 0x100000000ULL) return;
+
+    // التأكد من وجود قالب نصي صالح
+    if (!g_templateIl2CppStr) {
+        void * existingFieldStr = NULL;
+        if (safeReadMem((uintptr_t)g_chatInstance + 0x38, &existingFieldStr, sizeof(void *)) && existingFieldStr) {
+            OGSReadIl2CppString(existingFieldStr);
+        }
+    }
+
+    void *il2cppSender = OGSCreateIl2CppString(senderTitle);
+    void *il2cppMsg    = OGSCreateIl2CppString(messageText);
+    if (!il2cppSender || !il2cppMsg) return;
+
+    int32_t w3 = 0;
+    uintptr_t obj128 = 0;
+    if (safeReadMem((uintptr_t)g_chatInstance + 0x128, &obj128, sizeof(uintptr_t)) && obj128 > 0x100000000ULL) {
+        safeReadMem(obj128 + 0x1B0, &w3, sizeof(int32_t));
+    }
+
+    uintptr_t base = 0x100000000ULL + getSlide();
+    SendChatFn sendChat = (SendChatFn)(base + RVA_SEND_CHAT);
+    sendChat(g_chatInstance, il2cppSender, il2cppMsg, w3, 0, NULL);
 }
 
 static uint32_t OGSGetPeerCount(void ***outItems) {
@@ -200,17 +281,44 @@ static bool OGSDisconnectPeerRaw(void *peerObj) {
     return ((DiagPeerSync1Fn)fnPtr)(peerObj, NULL);
 }
 
-static void OGSKickPeerGuaranteed(void *peerObj) {
+// يضمن أنك الهوست، ويرسل في شات الروم للكل "تم طرد فلان من الغرفة"، ثم يطرده فوراً
+static void OGSKickPeerWithBroadcast(void *peerObj, bool announceInChat) {
     if (!peerObj) return;
     g_kick_msg_armed = 1;
+
+    NSString *pName = OGSGetPlayerIdentity(peerObj, NULL, NULL, NULL);
+
     uintptr_t base = 0x100000000ULL + getSlide();
     DiagBool0Fn isMaster = (DiagBool0Fn)(base + RVA_IS_MASTER);
-    if (isMaster && isMaster(NULL)) {
-        OGSDisconnectPeerRaw(peerObj);
-    } else {
+    if (!isMaster || !isMaster(NULL)) {
         void *myPlayer = OGSFindLocalPlayerObject();
         if (myPlayer) OGSSetRoomMasterObject(myPlayer);
-        OGSDisconnectPeerRaw(peerObj);
+    }
+
+    if (announceInChat && pName.length > 0) {
+        NSString *msg = [NSString stringWithFormat:@"تم طرد %@ من الغرفة", pName];
+        OGSBroadcastRoomChat(@"[إدارة الغرفة]", msg);
+    }
+
+    OGSDisconnectPeerRaw(peerObj);
+}
+
+// تفعيل قنبلة الشنطة C4 أو القنابل الخاصة عبر Type 4720
+static void OGSApplySpecialWeaponLoadout(void) {
+    if (!g_wpnSwitcher || (uintptr_t)g_wpnSwitcher < 0x100000000ULL) return;
+    uintptr_t wpnDict = 0;
+    if (!safeReadMem((uintptr_t)g_wpnSwitcher + 0x70, &wpnDict, sizeof(uintptr_t)) || wpnDict < 0x100000000ULL) return;
+
+    uintptr_t base = 0x100000000ULL + getSlide();
+    if (g_wpn_mode == 2) {
+        // إظهار شنطة الـ C4 ومؤقتها وتجهيز القنبلة في اليد
+        SwitchC4ShowFn c4Show = (SwitchC4ShowFn)(base + RVA_SWITCH_C4_SHOW);
+        SwitchC4Fn c4Equip    = (SwitchC4Fn)(base + RVA_SWITCH_C4);
+        if (c4Show)  c4Show(g_wpnSwitcher, 1, NULL);
+        if (c4Equip) c4Equip(g_wpnSwitcher, NULL);
+    } else if (g_wpn_mode == 3) {
+        SwitchC4Fn grenEquip = (SwitchC4Fn)(base + RVA_SWITCH_GRENADE);
+        if (grenEquip) grenEquip(g_wpnSwitcher, NULL);
     }
 }
 
@@ -234,6 +342,8 @@ static void OGSKickPeerGuaranteed(void *peerObj) {
 @property (strong, nonatomic) UILabel *statusLabel;
 @property (strong, nonatomic) UIButton *unbanButton;
 @property (strong, nonatomic) UIButton *lockButton;
+@property (strong, nonatomic) UIButton *hostLockButton;
+@property (strong, nonatomic) UIButton *muteChatButton;
 @property (strong, nonatomic) UIButton *weaponButton;
 @property (strong, nonatomic) UIButton *speedSetButton;
 @property (strong, nonatomic) NSMutableSet<NSString *> *bannedNames;
@@ -242,10 +352,9 @@ static void OGSKickPeerGuaranteed(void *peerObj) {
 @property (strong, nonatomic) NSTimer *uiTimer;
 + (instancetype)sharedInstance;
 - (void)setupMenu;
-- (void)runInGameThreadBanCheck;
+- (void)runRoomProtectionTick;
 @end
 
-// بناء نص " تم طرده من الغرفة "
 static void *OGSBuildKickLeaveString(void *templateIl2CppStr) {
     if (g_customKickIl2CppStr) return g_customKickIl2CppStr;
     if (!templateIl2CppStr || (uintptr_t)templateIl2CppStr < 0x100000000ULL) return NULL;
@@ -303,41 +412,129 @@ static void hook_OnPhotonPlayerDisconnected(void *self, void *player, void *meth
     if (leaveStrSlot && origLeaveStr) *leaveStrSlot = origLeaveStr;
 }
 
-// خطاف الدمج 999 للسلاح الخاص بك
+// اعتراض الرسائل القادمة من اللاعبين الآخرين (الكتم أو الطرد الفوري لمن يسب/يكتب)
+static void hook_SendChatRemote(void *self, void *senderStr, void *msgStr, int32_t p3, int32_t p4, void *method) {
+    g_chatInstance = self;
+    if (senderStr) OGSReadIl2CppString(senderStr);
+
+    if (g_chat_mode == 1) {
+        // وضع الكتم: تجاهل الرسالة القادمة
+        return;
+    } else if (g_chat_mode == 2) {
+        // وضع منع الشات في الروم: البحث عن صاحب الرسالة وطرده تلقائياً!
+        NSString *senderName = OGSReadIl2CppString(senderStr);
+        if (senderName && senderName.length > 0) {
+            NSString *normSender = OGSNormalizeKey(senderName);
+            void **items = NULL;
+            uint32_t count = OGSGetPeerCount(&items);
+            for (uint32_t i = 0; i < count; i++) {
+                if (!items[i]) continue;
+                NSString *peerName = OGSGetPlayerIdentity(items[i], NULL, NULL, NULL);
+                if ([OGSNormalizeKey(peerName) isEqualToString:normSender]) {
+                    OGSKickPeerWithBroadcast(items[i], true);
+                    return;
+                }
+            }
+        }
+        return;
+    }
+
+    if (orig_SendChatRemote) orig_SendChatRemote(self, senderStr, msgStr, p3, p4, method);
+}
+
+// يعمل 60 مرة في الثانية داخل الغرفة (حتى لو كنت ميتاً)
+static void hook_ChatUpdate(void *self, void *method) {
+    g_chatInstance = self;
+    if (orig_ChatUpdate) orig_ChatUpdate(self, method);
+
+    // 1. حماية الهوست المضادة للهكر: استعادة الهوست فوراً + طرد الهكر الذي حاول سحبه!
+    if (g_auto_host_on && ++g_host_tick >= 6) {
+        g_host_tick = 0;
+        uintptr_t base = 0x100000000ULL + getSlide();
+        DiagBool0Fn inRoom = (DiagBool0Fn)(base + RVA_IN_ROOM);
+        DiagBool0Fn isMaster = (DiagBool0Fn)(base + RVA_IS_MASTER);
+        if (inRoom && inRoom(NULL) && isMaster && !isMaster(NULL)) {
+            DiagGetPeers0Fn getMasterPeer = (DiagGetPeers0Fn)(base + RVA_GET_MASTER_PEER);
+            void *thiefPeer = getMasterPeer ? getMasterPeer(NULL) : NULL;
+            void *myPlayer  = OGSFindLocalPlayerObject();
+
+            if (myPlayer) {
+                OGSSetRoomMasterObject(myPlayer);
+            }
+            if (thiefPeer && thiefPeer != myPlayer) {
+                // طرد الهكر الذي حاول سحب الهوست منك فوراً
+                OGSDisconnectPeerRaw(thiefPeer);
+            }
+        }
+    }
+
+    // 2. فحص قائمة المحظورين وقفل الروم باستمرار
+    if (++g_guard_tick >= 12) {
+        g_guard_tick = 0;
+        [[OGSModMenu sharedInstance] runRoomProtectionTick];
+    }
+}
+
+// التقاط مؤشر كلاس الأسلحة Type 4720 لتفعيل قنبلة الشنطة C4
+static void hook_SwitchWeapon(void *self, void *wpnObj, int32_t flag, void *method) {
+    if (self) g_wpnSwitcher = self;
+    if (orig_SwitchWeapon) orig_SwitchWeapon(self, wpnObj, flag, method);
+}
+
+static void *hook_GetWpnSelect(void *self, void *method) {
+    if (self) g_wpnSwitcher = self;
+    return orig_GetWpnSelect ? orig_GetWpnSelect(self, method) : NULL;
+}
+
 static int32_t hook_GetDMG(void *s, uintptr_t p1, uintptr_t p2, void *m, double d0, double d1, double d2) {
-    if (g_super_weapon_on) return 999;
+    if (g_wpn_mode > 0) return 999;
     return orig_GetDMG ? orig_GetDMG(s, p1, p2, m, d0, d1, d2) : 0;
 }
 
-// خطاف الذخيرة اللانهائية للسلاح الخاص بك
 static void hook_Wpn(void *s, uintptr_t p1, uintptr_t p2, uintptr_t p3, void *m, double d0, double d1, double d2, double d3) {
     if (orig_WpnHook) orig_WpnHook(s, p1, p2, p3, m, d0, d1, d2, d3);
-    if (s && g_super_weapon_on && RVA_REFILL_AMMO > 0) {
+    if (s && g_wpn_mode > 0 && RVA_REFILL_AMMO > 0) {
         ((Refill0Fn)(0x100000000ULL + getSlide() + RVA_REFILL_AMMO))(s, NULL);
     }
 }
 
-// خطاف التحديث الرئيسي داخل خيط Unity: ينفذ السرعة المخصصة + فحص الحظر المضمون
 static void hook_CashUpdate(void *s, void *m) {
     if (orig_CashUpdate) orig_CashUpdate(s, m);
-
     if (g_speed_dirty && RVA_SET_TIMESCALE > 0) {
         g_speed_dirty = 0;
         ((SetTime1Fn)(0x100000000ULL + getSlide() + RVA_SET_TIMESCALE))(g_custom_speed, NULL);
     }
+    if (g_c4_trigger) {
+        g_c4_trigger = 0;
+        OGSApplySpecialWeaponLoadout();
+    }
+}
 
-    if (++g_guard_frame_cnt >= 15) {
-        g_guard_frame_cnt = 0;
-        [[OGSModMenu sharedInstance] runInGameThreadBanCheck];
+// بحث تلقائي في جدول __DATA لربط دوال الأسلحة بدون الحاجة لعناوين ثابتة
+static void hookTableByRVA(uintptr_t base, uintptr_t targetRVA, void *newFn, void **origFnOut) {
+    uintptr_t targetAddr = base + targetRVA;
+    for (uintptr_t off = 0x2358400; off < 0x2420000; off += 8) {
+        uintptr_t val = 0;
+        if (safeReadMem(base + off, &val, sizeof(uintptr_t)) && val == targetAddr) {
+            void **slot = (void **)(base + off);
+            if (origFnOut) *origFnOut = *slot;
+            *slot = newFn;
+            break;
+        }
     }
 }
 
 static void installAllHooks() {
     uintptr_t base = 0x100000000ULL + getSlide();
-    if (TBL_CASH_UPDATE)   { void **sl = (void **)(base + TBL_CASH_UPDATE);   orig_CashUpdate   = (Update0Fn)*sl;      *sl = (void *)&hook_CashUpdate; }
-    if (TBL_GET_DMG)       { void **sl = (void **)(base + TBL_GET_DMG);       orig_GetDMG       = (GetDMG2Fn)*sl;      *sl = (void *)&hook_GetDMG; }
-    if (TBL_WPN_HOOK)      { void **sl = (void **)(base + TBL_WPN_HOOK);      orig_WpnHook      = (WpnHookFn)*sl;      *sl = (void *)&hook_Wpn; }
-    if (TBL_ON_DISCONNECT) { void **sl = (void **)(base + TBL_ON_DISCONNECT); orig_OnDisconnect = (OnDisconnectFn)*sl; *sl = (void *)&hook_OnPhotonPlayerDisconnected; }
+    if (TBL_CASH_UPDATE)      { void **sl = (void **)(base + TBL_CASH_UPDATE);      orig_CashUpdate     = (Update0Fn)*sl;        *sl = (void *)&hook_CashUpdate; }
+    if (TBL_CHAT_UPDATE)      { void **sl = (void **)(base + TBL_CHAT_UPDATE);      orig_ChatUpdate     = (Update0Fn)*sl;        *sl = (void *)&hook_ChatUpdate; }
+    if (TBL_SEND_CHAT_REMOTE) { void **sl = (void **)(base + TBL_SEND_CHAT_REMOTE); orig_SendChatRemote = (SendChatRemoteFn)*sl; *sl = (void *)&hook_SendChatRemote; }
+    if (TBL_GET_DMG)          { void **sl = (void **)(base + TBL_GET_DMG);          orig_GetDMG         = (GetDMG2Fn)*sl;        *sl = (void *)&hook_GetDMG; }
+    if (TBL_WPN_HOOK)         { void **sl = (void **)(base + TBL_WPN_HOOK);         orig_WpnHook        = (WpnHookFn)*sl;        *sl = (void *)&hook_Wpn; }
+    if (TBL_ON_DISCONNECT)    { void **sl = (void **)(base + TBL_ON_DISCONNECT);    orig_OnDisconnect   = (OnDisconnectFn)*sl;   *sl = (void *)&hook_OnPhotonPlayerDisconnected; }
+
+    hookTableByRVA(base, RVA_SWITCH_WEAPON, (void *)&hook_SwitchWeapon, (void **)&orig_SwitchWeapon);
+    hookTableByRVA(base, RVA_GET_WPN_SELECT, (void *)&hook_GetWpnSelect, (void **)&orig_GetWpnSelect);
 }
 
 @implementation OGSModMenu
@@ -365,7 +562,7 @@ static void installAllHooks() {
     b.backgroundColor = bg;
     [b setTitle:t forState:UIControlStateNormal];
     [b setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    b.titleLabel.font = [UIFont boldSystemFontOfSize:11.5];
+    b.titleLabel.font = [UIFont boldSystemFontOfSize:11.0];
     b.layer.cornerRadius = 7.0;
     [b addTarget:self action:a forControlEvents:UIControlEventTouchUpInside];
     return b;
@@ -380,45 +577,45 @@ static void installAllHooks() {
         self.containerView = [[OGSPassthroughContainer alloc] initWithFrame:gw.bounds];
 
         self.floatingButton = [UIButton buttonWithType:UIButtonTypeCustom];
-        self.floatingButton.frame = CGRectMake(20, 100, 50, 50);
+        self.floatingButton.frame = CGRectMake(18, 95, 48, 48);
         self.floatingButton.backgroundColor = [UIColor blackColor];
         self.floatingButton.opaque = YES;
         [self.floatingButton setTitle:@"OGS" forState:UIControlStateNormal];
         self.floatingButton.titleLabel.font = [UIFont boldSystemFontOfSize:13];
-        self.floatingButton.layer.cornerRadius = 25.0;
+        self.floatingButton.layer.cornerRadius = 24.0;
         self.floatingButton.layer.borderWidth = 2.0f;
         self.floatingButton.layer.borderColor = [UIColor systemRedColor].CGColor;
         [self.floatingButton addTarget:self action:@selector(toggleMenu) forControlEvents:UIControlEventTouchUpInside];
         [self.floatingButton addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)]];
         [self.containerView addSubview:self.floatingButton];
 
-        // لوحة مدمجة بالكامل (ارتفاع 296 فقط لتظهر كاملة في الشاشة العرضية)
-        self.menuPanel = [[UIView alloc] initWithFrame:CGRectMake(80, 15, 310, 296)];
+        // لوحة مدمجة بالكامل (ارتفاع 292 فقط لتظهر كاملة في الشاشة العرضية)
+        self.menuPanel = [[UIView alloc] initWithFrame:CGRectMake(75, 12, 315, 292)];
         self.menuPanel.backgroundColor = [UIColor colorWithRed:0.09 green:0.09 blue:0.11 alpha:0.96];
         self.menuPanel.layer.cornerRadius = 14.0;
         self.menuPanel.layer.borderWidth = 2.0f;
         self.menuPanel.layer.borderColor = [UIColor systemRedColor].CGColor;
         self.menuPanel.hidden = YES;
 
-        UILabel *tl = [[UILabel alloc] initWithFrame:CGRectMake(10, 5, 290, 18)];
-        tl.text = @"OGS: الطرد والحظر + السرعة + سلاح 999";
+        UILabel *tl = [[UILabel alloc] initWithFrame:CGRectMake(10, 4, 295, 18)];
+        tl.text = @"OGS: حماية الهوست + الطرد + الشات + C4";
         tl.textColor = [UIColor whiteColor];
         tl.textAlignment = NSTextAlignmentCenter;
-        tl.font = [UIFont boldSystemFontOfSize:12.5];
+        tl.font = [UIFont boldSystemFontOfSize:12.0];
         [self.menuPanel addSubview:tl];
 
-        UIView *infoBox = [[UIView alloc] initWithFrame:CGRectMake(10, 26, 290, 42)];
+        UIView *infoBox = [[UIView alloc] initWithFrame:CGRectMake(10, 24, 295, 40)];
         infoBox.backgroundColor = [UIColor colorWithRed:0.16 green:0.17 blue:0.20 alpha:1.0];
         infoBox.layer.cornerRadius = 8.0;
 
-        self.playerLabel = [[UILabel alloc] initWithFrame:CGRectMake(6, 3, 278, 19)];
+        self.playerLabel = [[UILabel alloc] initWithFrame:CGRectMake(6, 2, 283, 18)];
         self.playerLabel.text = @"المحدد: لا يوجد لاعبين";
         self.playerLabel.textColor = [UIColor systemYellowColor];
         self.playerLabel.textAlignment = NSTextAlignmentCenter;
-        self.playerLabel.font = [UIFont boldSystemFontOfSize:12.5];
+        self.playerLabel.font = [UIFont boldSystemFontOfSize:12.0];
         [infoBox addSubview:self.playerLabel];
 
-        self.statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(6, 22, 278, 17)];
+        self.statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(6, 20, 283, 17)];
         self.statusLabel.text = @"الغرفة: غير متصل";
         self.statusLabel.textColor = [UIColor systemGreenColor];
         self.statusLabel.textAlignment = NSTextAlignmentCenter;
@@ -430,36 +627,38 @@ static void installAllHooks() {
         UIColor *kickOrange = [UIColor colorWithRed:0.80 green:0.35 blue:0.10 alpha:1.0];
         UIColor *banRed     = [UIColor colorWithRed:0.70 green:0.12 blue:0.15 alpha:1.0];
         UIColor *hostBlue   = [UIColor colorWithRed:0.14 green:0.42 blue:0.72 alpha:1.0];
-        UIColor *hostPurple = [UIColor colorWithRed:0.42 green:0.22 blue:0.65 alpha:1.0];
         UIColor *wpnGreen   = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
 
-        // صف 1: اختيار اللاعب
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(10, 74, 141, 32) title:@"▶ اللاعب السابق" bg:darkGray action:@selector(prevPlayer:)]];
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(159, 74, 141, 32) title:@"اللاعب التالي ◀" bg:darkGray action:@selector(nextPlayer:)]];
+        // صف 1: التنقل بين اللاعبين
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(10, 68, 144, 30) title:@"▶ اللاعب السابق" bg:darkGray action:@selector(prevPlayer:)]];
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(161, 68, 144, 30) title:@"اللاعب التالي ◀" bg:darkGray action:@selector(nextPlayer:)]];
 
-        // صف 2: طرد أو حظر
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(159, 111, 141, 33) title:@"طرد المحدد فقط" bg:kickOrange action:@selector(kickSelected:)]];
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(10, 111, 141, 33) title:@"طرد وحظر (Ban)" bg:banRed action:@selector(banSelected:)]];
+        // صف 2: طرد أو حظر مع إعلان في الشات العام
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(161, 103, 144, 32) title:@"طرد المحدد (مع إعلان)" bg:kickOrange action:@selector(kickSelected:)]];
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(10, 103, 144, 32) title:@"طرد وحظر (Ban)" bg:banRed action:@selector(banSelected:)]];
 
-        // صف 3: الهوست
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(159, 149, 141, 33) title:@"سحب الهوست لنفسي 👑" bg:hostBlue action:@selector(takeHostForMe:)]];
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(10, 149, 141, 33) title:@"منح الهوست للمحدد" bg:hostPurple action:@selector(giveHostToSelected:)]];
+        // صف 3: احتكار الهوست المضاد للهكر + التحكم بالشات
+        self.hostLockButton = [self makeBtn:CGRectMake(155, 140, 150, 32) title:@"حماية الهوست: مفعّل 👑" bg:wpnGreen action:@selector(toggleAutoHost:)];
+        [self.menuPanel addSubview:self.hostLockButton];
+
+        self.muteChatButton = [self makeBtn:CGRectMake(10, 140, 140, 32) title:@"الشات: مفتوح" bg:darkGray action:@selector(cycleChatMode:)];
+        [self.menuPanel addSubview:self.muteChatButton];
 
         // صف 4: قفل الروم + فك الحظر
-        self.lockButton = [self makeBtn:CGRectMake(159, 187, 141, 32) title:@"قفل الروم: مفتوح" bg:darkGray action:@selector(toggleRoomLock:)];
+        self.lockButton = [self makeBtn:CGRectMake(161, 177, 144, 30) title:@"قفل الروم: مفتوح" bg:darkGray action:@selector(toggleRoomLock:)];
         [self.menuPanel addSubview:self.lockButton];
 
-        self.unbanButton = [self makeBtn:CGRectMake(10, 187, 141, 32) title:@"فك حظر الكل (0)" bg:darkGray action:@selector(clearBanList:)];
+        self.unbanButton = [self makeBtn:CGRectMake(10, 177, 144, 30) title:@"فك حظر الكل (0)" bg:darkGray action:@selector(clearBanList:)];
         [self.menuPanel addSubview:self.unbanButton];
 
-        // صف 5: التحكم الحر بالسرعة (- / كتابة رقم / +)
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(10, 224, 55, 32) title:@"سرعة -" bg:darkGray action:@selector(speedDown:)]];
-        self.speedSetButton = [self makeBtn:CGRectMake(70, 224, 170, 32) title:@"السرعة: 1.0x (اضغط للكتابة)" bg:hostBlue action:@selector(promptCustomSpeed:)];
+        // صف 5: التحكم بالسرعة (- / كتابة رقم / +)
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(10, 212, 55, 30) title:@"سرعة -" bg:darkGray action:@selector(speedDown:)]];
+        self.speedSetButton = [self makeBtn:CGRectMake(70, 212, 175, 30) title:@"السرعة: 1.0x (اضغط للكتابة)" bg:hostBlue action:@selector(promptCustomSpeed:)];
         [self.menuPanel addSubview:self.speedSetButton];
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(245, 224, 55, 32) title:@"سرعة +" bg:darkGray action:@selector(speedUp:)]];
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(250, 212, 55, 30) title:@"سرعة +" bg:darkGray action:@selector(speedUp:)]];
 
-        // صف 6: السلاح الخارق الحصري (دمج 999 + ذخيرة بدون تعشيق)
-        self.weaponButton = [self makeBtn:CGRectMake(10, 260, 290, 30) title:@"سلاح خارق (دمج 999 + ذخيرة): مفعّل ⚡" bg:wpnGreen action:@selector(toggleSuperWeapon:)];
+        // صف 6: السلاح الخارق وقنبلة الشنطة C4
+        self.weaponButton = [self makeBtn:CGRectMake(10, 247, 295, 34) title:@"السلاح: دمج 999 + ذخيرة (اضغط لـ C4 💣)" bg:wpnGreen action:@selector(cycleWeaponMode:)];
         [self.menuPanel addSubview:self.weaponButton];
 
         [self.containerView addSubview:self.menuPanel];
@@ -468,12 +667,11 @@ static void installAllHooks() {
         [gw addSubview:self.containerView];
         [gw bringSubviewToFront:self.containerView];
 
-        self.uiTimer = [NSTimer scheduledTimerWithTimeInterval:0.4 target:self selector:@selector(onUITick) userInfo:nil repeats:YES];
+        self.uiTimer = [NSTimer scheduledTimerWithTimeInterval:0.35 target:self selector:@selector(onUITick) userInfo:nil repeats:YES];
     });
 }
 
-// فحص الحظر المضمون داخل خيط اللعبة الرسمي
-- (void)runInGameThreadBanCheck {
+- (void)runRoomProtectionTick {
     if (self.bannedNames.count == 0 && !self.roomLockActive) return;
 
     void **items = NULL;
@@ -490,17 +688,16 @@ static void installAllHooks() {
 
         bool isBanned = ([self.bannedNames containsObject:normName] || (banKey.length > 0 && [self.bannedNames containsObject:banKey]));
         if (isBanned) {
-            OGSKickPeerGuaranteed(peer);
+            OGSKickPeerWithBroadcast(peer, false);
             continue;
         }
         if (self.roomLockActive && ![self.allowedNamesWhenLocked containsObject:normName]) {
-            OGSKickPeerGuaranteed(peer);
+            OGSKickPeerWithBroadcast(peer, false);
         }
     }
 }
 
 - (void)onUITick {
-    [self runInGameThreadBanCheck];
     if (self.menuPanel && !self.menuPanel.hidden) {
         [self refreshUI];
     }
@@ -527,7 +724,7 @@ static void installAllHooks() {
     }
 
     self.statusLabel.text = [NSString stringWithFormat:@"الهوست: %@ | بالروم: %u | المحظورين: %lu",
-                             master ? @"أنت 👑" : @"غيرك",
+                             master ? @"أنت 👑" : @"حماية نشطة...",
                              count,
                              (unsigned long)self.bannedNames.count];
     [self.unbanButton setTitle:[NSString stringWithFormat:@"فك حظر الكل (%lu)", (unsigned long)self.bannedNames.count] forState:UIControlStateNormal];
@@ -558,30 +755,33 @@ static void installAllHooks() {
     [self refreshUI];
 }
 
-- (void)takeHostForMe:(UIButton *)s {
-    void *myPlayer = OGSFindLocalPlayerObject();
-    if (!myPlayer) {
-        self.statusLabel.text = @"تأكد أنك داخل غرفة أولاً";
-        return;
+- (void)toggleAutoHost:(UIButton *)s {
+    g_auto_host_on = !g_auto_host_on;
+    if (g_auto_host_on) {
+        void *myPlayer = OGSFindLocalPlayerObject();
+        if (myPlayer) OGSSetRoomMasterObject(myPlayer);
+        [s setTitle:@"حماية الهوست: مفعّل 👑" forState:UIControlStateNormal];
+        s.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
+    } else {
+        [s setTitle:@"حماية الهوست: متوقف" forState:UIControlStateNormal];
+        s.backgroundColor = [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
     }
-    OGSSetRoomMasterObject(myPlayer);
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        [self refreshUI];
-        self.statusLabel.text = @"تم سحب الهوست لحسابك 👑";
-    });
+    [self refreshUI];
 }
 
-- (void)giveHostToSelected:(UIButton *)s {
-    void **items = NULL;
-    uint32_t count = OGSGetPeerCount(&items);
-    if (count == 0 || !items) return;
-    if (g_selected_peer >= count) g_selected_peer = 0;
-    NSString *pName = OGSGetPlayerIdentity(items[g_selected_peer], NULL, NULL, NULL);
-    OGSSetRoomMasterObject(items[g_selected_peer]);
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        [self refreshUI];
-        self.statusLabel.text = [NSString stringWithFormat:@"تم نقل الهوست إلى: %@", pName];
-    });
+- (void)cycleChatMode:(UIButton *)s {
+    g_chat_mode = (g_chat_mode + 1) % 3;
+    if (g_chat_mode == 1) {
+        [s setTitle:@"الشات: كتم عندي 🔇" forState:UIControlStateNormal];
+        s.backgroundColor = [UIColor colorWithRed:0.80 green:0.35 blue:0.10 alpha:1.0];
+    } else if (g_chat_mode == 2) {
+        [s setTitle:@"الشات: طرد من يكتب 🚫" forState:UIControlStateNormal];
+        s.backgroundColor = [UIColor colorWithRed:0.70 green:0.12 blue:0.15 alpha:1.0];
+        OGSBroadcastRoomChat(@"[إدارة الغرفة]", @"تم إغلاق الشات من قبل الهوست");
+    } else {
+        [s setTitle:@"الشات: مفتوح" forState:UIControlStateNormal];
+        s.backgroundColor = [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
+    }
 }
 
 - (void)kickSelected:(UIButton *)s {
@@ -590,8 +790,8 @@ static void installAllHooks() {
     if (count == 0 || !items) return;
     if (g_selected_peer >= count) g_selected_peer = 0;
     NSString *pName = OGSGetPlayerIdentity(items[g_selected_peer], NULL, NULL, NULL);
-    OGSKickPeerGuaranteed(items[g_selected_peer]);
-    self.statusLabel.text = [NSString stringWithFormat:@"تم طرد: %@", pName];
+    OGSKickPeerWithBroadcast(items[g_selected_peer], true);
+    self.statusLabel.text = [NSString stringWithFormat:@"تم طرد وإعلان: %@", pName];
 }
 
 - (void)banSelected:(UIButton *)s {
@@ -607,7 +807,7 @@ static void installAllHooks() {
     if (normName.length > 0) [self.bannedNames addObject:normName];
     if (banKey.length > 0)   [self.bannedNames addObject:banKey];
 
-    OGSKickPeerGuaranteed(items[g_selected_peer]);
+    OGSKickPeerWithBroadcast(items[g_selected_peer], true);
     [self refreshUI];
     self.statusLabel.text = [NSString stringWithFormat:@"تم طرد وحظر: %@", pName];
 }
@@ -651,13 +851,8 @@ static void installAllHooks() {
     [self.speedSetButton setTitle:[NSString stringWithFormat:@"السرعة: %.1fx (اضغط للكتابة)", g_custom_speed] forState:UIControlStateNormal];
 }
 
-- (void)speedDown:(UIButton *)s {
-    [self applySpeed:g_custom_speed - 0.5f];
-}
-
-- (void)speedUp:(UIButton *)s {
-    [self applySpeed:g_custom_speed + 0.5f];
-}
+- (void)speedDown:(UIButton *)s { [self applySpeed:g_custom_speed - 0.5f]; }
+- (void)speedUp:(UIButton *)s   { [self applySpeed:g_custom_speed + 0.5f]; }
 
 - (void)promptCustomSpeed:(UIButton *)s {
     UIWindow *gw = [self gameMainWindow];
@@ -673,23 +868,30 @@ static void installAllHooks() {
         tf.keyboardType = UIKeyboardTypeDecimalPad;
     }];
     [alert addAction:[UIAlertAction actionWithTitle:@"تطبيق" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-        NSString *txt = alert.textFields.firstObject.text;
-        float val = [txt floatValue];
-        if (val >= 0.0f && val <= 20.0f) {
-            [self applySpeed:val];
-        }
+        float val = [alert.textFields.firstObject.text floatValue];
+        if (val >= 0.0f && val <= 20.0f) [self applySpeed:val];
     }]];
     [alert addAction:[UIAlertAction actionWithTitle:@"إلغاء" style:UIAlertActionStyleCancel handler:nil]];
     [rootVC presentViewController:alert animated:YES completion:nil];
 }
 
-- (void)toggleSuperWeapon:(UIButton *)s {
-    g_super_weapon_on = !g_super_weapon_on;
-    if (g_super_weapon_on) {
-        [s setTitle:@"سلاح خارق (دمج 999 + ذخيرة): مفعّل ⚡" forState:UIControlStateNormal];
+- (void)cycleWeaponMode:(UIButton *)s {
+    g_wpn_mode = (g_wpn_mode + 1) % 4;
+    if (g_wpn_mode == 1) {
+        [s setTitle:@"السلاح: دمج 999 + ذخيرة (اضغط لـ C4 💣)" forState:UIControlStateNormal];
         s.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
+    } else if (g_wpn_mode == 2) {
+        g_c4_trigger = 1;
+        OGSApplySpecialWeaponLoadout();
+        [s setTitle:@"قنبلة الشنطة C4 + دمج 999: مفعّل 💣" forState:UIControlStateNormal];
+        s.backgroundColor = [UIColor colorWithRed:0.80 green:0.35 blue:0.10 alpha:1.0];
+    } else if (g_wpn_mode == 3) {
+        g_c4_trigger = 1;
+        OGSApplySpecialWeaponLoadout();
+        [s setTitle:@"قنابل خاصة + دمج 999: مفعّل 💥" forState:UIControlStateNormal];
+        s.backgroundColor = [UIColor colorWithRed:0.55 green:0.18 blue:0.65 alpha:1.0];
     } else {
-        [s setTitle:@"سلاح خارق (دمج 999 + ذخيرة): متوقف" forState:UIControlStateNormal];
+        [s setTitle:@"السلاح الخارق: متوقف (عادي)" forState:UIControlStateNormal];
         s.backgroundColor = [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
     }
 }
