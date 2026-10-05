@@ -3004,7 +3004,7 @@ static void OGSRuntimeTick(void)
                 UIKeyboardTypeDecimalPad;
         }];
 
-    __weak typeof(self) weakSelf =
+    __weak OGSModMenu *weakSelf =
         self;
 
     [alert
