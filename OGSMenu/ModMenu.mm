@@ -1,3 +1,4 @@
+/* STREAMING_CHUNK:Importing required frameworks and defining core constants... */
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <os/lock.h>
@@ -16,12 +17,12 @@
 static NSString * const kDefaultGitHubConfigURL = @"https://raw.githubusercontent.com/al-hzmi/OGSMenu-Build-/main/ogs_config.json";
 
 static NSArray<NSString *> *OGSCandidateCloudURLs(NSString *customURL) {
-    NSMutableArray<NSString *> *urls = [NSMutableArray array];
-    if (customURL.length > 8) [urls addObject:customURL];
-    [urls addObject:@"https://raw.githubusercontent.com/al-hzmi/OGSMenu-Build-/main/ogs_config.json"];
-    [urls addObject:@"https://raw.githubusercontent.com/al-hzmi/OGSMenu-Build-/main/OGSMenu/ogs_config.json"];
-    [urls addObject:@"https://raw.githubusercontent.com/Al-hzmi/ogsmenu/main/ogs_config.json"];
-    return urls;
+NSMutableArray<NSString *> *urls = [NSMutableArray array];
+if (customURL.length > 8) [urls addObject:customURL];
+[urls addObject:@"https://raw.githubusercontent.com/al-hzmi/OGSMenu-Build-/main/ogs_config.json"];
+[urls addObject:@"https://raw.githubusercontent.com/al-hzmi/OGSMenu-Build-/main/OGSMenu/ogs_config.json"];
+[urls addObject:@"https://raw.githubusercontent.com/Al-hzmi/ogsmenu/main/ogs_config.json"];
+return urls;
 }
 
 // ============================================================
@@ -30,99 +31,94 @@ static NSArray<NSString *> *OGSCandidateCloudURLs(NSString *customURL) {
 static const uintptr_t RVA_PHOTON_NET_TYPEINFO = 0x0281B1C8;
 
 typedef struct {
-    uintptr_t tblCashUpdate;
-    uintptr_t tblChatUpdate;
-    uintptr_t tblSendChatRemote;
-    uintptr_t tblOnEvent;
-    uintptr_t tblLeaveRoom;
-    uintptr_t tblType4995LeaveRoom;
-    uintptr_t tblOnMasterSwitched1;
-    uintptr_t tblOnMasterSwitched2;
-    uintptr_t tblOnMasterSwitched3;
-    uintptr_t tblOnMasterSwitched4;
-    uintptr_t tblOnMasterSwitched5;
-    uintptr_t tblPeerSync;
-    uintptr_t tblSetMaster;
-    uintptr_t tblOnDisconnect;
+uintptr_t tblCashUpdate;
+uintptr_t tblChatUpdate;
+uintptr_t tblSendChatRemote;
+uintptr_t tblOnEvent;
+uintptr_t tblLeaveRoom;
+uintptr_t tblType4995LeaveRoom;
+uintptr_t tblOnMasterSwitched1;
+uintptr_t tblOnMasterSwitched2;
+uintptr_t tblOnMasterSwitched3;
+uintptr_t tblOnMasterSwitched4;
+uintptr_t tblOnMasterSwitched5;
+uintptr_t tblPeerSync;
+uintptr_t tblSetMaster;
+uintptr_t tblOnDisconnect;
 
-    uintptr_t rvaSetTimescale;
-    uintptr_t rvaInRoom;
-    uintptr_t rvaIsMaster;
-    uintptr_t rvaGetMasterPeer;
-    uintptr_t rvaGetLocalPlayer;
-    uintptr_t rvaGetRoom;
-    uintptr_t rvaAllPlayers;
-    uintptr_t rvaGetPeers;
-    uintptr_t rvaPlayerGetName;
-    uintptr_t rvaPlayerGetID;
-    uintptr_t rvaNetPeerGetMMasterId;
-    uintptr_t rvaNetPeerSetMMasterId;
-    uintptr_t rvaNetPeerSetMasterProp;
-    uintptr_t rvaIsLocalClientInside;
-    uintptr_t rvaArabicFix;
-    uintptr_t rvaFastAllocateString;
+uintptr_t rvaSetTimescale;
+uintptr_t rvaInRoom;
+uintptr_t rvaIsMaster;
+uintptr_t rvaGetMasterPeer;
+uintptr_t rvaGetLocalPlayer;
+uintptr_t rvaGetRoom;
+uintptr_t rvaAllPlayers;
+uintptr_t rvaGetPeers;
+uintptr_t rvaPlayerGetName;
+uintptr_t rvaPlayerGetID;
+uintptr_t rvaNetPeerGetMMasterId;
+uintptr_t rvaNetPeerSetMMasterId;
+uintptr_t rvaNetPeerSetMasterProp;
+uintptr_t rvaIsLocalClientInside;
+uintptr_t rvaArabicFix;
+uintptr_t rvaFastAllocateString;
+
+
 } OGSOffsetsConfig;
 
 static OGSOffsetsConfig gOffsets = {
-    0x23918B8, // tblCashUpdate
-    0x238FD68, // tblChatUpdate
-    0x238FD80, // tblSendChatRemote
-    0x2390048, // tblOnEvent
-    0x2390A10, // tblLeaveRoom
-    0x238E518, // tblType4995LeaveRoom
-    0x2392628, // tblOnMasterSwitched1
-    0x2391000, // tblOnMasterSwitched2
-    0x238F228, // tblOnMasterSwitched3
-    0x23903E0, // tblOnMasterSwitched4
-    0x238E730, // tblOnMasterSwitched5
-    0x2390A98, // tblPeerSync
-    0x2390AA0, // tblSetMaster
-    0x2391930, // tblOnDisconnect
+0x23918B8, // tblCashUpdate
+0x238FD68, // tblChatUpdate
+0x238FD80, // tblSendChatRemote
+0x2390048, // tblOnEvent
+0x2390A10, // tblLeaveRoom
+0x238E518, // tblType4995LeaveRoom
+0x2392628, // tblOnMasterSwitched1
+0x2391000, // tblOnMasterSwitched2
+0x238F228, // tblOnMasterSwitched3
+0x23903E0, // tblOnMasterSwitched4
+0x238E730, // tblOnMasterSwitched5
+0x2390A98, // tblPeerSync
+0x2390AA0, // tblSetMaster
+0x2391930, // tblOnDisconnect
 
-    0x198AC4C, // rvaSetTimescale
-    0x013CC38C, // rvaInRoom
-    0x013CC2BC, // rvaIsMaster
-    0x013CACA4, // rvaGetMasterPeer
-    0x013CABF0, // rvaGetLocalPlayer
-    0x013CAB28, // rvaGetRoom
-    0x013CAEC4, // rvaAllPlayers
-    0x013CAF78, // rvaGetPeers
-    0x013D7534, // rvaPlayerGetName
-    0x013CC384, // rvaPlayerGetID
-    0x013AB2A4, // rvaNetPeerGetMMasterId
-    0x013AB2AC, // rvaNetPeerSetMMasterId
-    0x013B0C54, // rvaNetPeerSetMasterProp
-    0x013FD758, // rvaIsLocalClientInside
-    0x0130F538, // rvaArabicFix
-    0x01B33DB8  // rvaFastAllocateString
+0x198AC4C, // rvaSetTimescale
+0x013CC38C, // rvaInRoom
+0x013CC2BC, // rvaIsMaster
+0x013CACA4, // rvaGetMasterPeer
+0x013CABF0, // rvaGetLocalPlayer
+0x013CAB28, // rvaGetRoom
+0x013CAEC4, // rvaAllPlayers
+0x013CAF78, // rvaGetPeers
+0x013D7534, // rvaPlayerGetName
+0x013CC384, // rvaPlayerGetID
+0x013AB2A4, // rvaNetPeerGetMMasterId
+0x013AB2AC, // rvaNetPeerSetMMasterId
+0x013B0C54, // rvaNetPeerSetMasterProp
+0x013FD758, // rvaIsLocalClientInside
+0x0130F538, // rvaArabicFix
+0x01B33DB8  // rvaFastAllocateString
+
+
 };
 
-// ============================================================
-// MARK: - Function Signatures
-// ============================================================
+/* STREAMING_CHUNK:Defining function signatures and original function pointers... */
 typedef void    (*Update0Fn)(void *, void *);
 typedef void    (*SetTime1Fn)(float, void *);
-typedef void    (*SendChatRemoteFn)(
-    void *self,
-    void *senderName,
-    void *text,
-    int32_t senderTeam,
-    bool isTeamChat,
-    const void *method
-);
+typedef void    (*SendChatRemoteFn)(void *self, void *senderName, void *text, int32_t senderTeam, bool isTeamChat, const void *method);
 typedef void    (*OnEventFn)(void *, void *, void *);
 typedef bool    (*LeaveRoomFn)(int32_t, void *);
 typedef void    (*Type4995LeaveFn)(void *, void *);
 typedef void    (*OnMasterSwitchFn)(void *, void *, void *);
-typedef bool    (*Bool0Fn)(void *);
-typedef void*   (*Object0Fn)(void *);
-typedef bool    (*PeerAction1Fn)(void *, void *);
-typedef void*   (*PlayerGetNameFn)(void *, void *);
+typedef bool    (*Bool0Fn)(void );
+typedef void   (*Object0Fn)(void *);
+typedef bool    (*PeerAction1Fn)(void *, void );
+typedef void   (*PlayerGetNameFn)(void *, void *);
 typedef int32_t (*PlayerGetIDFn)(void *, void *);
 typedef int32_t (*GetMasterIdFn)(void *, void *);
-typedef void    (*SetMasterIdFn)(void *, int32_t, void *);
-typedef void*   (*ArabicFixFn)(void *, void *);
-typedef void*   (*FastAllocateStringFn)(int32_t length, const void *method);
+typedef void    (*SetMasterIdFn)(void *, int32_t, void );
+typedef void   (*ArabicFixFn)(void *, void );
+typedef void   (*FastAllocateStringFn)(int32_t length, const void *method);
 typedef void    (*OnDisconnectFn)(void *, void *, void *);
 
 static Update0Fn        orig_CashUpdate      = NULL;
@@ -138,515 +134,447 @@ static OnMasterSwitchFn orig_OnMasterSwitch3 = NULL;
 static OnMasterSwitchFn orig_OnMasterSwitch4 = NULL;
 static OnMasterSwitchFn orig_OnMasterSwitch5 = NULL;
 
-// ============================================================
-// MARK: - Thread-Safe Runtime State & Locks
-// ============================================================
+/* STREAMING_CHUNK:Initializing thread-safe runtime state variables... */
 static os_unfair_lock gBanSetLock   = OS_UNFAIR_LOCK_INIT;
 static os_unfair_lock gStateLock    = OS_UNFAIR_LOCK_INIT;
 static os_unfair_lock gSnapshotLock = OS_UNFAIR_LOCK_INIT;
 
 typedef struct {
-    volatile bool     inRoom;
-    volatile bool     isMaster;
-    volatile bool     heldMasterStably;
-    volatile uint32_t selectedPeer;
-    volatile float    gameSpeed;
-    volatile bool     speedDirty;
-    volatile uint64_t readFailures;
-    volatile int32_t  autoHostOn;
-    volatile int32_t  antiKickHardLock;
-    volatile int32_t  chatMode;
-    volatile int32_t  kickMsgArmed;
-    volatile int32_t  forceHostReq;
-    volatile int32_t  kickTargetID;
-    volatile int32_t  kickRetries;
-    volatile int32_t  insideNetworkEvent;
-    volatile uint32_t blockedKicksCount;
-    void * volatile   capturedNetPeer;
-    double            roomEnterTime;
-    double            masterAcquiredTime;
-    double            lastMasterClaimTime;
-    double            lastKickPacketTime;
-    double            lastUnityFrameTick;
-    char              kickTargetName[OGS_MAX_NAME_BYTES];
-    char              lastHijackerName[OGS_MAX_NAME_BYTES];
-    char              customKickPhrase[OGS_MAX_NAME_BYTES];
+volatile bool     inRoom;
+volatile bool     isMaster;
+volatile bool     heldMasterStably;
+volatile uint32_t selectedPeer;
+volatile float    gameSpeed;
+volatile bool     speedDirty;
+volatile uint64_t readFailures;
+volatile int32_t  autoHostOn;
+volatile int32_t  antiKickHardLock;
+volatile int32_t  chatMode;
+volatile int32_t  kickMsgArmed;
+volatile int32_t  forceHostReq;
+volatile int32_t  kickTargetID;
+volatile int32_t  kickRetries;
+volatile int32_t  insideNetworkEvent;
+volatile uint32_t blockedKicksCount;
+void * volatile   capturedNetPeer;
+double            roomEnterTime;
+double            masterAcquiredTime;
+double            lastMasterClaimTime;
+double            lastKickPacketTime;
+double            lastUnityFrameTick;
+char              kickTargetName[OGS_MAX_NAME_BYTES];
+char              lastHijackerName[OGS_MAX_NAME_BYTES];
+char              customKickPhrase[OGS_MAX_NAME_BYTES];
 } OGSRuntimeState;
 
 static OGSRuntimeState gOGS = {
-    false, // inRoom
-    false, // isMaster
-    false, // heldMasterStably
-    0,     // selectedPeer
-    1.0f,  // gameSpeed
-    false, // speedDirty
-    0,     // readFailures
-    1,     // autoHostOn
-    0,     // antiKickHardLock (تلقائي افتراضياً حتى لا يمنع دخول/خروج الغرف)
-    0,     // chatMode
-    0,     // kickMsgArmed
-    0,     // forceHostReq
-    -1,    // kickTargetID
-    0,     // kickRetries
-    0,     // insideNetworkEvent
-    0,     // blockedKicksCount
-    NULL,  // capturedNetPeer
-    0.0,   // roomEnterTime
-    0.0,   // masterAcquiredTime
-    0.0,   // lastMasterClaimTime
-    0.0,   // lastKickPacketTime
-    0.0,   // lastUnityFrameTick
-    {0},   // kickTargetName
-    {0},   // lastHijackerName
-    " تم طرده من الغرفة " // customKickPhrase
+false, false, false, 0, 1.0f, false, 0, 1, 1, 0, 0, 0, 0, -1, 0, 0, 0,
+NULL, 0.0, 0.0, 0.0, 0.0, 0.0, {0}, {0}, " تم طرده من الغرفة "
 };
 
-// ============================================================
-// MARK: - Safe Memory Layer & Fail-Closed Image Resolver
-// ============================================================
+/* STREAMING_CHUNK:Configuring safe memory validation and bounds checks... */
 static volatile uintptr_t gImageBase = 0;
 
 static uintptr_t OGSFindGameImage(void) {
-    uintptr_t cached = __atomic_load_n(&gImageBase, __ATOMIC_ACQUIRE);
-    if (cached) return cached;
+uintptr_t cached = __atomic_load_n(&gImageBase, __ATOMIC_ACQUIRE);
+if (cached) return cached;
 
-    uint32_t count = _dyld_image_count();
-    for (uint32_t i = 0; i < count; i++) {
-        const char *name = _dyld_get_image_name(i);
-        if (!name) continue;
-        const char *last = strrchr(name, '/');
-        const char *file = last ? last + 1 : name;
-        if (strcmp(file, "fps") != 0) continue;
+uint32_t count = _dyld_image_count();
+for (uint32_t i = 0; i < count; i++) {
+    const char *name = _dyld_get_image_name(i);
+    if (!name) continue;
+    const char *last = strrchr(name, '/');
+    const char *file = last ? last + 1 : name;
+    if (strcmp(file, "fps") != 0) continue;
 
-        uintptr_t base = 0x100000000ULL + (uintptr_t)_dyld_get_image_vmaddr_slide(i);
-        __atomic_store_n(&gImageBase, base, __ATOMIC_RELEASE);
-        return base;
-    }
-    return 0;
+    uintptr_t base = 0x100000000ULL + (uintptr_t)_dyld_get_image_vmaddr_slide(i);
+    __atomic_store_n(&gImageBase, base, __ATOMIC_RELEASE);
+    return base;
+}
+return 0;
+
+
 }
 
 static uintptr_t OGSResolveRVA(uintptr_t rva) {
-    if (!rva) return 0;
-    uintptr_t base = OGSFindGameImage();
-    if (!base || (UINTPTR_MAX - base < rva)) return 0;
-    return base + rva;
+if (!rva) return 0;
+uintptr_t base = OGSFindGameImage();
+if (!base || (UINTPTR_MAX - base < rva)) return 0;
+return base + rva;
 }
 
 static bool OGSReadMemory(uintptr_t address, void *output, size_t size) {
-    if (address < 0x100000000ULL || !output || size == 0) return false;
-    vm_size_t copied = 0;
-    kern_return_t kr = vm_read_overwrite(
-        mach_task_self(),
-        (vm_address_t)address,
-        (vm_size_t)size,
-        (vm_address_t)output,
-        &copied
-    );
-    if (kr != KERN_SUCCESS || copied != (vm_size_t)size) {
-        __atomic_fetch_add(&gOGS.readFailures, 1, __ATOMIC_RELAXED);
-        return false;
-    }
-    return true;
+if (address < 0x100000000ULL || !output || size == 0) return false;
+vm_size_t copied = 0;
+kern_return_t kr = vm_read_overwrite(
+mach_task_self(),
+(vm_address_t)address,
+(vm_size_t)size,
+(vm_address_t)output,
+&copied
+);
+if (kr != KERN_SUCCESS || copied != (vm_size_t)size) {
+__atomic_fetch_add(&gOGS.readFailures, 1, __ATOMIC_RELAXED);
+return false;
+}
+return true;
 }
 
-static bool OGSReadPointer(uintptr_t address, void **output) {
-    if (!output) return false;
-    uintptr_t value = 0;
-    if (!OGSReadMemory(address, &value, sizeof(value))) return false;
-    if (value < 0x100000000ULL) return false;
-    *output = (void *)value;
-    return true;
+static bool OGSReadPointer(uintptr_t address, void output) {
+if (!output || address < 0x100000000ULL) return false;
+uintptr_t value = 0;
+if (!OGSReadMemory(address, &value, sizeof(value))) return false;
+if (value < 0x100000000ULL) return false;
+*output = (void *)value;
+return true;
 }
 
-// ============================================================
-// MARK: - Safe IL2CPP Strings & FastAllocateString
-// ============================================================
+/* STREAMING_CHUNK:Implementing crash-free IL2CPP string readers and allocators... */
 static NSString *OGSReadIl2CppString(void *object) {
-    if (!object || (uintptr_t)object < 0x100000000ULL) return nil;
-    uintptr_t address = (uintptr_t)object;
+if (!object || (uintptr_t)object < 0x100000000ULL) return nil;
+uintptr_t address = (uintptr_t)object;
 
-    int32_t length = 0;
-    if (!OGSReadMemory(address + 0x10, &length, sizeof(length))) return nil;
-    if (length <= 0 || length > OGS_MAX_STRING_LEN) return nil;
+int32_t length = 0;
+if (!OGSReadMemory(address + 0x10, &length, sizeof(length))) return nil;
+if (length <= 0 || length > OGS_MAX_STRING_LEN) return nil;
 
-    size_t bytes = (size_t)length * sizeof(unichar);
-    unichar *buffer = (unichar *)calloc((size_t)length, sizeof(unichar));
-    if (!buffer) return nil;
+size_t bytes = (size_t)length * sizeof(unichar);
+unichar *buffer = (unichar *)calloc((size_t)length, sizeof(unichar));
+if (!buffer) return nil;
 
-    if (!OGSReadMemory(address + 0x14, buffer, bytes)) {
-        free(buffer);
-        return nil;
-    }
-
-    NSString *result = [[NSString alloc] initWithCharacters:buffer length:(NSUInteger)length];
+if (!OGSReadMemory(address + 0x14, buffer, bytes)) {
     free(buffer);
-    return result;
+    return nil;
+}
+
+NSString *result = [[NSString alloc] initWithCharacters:buffer length:(NSUInteger)length];
+free(buffer);
+return result;
+
+
 }
 
 static void *OGSManagedStringFromNSString(NSString *text) {
-    if (!text) return NULL;
-    NSUInteger nsLen = text.length;
-    if (nsLen == 0 || nsLen > INT32_MAX) return NULL;
+if (!text) return NULL;
+NSUInteger nsLen = text.length;
+if (nsLen == 0 || nsLen > INT32_MAX) return NULL;
 
-    uintptr_t addr = OGSResolveRVA(gOffsets.rvaFastAllocateString);
-    if (!addr) return NULL;
+uintptr_t addr = OGSResolveRVA(gOffsets.rvaFastAllocateString);
+if (!addr) return NULL;
 
-    FastAllocateStringFn allocString = (FastAllocateStringFn)addr;
-    void *managed = allocString((int32_t)nsLen, NULL);
-    if (!managed) return NULL;
+FastAllocateStringFn allocString = (FastAllocateStringFn)addr;
+void *managed = allocString((int32_t)nsLen, NULL);
+if (!managed || (uintptr_t)managed < 0x100000000ULL) return NULL;
 
-    unichar *chars = (unichar *)((uintptr_t)managed + 0x14);
-    [text getCharacters:chars range:NSMakeRange(0, nsLen)];
-    return managed;
+unichar *chars = (unichar *)((uintptr_t)managed + 0x14);
+[text getCharacters:chars range:NSMakeRange(0, nsLen)];
+return managed;
+
+
 }
 
 static void *OGSCreateFreshKickString(void *templateIl2CppStr) {
-    char phraseBuf[OGS_MAX_NAME_BYTES];
-    os_unfair_lock_lock(&gStateLock);
-    memcpy(phraseBuf, gOGS.customKickPhrase, sizeof(phraseBuf));
-    phraseBuf[OGS_MAX_NAME_BYTES - 1] = '\0';
-    os_unfair_lock_unlock(&gStateLock);
+char phraseBuf[OGS_MAX_NAME_BYTES];
+os_unfair_lock_lock(&gStateLock);
+memcpy(phraseBuf, gOGS.customKickPhrase, sizeof(phraseBuf));
+phraseBuf[OGS_MAX_NAME_BYTES - 1] = '\0';
+os_unfair_lock_unlock(&gStateLock);
 
-    NSString *phrase = [NSString stringWithUTF8String:phraseBuf];
-    if (!phrase.length) {
-        phrase = @" تم طرده من الغرفة ";
-    }
-    if (phrase.length > 90) {
-        phrase = [phrase substringToIndex:90];
-    }
+NSString *phrase = [NSString stringWithUTF8String:phraseBuf];
+if (!phrase.length) phrase = @" تم طرده من الغرفة ";
+if (phrase.length > 90) phrase = [phrase substringToIndex:90];
 
-    void *managed = OGSManagedStringFromNSString(phrase);
-    if (!managed) return NULL;
+void *managed = OGSManagedStringFromNSString(phrase);
+if (!managed) return NULL;
+return managed;
 
-    bool origIsPreFixed = false;
-    NSString *origText = OGSReadIl2CppString(templateIl2CppStr);
-    if (origText) {
-        for (NSUInteger i = 0; i < origText.length; i++) {
-            unichar c = [origText characterAtIndex:i];
-            if (c >= 0xFE70 && c <= 0xFEFF) { origIsPreFixed = true; break; }
-        }
-    }
 
-    if (origIsPreFixed) {
-        uintptr_t fixAddr = OGSResolveRVA(gOffsets.rvaArabicFix);
-        if (fixAddr) {
-            void *fixed = ((ArabicFixFn)fixAddr)(managed, NULL);
-            if (fixed) return fixed;
-        }
-    }
-    return managed;
 }
 
 static NSString *OGSNormalizeKey(NSString *value) {
-    if (!value) return @"";
-    NSString *trimmed = [value stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    return trimmed.lowercaseString;
+if (!value) return @"";
+return [[value stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] lowercaseString];
 }
 
-// ============================================================
-// MARK: - Lock-Protected Snapshot Model
-// ============================================================
+/* STREAMING_CHUNK:Setting up lock-protected snapshot structures... */
 typedef struct {
-    int32_t actorID;
-    bool    isHost;
-    char    name[OGS_MAX_NAME_BYTES];
+int32_t actorID;
+bool    isHost;
+char    name[OGS_MAX_NAME_BYTES];
 } OGSPeerSnapshot;
 
 typedef struct {
-    bool            inRoom;
-    bool            isMaster;
-    uint32_t        count;
-    OGSPeerSnapshot peers[OGS_MAX_PEERS];
+bool            inRoom;
+bool            isMaster;
+uint32_t        count;
+OGSPeerSnapshot peers[OGS_MAX_PEERS];
 } OGSRoomSnapshot;
 
 static OGSRoomSnapshot gSnapshot;
 
 static void OGSPublishSnapshotValue(const OGSRoomSnapshot *src) {
-    if (!src) return;
-    os_unfair_lock_lock(&gSnapshotLock);
-    gSnapshot = *src;
-    os_unfair_lock_unlock(&gSnapshotLock);
+if (!src) return;
+os_unfair_lock_lock(&gSnapshotLock);
+gSnapshot = *src;
+os_unfair_lock_unlock(&gSnapshotLock);
 }
 
 static OGSRoomSnapshot OGSCurrentSnapshot(void) {
-    OGSRoomSnapshot out;
-    os_unfair_lock_lock(&gSnapshotLock);
-    out = gSnapshot;
-    os_unfair_lock_unlock(&gSnapshotLock);
-    return out;
+OGSRoomSnapshot out;
+os_unfair_lock_lock(&gSnapshotLock);
+out = gSnapshot;
+os_unfair_lock_unlock(&gSnapshotLock);
+return out;
 }
 
-// ============================================================
-// MARK: - Safe Peer & Array Extraction
-// ============================================================
+/* STREAMING_CHUNK:Building secure peer extraction with deep pointer verification... */
 static bool OGSReadPeer(void *peer, void *master, OGSPeerSnapshot *output) {
-    if (!peer || (uintptr_t)peer < 0x100000000ULL || !output) return false;
-    memset(output, 0, sizeof(*output));
-    output->isHost = (peer == master);
+if (!peer || (uintptr_t)peer < 0x100000000ULL || !output) return false;
+memset(output, 0, sizeof(*output));
+output->isHost = (peer == master);
 
-    uintptr_t idAddress   = OGSResolveRVA(gOffsets.rvaPlayerGetID);
-    uintptr_t nameAddress = OGSResolveRVA(gOffsets.rvaPlayerGetName);
-    if (!idAddress || !nameAddress) return false;
+uintptr_t idAddress   = OGSResolveRVA(gOffsets.rvaPlayerGetID);
+uintptr_t nameAddress = OGSResolveRVA(gOffsets.rvaPlayerGetName);
+if (!idAddress || !nameAddress) return false;
 
-    void *klassPtr = NULL;
-    if (!OGSReadPointer((uintptr_t)peer, &klassPtr)) return false;
+void *klassPtr = NULL;
+if (!OGSReadPointer((uintptr_t)peer, &klassPtr)) return false;
 
-    PlayerGetIDFn getID     = (PlayerGetIDFn)idAddress;
-    PlayerGetNameFn getName = (PlayerGetNameFn)nameAddress;
+PlayerGetIDFn getID     = (PlayerGetIDFn)idAddress;
+PlayerGetNameFn getName = (PlayerGetNameFn)nameAddress;
 
-    output->actorID = getID(peer, NULL);
-    void *nameObject = getName(peer, NULL);
-    NSString *name = OGSReadIl2CppString(nameObject);
+output->actorID = getID(peer, NULL);
+void *nameObject = getName(peer, NULL);
+NSString *name = OGSReadIl2CppString(nameObject);
 
-    if (!name.length) {
-        snprintf(output->name, sizeof(output->name), "ID:%d", output->actorID);
-        return true;
-    }
-
-    const char *utf8 = name.UTF8String;
-    if (!utf8) return false;
-    snprintf(output->name, sizeof(output->name), "%s", utf8);
+if (!name.length) {
+    snprintf(output->name, sizeof(output->name), "ID:%d", output->actorID);
     return true;
 }
 
+const char *utf8 = name.UTF8String;
+if (!utf8) return false;
+snprintf(output->name, sizeof(output->name), "%s", utf8);
+return true;
+
+
+}
+
 static uint32_t OGSReadPlayerArray(uintptr_t listRVA, void *output[OGS_MAX_PEERS]) {
-    if (!output) return 0;
-    memset(output, 0, sizeof(void *) * OGS_MAX_PEERS);
+if (!output) return 0;
+memset(output, 0, sizeof(void *) * OGS_MAX_PEERS);
 
-    uintptr_t inRoomAddress = OGSResolveRVA(gOffsets.rvaInRoom);
-    uintptr_t listAddress   = OGSResolveRVA(listRVA);
-    if (!inRoomAddress || !listAddress) return 0;
+uintptr_t inRoomAddress = OGSResolveRVA(gOffsets.rvaInRoom);
+uintptr_t listAddress   = OGSResolveRVA(listRVA);
+if (!inRoomAddress || !listAddress) return 0;
 
-    Bool0Fn inRoom    = (Bool0Fn)inRoomAddress;
-    Object0Fn getList = (Object0Fn)listAddress;
-    if (!inRoom(NULL)) return 0;
+Bool0Fn inRoom    = (Bool0Fn)inRoomAddress;
+Object0Fn getList = (Object0Fn)listAddress;
+if (!inRoom(NULL)) return 0;
 
-    void *array = getList(NULL);
-    if (!array || (uintptr_t)array < 0x100000000ULL) return 0;
+void *array = getList(NULL);
+if (!array || (uintptr_t)array < 0x100000000ULL) return 0;
 
-    uintptr_t arrayAddress = (uintptr_t)array;
-    uintptr_t count = 0;
-    if (!OGSReadMemory(arrayAddress + 0x18, &count, sizeof(count))) return 0;
-    if (count == 0 || count > OGS_MAX_PEERS) return 0;
+uintptr_t arrayAddress = (uintptr_t)array;
+uintptr_t count = 0;
+if (!OGSReadMemory(arrayAddress + 0x18, &count, sizeof(count))) return 0;
+if (count == 0 || count > OGS_MAX_PEERS) return 0;
 
-    uint32_t valid = 0;
-    for (uint32_t i = 0; i < (uint32_t)count; i++) {
-        void *peer = NULL;
-        uintptr_t itemAddress = arrayAddress + 0x20 + ((uintptr_t)i * sizeof(void *));
-        if (!OGSReadPointer(itemAddress, &peer)) continue;
-        output[valid++] = peer;
-    }
-    return valid;
+uint32_t valid = 0;
+for (uint32_t i = 0; i < (uint32_t)count; i++) {
+    void *peer = NULL;
+    uintptr_t itemAddress = arrayAddress + 0x20 + ((uintptr_t)i * sizeof(void *));
+    if (!OGSReadPointer(itemAddress, &peer) || !peer || (uintptr_t)peer < 0x100000000ULL) continue;
+    output[valid++] = peer;
+}
+return valid;
+
+
 }
 
-// ============================================================
-// MARK: - Real Server Host Claim & Gate-Bypass Kick (Crash-Free)
-// ============================================================
+/* STREAMING_CHUNK:Creating bulletproof host reclamation and anti-kick logic... */
 static void *OGSFindLocalPlayer(void) {
-    uintptr_t getLocalAddr = OGSResolveRVA(gOffsets.rvaGetLocalPlayer);
-    if (getLocalAddr) {
-        void *p = ((Object0Fn)getLocalAddr)(NULL);
-        if (p && (uintptr_t)p > 0x100000000ULL) return p;
-    }
-
-    void *allPeers[OGS_MAX_PEERS];
-    uint32_t allCount = OGSReadPlayerArray(gOffsets.rvaAllPlayers, allPeers);
-    if (allCount == 0) return NULL;
-
-    void *otherPeers[OGS_MAX_PEERS];
-    uint32_t otherCount = OGSReadPlayerArray(gOffsets.rvaGetPeers, otherPeers);
-    if (otherCount == 0) return allPeers[0];
-
-    uintptr_t idAddress = OGSResolveRVA(gOffsets.rvaPlayerGetID);
-    PlayerGetIDFn getID = (PlayerGetIDFn)idAddress;
-
-    for (uint32_t i = 0; i < allCount; i++) {
-        void *cand = allPeers[i];
-        int32_t candID = getID ? getID(cand, NULL) : 0;
-        bool isOther = false;
-        for (uint32_t j = 0; j < otherCount; j++) {
-            if (otherPeers[j] == cand) { isOther = true; break; }
-            if (candID > 0 && getID && getID(otherPeers[j], NULL) == candID) { isOther = true; break; }
-        }
-        if (!isOther) return cand;
-    }
-    return NULL;
+uintptr_t getLocalAddr = OGSResolveRVA(gOffsets.rvaGetLocalPlayer);
+if (getLocalAddr) {
+void *p = ((Object0Fn)getLocalAddr)(NULL);
+if (p && (uintptr_t)p > 0x100000000ULL) return p;
 }
 
-static int32_t OGSGetLocalPlayerID(void **outPlayerObj) {
-    void *myPlayer = OGSFindLocalPlayer();
-    if (outPlayerObj) *outPlayerObj = myPlayer;
-    if (!myPlayer) return 0;
-    uintptr_t idAddr = OGSResolveRVA(gOffsets.rvaPlayerGetID);
-    if (!idAddr) return 0;
-    return ((PlayerGetIDFn)idAddr)(myPlayer, NULL);
+void *allPeers[OGS_MAX_PEERS];
+uint32_t allCount = OGSReadPlayerArray(gOffsets.rvaAllPlayers, allPeers);
+if (allCount == 0) return NULL;
+
+void *otherPeers[OGS_MAX_PEERS];
+uint32_t otherCount = OGSReadPlayerArray(gOffsets.rvaGetPeers, otherPeers);
+if (otherCount == 0) return allPeers[0];
+
+uintptr_t idAddress = OGSResolveRVA(gOffsets.rvaPlayerGetID);
+PlayerGetIDFn getID = (PlayerGetIDFn)idAddress;
+
+for (uint32_t i = 0; i < allCount; i++) {
+    void *cand = allPeers[i];
+    if (!cand) continue;
+    int32_t candID = getID ? getID(cand, NULL) : 0;
+    bool isOther = false;
+    for (uint32_t j = 0; j < otherCount; j++) {
+        if (otherPeers[j] == cand) { isOther = true; break; }
+        if (candID > 0 && getID && getID(otherPeers[j], NULL) == candID) { isOther = true; break; }
+    }
+    if (!isOther) return cand;
+}
+return NULL;
+
+
+}
+
+static int32_t OGSGetLocalPlayerID(void outPlayerObj) {
+void *myPlayer = OGSFindLocalPlayer();
+if (outPlayerObj) *outPlayerObj = myPlayer;
+if (!myPlayer) return 0;
+uintptr_t idAddr = OGSResolveRVA(gOffsets.rvaPlayerGetID);
+if (!idAddr) return 0;
+return ((PlayerGetIDFn)idAddr)(myPlayer, NULL);
 }
 
 static void *OGSGetNetworkingPeerSafe(void) {
-    uintptr_t typeInfoSlot = OGSResolveRVA(RVA_PHOTON_NET_TYPEINFO);
-    if (typeInfoSlot) {
-        void *typeInfo = NULL;
-        if (OGSReadPointer(typeInfoSlot, &typeInfo)) {
-            void *staticFields = NULL;
-            if (OGSReadPointer((uintptr_t)typeInfo + 0xB8, &staticFields)) {
-                void *netPeer = NULL;
-                if (OGSReadPointer((uintptr_t)staticFields + 0x10, &netPeer)) {
-                    void *localPlayer = NULL;
-                    void *currentRoom = NULL;
-                    OGSReadPointer((uintptr_t)netPeer + 0x160, &localPlayer);
-                    OGSReadPointer((uintptr_t)netPeer + 0x158, &currentRoom);
-                    if (localPlayer || currentRoom) {
-                        __atomic_store_n((uintptr_t *)&gOGS.capturedNetPeer, (uintptr_t)netPeer, __ATOMIC_RELEASE);
-                        return netPeer;
-                    }
-                }
-            }
-        }
-    }
-    return nil;
+uintptr_t typeInfoSlot = OGSResolveRVA(RVA_PHOTON_NET_TYPEINFO);
+if (typeInfoSlot) {
+void *typeInfo = NULL;
+if (OGSReadPointer(typeInfoSlot, &typeInfo)) {
+void *staticFields = NULL;
+if (OGSReadPointer((uintptr_t)typeInfo + 0xB8, &staticFields)) {
+void *netPeer = NULL;
+if (OGSReadPointer((uintptr_t)staticFields + 0x10, &netPeer)) {
+__atomic_store_n((uintptr_t *)&gOGS.capturedNetPeer, (uintptr_t)netPeer, __ATOMIC_RELEASE);
+return netPeer;
+}
+}
+}
+}
+return (void *)__atomic_load_n((uintptr_t *)&gOGS.capturedNetPeer, __ATOMIC_ACQUIRE);
 }
 
-// سحب الهوست الآمن بدون استدعاء الدالة 0x013B0C54 التي كانت تسبب الطرد والكراش!
 static bool OGSClaimMasterReal(bool bypassCooldown) {
-    uintptr_t inRoomAddr = OGSResolveRVA(gOffsets.rvaInRoom);
-    if (!inRoomAddr || !((Bool0Fn)inRoomAddr)(NULL)) return false;
+uintptr_t inRoomAddr = OGSResolveRVA(gOffsets.rvaInRoom);
+if (!inRoomAddr || !((Bool0Fn)inRoomAddr)(NULL)) return false;
 
-    double now = CFAbsoluteTimeGetCurrent();
-    // حماية من طرد السيرفر (Rate Limit): لا نرسل أكثر من حزمة كل 0.35 ثانية
-    if (!bypassCooldown && (now - gOGS.lastMasterClaimTime) < 0.35) {
-        return false;
+double now = CFAbsoluteTimeGetCurrent();
+if (!bypassCooldown && (now - gOGS.lastMasterClaimTime) < 0.25) return false;
+gOGS.lastMasterClaimTime = now;
+
+void *myPlayer = NULL;
+int32_t myID = OGSGetLocalPlayerID(&myPlayer);
+if (!myPlayer || myID <= 0) return false;
+
+void *netPeer = OGSGetNetworkingPeerSafe();
+uintptr_t getMMasterAddr = OGSResolveRVA(gOffsets.rvaNetPeerGetMMasterId);
+uintptr_t setMMasterAddr = OGSResolveRVA(gOffsets.rvaNetPeerSetMMasterId);
+int32_t savedMaster = 0;
+bool tempZeroed = false;
+
+if (netPeer && getMMasterAddr && setMMasterAddr) {
+    savedMaster = ((GetMasterIdFn)getMMasterAddr)(netPeer, NULL);
+    if (savedMaster == myID) {
+        ((SetMasterIdFn)setMMasterAddr)(netPeer, 0, NULL);
+        tempZeroed = true;
     }
-    if (bypassCooldown && (now - gOGS.lastMasterClaimTime) < 0.15) {
-        return false;
-    }
-
-    void *myPlayer = NULL;
-    int32_t myID = OGSGetLocalPlayerID(&myPlayer);
-    if (!myPlayer || myID <= 0) return false;
-
-    gOGS.lastMasterClaimTime = now;
-
-    // فقط إذا كان رقمنا مسجلاً محلياً بينما السيرفر لم يعطنا الهوست، نصفره للحظة الإرسال ثم نعيده
-    void *netPeer = OGSGetNetworkingPeerSafe();
-    uintptr_t getMMasterAddr = OGSResolveRVA(gOffsets.rvaNetPeerGetMMasterId);
-    uintptr_t setMMasterAddr = OGSResolveRVA(gOffsets.rvaNetPeerSetMMasterId);
-    int32_t savedMaster = 0;
-    bool tempZeroed = false;
-
-    if (netPeer && getMMasterAddr && setMMasterAddr) {
-        savedMaster = ((GetMasterIdFn)getMMasterAddr)(netPeer, NULL);
-        if (savedMaster == myID) {
-            ((SetMasterIdFn)setMMasterAddr)(netPeer, 0, NULL);
-            tempZeroed = true;
-        }
-    }
-
-    bool sent = false;
-    uintptr_t slotAddr = OGSResolveRVA(gOffsets.tblSetMaster);
-    void *fnPtr = NULL;
-    if (OGSReadPointer(slotAddr, &fnPtr) && fnPtr) {
-        sent = ((PeerAction1Fn)fnPtr)(myPlayer, NULL);
-    }
-
-    // إذا لم ينجح الإرسال نعيد القيمة السابقة حتى لا يختل منطق اللعبة
-    if (tempZeroed && !sent && netPeer && setMMasterAddr) {
-        ((SetMasterIdFn)setMMasterAddr)(netPeer, savedMaster, NULL);
-    }
-
-    return sent;
 }
 
-// طرد آمن يفتح البوابة +0x1c0 للحظة إرسال CloseConnection ثم يعيد القيمة الأصلية دائماً
+bool sent = false;
+uintptr_t slotAddr = OGSResolveRVA(gOffsets.tblSetMaster);
+void *fnPtr = NULL;
+if (OGSReadPointer(slotAddr, &fnPtr) && fnPtr) {
+    sent = ((PeerAction1Fn)fnPtr)(myPlayer, NULL);
+}
+
+if (tempZeroed && !sent && netPeer && setMMasterAddr) {
+    ((SetMasterIdFn)setMMasterAddr)(netPeer, savedMaster, NULL);
+}
+
+return sent;
+
+
+}
+
 static bool OGSKickPeerReal(void *peerObj, bool bypassCooldown) {
-    if (!peerObj || (uintptr_t)peerObj < 0x100000000ULL) return false;
+if (!peerObj || (uintptr_t)peerObj < 0x100000000ULL) return false;
 
-    void *klassPtr = NULL;
-    if (!OGSReadPointer((uintptr_t)peerObj, &klassPtr)) return false;
+double now = CFAbsoluteTimeGetCurrent();
+if (!bypassCooldown && (now - gOGS.lastKickPacketTime) < 0.18) return false;
+gOGS.lastKickPacketTime = now;
+gOGS.kickMsgArmed = 1;
 
-    double now = CFAbsoluteTimeGetCurrent();
-    if (!bypassCooldown && (now - gOGS.lastKickPacketTime) < 0.22) {
-        return false;
-    }
-    gOGS.lastKickPacketTime = now;
-    gOGS.kickMsgArmed = 1;
+void *myPlayer = NULL;
+int32_t myID = OGSGetLocalPlayerID(&myPlayer);
+if (!myPlayer || myID <= 0 || peerObj == myPlayer) return false;
 
-    void *myPlayer = NULL;
-    int32_t myID = OGSGetLocalPlayerID(&myPlayer);
-    if (!myPlayer || myID <= 0 || peerObj == myPlayer) return false;
-
-    uintptr_t isMasterAddr = OGSResolveRVA(gOffsets.rvaIsMaster);
-    if (isMasterAddr && !((Bool0Fn)isMasterAddr)(NULL)) {
-        OGSClaimMasterReal(false);
-    }
-
-    void *netPeer = OGSGetNetworkingPeerSafe();
-    uintptr_t getMasterIdAddr = OGSResolveRVA(gOffsets.rvaNetPeerGetMMasterId);
-    uintptr_t setMasterIdAddr = OGSResolveRVA(gOffsets.rvaNetPeerSetMMasterId);
-
-    int32_t origMasterID = 0;
-    bool patched = false;
-
-    if (netPeer && myID > 0 && getMasterIdAddr && setMasterIdAddr) {
-        origMasterID = ((GetMasterIdFn)getMasterIdAddr)(netPeer, NULL);
-        if (origMasterID != myID) {
-            ((SetMasterIdFn)setMasterIdAddr)(netPeer, myID, NULL);
-            patched = true;
-        }
-    }
-
-    bool result = false;
-    uintptr_t slotAddr = OGSResolveRVA(gOffsets.tblPeerSync);
-    void *fnPtr = NULL;
-    if (OGSReadPointer(slotAddr, &fnPtr) && fnPtr) {
-        result = ((PeerAction1Fn)fnPtr)(peerObj, NULL);
-    }
-
-    // نعيد القيمة الأصلية دائماً كما في نسختك المستقرة لمنع تعليق حالة الغرفة
-    if (patched && netPeer && setMasterIdAddr && origMasterID > 0) {
-        ((SetMasterIdFn)setMasterIdAddr)(netPeer, origMasterID, NULL);
-    }
-
-    return result;
+uintptr_t isMasterAddr = OGSResolveRVA(gOffsets.rvaIsMaster);
+if (isMasterAddr && !((Bool0Fn)isMasterAddr)(NULL)) {
+    OGSClaimMasterReal(true);
 }
 
-// ============================================================
-// MARK: - Speed Control
-// ============================================================
+void *netPeer = OGSGetNetworkingPeerSafe();
+uintptr_t getMasterIdAddr = OGSResolveRVA(gOffsets.rvaNetPeerGetMMasterId);
+uintptr_t setMasterIdAddr = OGSResolveRVA(gOffsets.rvaNetPeerSetMMasterId);
+
+int32_t origMasterID = 0;
+bool patched = false;
+
+if (netPeer && myID > 0 && getMasterIdAddr && setMasterIdAddr) {
+    origMasterID = ((GetMasterIdFn)getMasterIdAddr)(netPeer, NULL);
+    if (origMasterID != myID) {
+        ((SetMasterIdFn)setMasterIdAddr)(netPeer, myID, NULL);
+        patched = true;
+    }
+}
+
+bool result = false;
+uintptr_t slotAddr = OGSResolveRVA(gOffsets.tblPeerSync);
+void *fnPtr = NULL;
+if (OGSReadPointer(slotAddr, &fnPtr) && fnPtr) {
+    result = ((PeerAction1Fn)fnPtr)(peerObj, NULL);
+}
+
+if (patched && netPeer && setMasterIdAddr && origMasterID > 0) {
+    ((SetMasterIdFn)setMasterIdAddr)(netPeer, origMasterID, NULL);
+}
+
+return result;
+
+
+}
+
+/* STREAMING_CHUNK:Implementing timescale and game speed management... */
 static void OGSApplyTimescaleNow(float speed) {
-    uintptr_t address = OGSResolveRVA(gOffsets.rvaSetTimescale);
-    if (!address) return;
-    SetTime1Fn setTime = (SetTime1Fn)address;
-    setTime(speed, NULL);
+uintptr_t address = OGSResolveRVA(gOffsets.rvaSetTimescale);
+if (!address) return;
+((SetTime1Fn)address)(speed, NULL);
 }
 
 static void OGSRequestSpeed(float speed) {
-    if (!isfinite(speed)) return;
-    speed = fmaxf(0.1f, fminf(speed, 20.0f));
-    gOGS.gameSpeed = speed;
-    __atomic_store_n(&gOGS.speedDirty, true, __ATOMIC_RELEASE);
+if (!isfinite(speed)) return;
+gOGS.gameSpeed = fmaxf(0.1f, fminf(speed, 20.0f));
+__atomic_store_n(&gOGS.speedDirty, true, __ATOMIC_RELEASE);
 }
 
 static void OGSProcessSpeed(void) {
-    bool dirty = __atomic_exchange_n(&gOGS.speedDirty, false, __ATOMIC_ACQ_REL);
-    float speed = gOGS.gameSpeed;
-    if (dirty || fabsf(speed - 1.0f) > 0.01f) {
-        OGSApplyTimescaleNow(speed);
-    }
+if (__atomic_exchange_n(&gOGS.speedDirty, false, __ATOMIC_ACQ_REL)) {
+OGSApplyTimescaleNow(gOGS.gameSpeed);
+}
 }
 
-// ============================================================
-// MARK: - UI Forward Declarations
-// ============================================================
+/* STREAMING_CHUNK:Defining ModMenu UI container and interface classes... */
 @interface OGSPassthroughContainer : UIView
 @property (weak, nonatomic) UIButton *floatingButton;
 @property (weak, nonatomic) UIView *menuPanel;
 @end
 
 @implementation OGSPassthroughContainer
-- (BOOL)pointInside:(CGPoint)p withEvent:(UIEvent *)e {
-    if (self.floatingButton && !self.floatingButton.hidden && [self.floatingButton pointInside:[self convertPoint:p toView:self.floatingButton] withEvent:e]) return YES;
-    if (self.menuPanel && !self.menuPanel.hidden && [self.menuPanel pointInside:[self convertPoint:p toView:self.menuPanel] withEvent:e]) return YES;
-    return NO;
+
+(BOOL)pointInside:(CGPoint)p withEvent:(UIEvent *)e {
+if (self.floatingButton && !self.floatingButton.hidden && [self.floatingButton pointInside:[self convertPoint:p toView:self.floatingButton] withEvent:e]) return YES;
+if (self.menuPanel && !self.menuPanel.hidden && [self.menuPanel pointInside:[self convertPoint:p toView:self.menuPanel] withEvent:e]) return YES;
+return NO;
 }
 @end
 
@@ -669,285 +597,286 @@ static void OGSProcessSpeed(void) {
 @property (strong, nonatomic) NSMutableSet<NSString *> *allowedNamesWhenLocked;
 @property (assign, nonatomic) BOOL roomLockActive;
 @property (strong, nonatomic) NSTimer *masterTimer;
-+ (instancetype)sharedInstance;
-- (void)setupMenu;
-- (void)ensureMenuVisible;
-- (void)recordHijackerName:(NSString *)normName actorID:(int32_t)actID;
-- (void)fetchGitHubCloudConfigWithFeedback:(BOOL)showFeedback;
-- (BOOL)shouldAutoKickPeerWithName:(NSString *)normName actorID:(int32_t)actID;
-- (NSUInteger)bannedCountSafe;
+
+(instancetype)sharedInstance;
+
+(void)setupMenu;
+
+(void)ensureMenuVisible;
+
+(void)recordHijackerName:(NSString *)normName actorID:(int32_t)actID;
+
+(void)fetchGitHubCloudConfigWithFeedback:(BOOL)showFeedback;
+
+(BOOL)shouldAutoKickPeerWithName:(NSString *)normName actorID:(int32_t)actID;
+
+(NSUInteger)bannedCountSafe;
 @end
 
-// ============================================================
-// MARK: - Room Snapshot & Stable Anti-Hijack Engine
-// ============================================================
+/* STREAMING_CHUNK:Building the robust room snapshot loop and anti-hijack engine... */
 static volatile bool s_inSnapshotUpdate = false;
 
 static void OGSUpdateRoomSnapshot(void) {
-    if (__atomic_exchange_n(&s_inSnapshotUpdate, true, __ATOMIC_ACQ_REL)) return;
+if (__atomic_exchange_n(&s_inSnapshotUpdate, true, __ATOMIC_ACQ_REL)) return;
 
-    uintptr_t inRoomAddress       = OGSResolveRVA(gOffsets.rvaInRoom);
-    uintptr_t masterStateAddress  = OGSResolveRVA(gOffsets.rvaIsMaster);
-    uintptr_t masterPlayerAddress = OGSResolveRVA(gOffsets.rvaGetMasterPeer);
+uintptr_t inRoomAddress       = OGSResolveRVA(gOffsets.rvaInRoom);
+uintptr_t masterStateAddress  = OGSResolveRVA(gOffsets.rvaIsMaster);
+uintptr_t masterPlayerAddress = OGSResolveRVA(gOffsets.rvaGetMasterPeer);
 
-    if (!inRoomAddress || !masterStateAddress || !masterPlayerAddress) {
-        __atomic_store_n(&s_inSnapshotUpdate, false, __ATOMIC_RELEASE);
-        return;
-    }
+if (!inRoomAddress || !masterStateAddress || !masterPlayerAddress) {
+    __atomic_store_n(&s_inSnapshotUpdate, false, __ATOMIC_RELEASE);
+    return;
+}
 
-    Bool0Fn inRoomFn   = (Bool0Fn)inRoomAddress;
-    Bool0Fn isMasterFn = (Bool0Fn)masterStateAddress;
-    Object0Fn masterFn = (Object0Fn)masterPlayerAddress;
+bool inRoom = ((Bool0Fn)inRoomAddress)(NULL);
+OGSRoomSnapshot snapshot;
+memset(&snapshot, 0, sizeof(snapshot));
+snapshot.inRoom = inRoom;
 
-    bool inRoom = inRoomFn(NULL);
-    OGSRoomSnapshot snapshot;
-    memset(&snapshot, 0, sizeof(snapshot));
-    snapshot.inRoom = inRoom;
+double now = CFAbsoluteTimeGetCurrent();
+bool wasInRoom = __atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE);
+__atomic_store_n(&gOGS.inRoom, inRoom, __ATOMIC_RELEASE);
 
-    double now = CFAbsoluteTimeGetCurrent();
-    bool wasInRoom = __atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE);
-    __atomic_store_n(&gOGS.inRoom, inRoom, __ATOMIC_RELEASE);
-
-    if (!inRoom) {
-        __atomic_store_n(&gOGS.isMaster, false, __ATOMIC_RELEASE);
-        __atomic_store_n(&gOGS.heldMasterStably, false, __ATOMIC_RELEASE);
-        os_unfair_lock_lock(&gStateLock);
-        gOGS.roomEnterTime = 0.0;
-        gOGS.masterAcquiredTime = 0.0;
-        gOGS.kickRetries = 0;
-        os_unfair_lock_unlock(&gStateLock);
-        OGSPublishSnapshotValue(&snapshot);
-        __atomic_store_n(&s_inSnapshotUpdate, false, __ATOMIC_RELEASE);
-        return;
-    }
-
+if (!inRoom) {
+    __atomic_store_n(&gOGS.isMaster, false, __ATOMIC_RELEASE);
+    __atomic_store_n(&gOGS.heldMasterStably, false, __ATOMIC_RELEASE);
     os_unfair_lock_lock(&gStateLock);
-    if (!wasInRoom || gOGS.roomEnterTime == 0.0) {
-        gOGS.roomEnterTime = now;
-        gOGS.masterAcquiredTime = 0.0;
-        __atomic_store_n(&gOGS.heldMasterStably, false, __ATOMIC_RELEASE);
+    gOGS.roomEnterTime = 0.0;
+    gOGS.masterAcquiredTime = 0.0;
+    gOGS.kickRetries = 0;
+    os_unfair_lock_unlock(&gStateLock);
+    OGSPublishSnapshotValue(&snapshot);
+    __atomic_store_n(&s_inSnapshotUpdate, false, __ATOMIC_RELEASE);
+    return;
+}
+
+os_unfair_lock_lock(&gStateLock);
+if (!wasInRoom || gOGS.roomEnterTime == 0.0) {
+    gOGS.roomEnterTime = now;
+    gOGS.masterAcquiredTime = 0.0;
+    __atomic_store_n(&gOGS.heldMasterStably, false, __ATOMIC_RELEASE);
+}
+double enterTime = gOGS.roomEnterTime;
+os_unfair_lock_unlock(&gStateLock);
+
+bool master = ((Bool0Fn)masterStateAddress)(NULL);
+void *masterPlayer = ((Object0Fn)masterPlayerAddress)(NULL);
+void *myPlayer = NULL;
+int32_t myID = OGSGetLocalPlayerID(&myPlayer);
+OGSModMenu *menu = [OGSModMenu sharedInstance];
+
+bool roomSettled = ((now - enterTime) >= 1.0 && myPlayer != NULL && myID > 0);
+int32_t forceReq = __atomic_exchange_n(&gOGS.forceHostReq, 0, __ATOMIC_ACQ_REL);
+
+if (master) {
+    os_unfair_lock_lock(&gStateLock);
+    if (gOGS.masterAcquiredTime == 0.0) {
+        gOGS.masterAcquiredTime = now;
+    } else if ((now - gOGS.masterAcquiredTime) >= 0.25) {
+        __atomic_store_n(&gOGS.heldMasterStably, true, __ATOMIC_RELEASE);
     }
-    double enterTime = gOGS.roomEnterTime;
+    os_unfair_lock_unlock(&gStateLock);
+} else {
+    os_unfair_lock_lock(&gStateLock);
+    gOGS.masterAcquiredTime = 0.0;
+    int32_t curRetries = gOGS.kickRetries;
     os_unfair_lock_unlock(&gStateLock);
 
-    bool master = isMasterFn(NULL);
-    void *masterPlayer = masterFn(NULL);
-    void *myPlayer = NULL;
-    int32_t myID = OGSGetLocalPlayerID(&myPlayer);
-    OGSModMenu *menu = [OGSModMenu sharedInstance];
+    if (roomSettled && (gOGS.autoHostOn || forceReq > 0 || curRetries > 0)) {
+        bool heldStably = __atomic_load_n(&gOGS.heldMasterStably, __ATOMIC_ACQUIRE);
+        if (gOGS.autoHostOn && heldStably && masterPlayer && masterPlayer != myPlayer) {
+            OGSPeerSnapshot thiefSnap;
+            if (OGSReadPeer(masterPlayer, masterPlayer, &thiefSnap) && thiefSnap.actorID != myID && thiefSnap.actorID > 0) {
+                NSString *thiefName = [NSString stringWithUTF8String:thiefSnap.name];
+                NSString *normThief = OGSNormalizeKey(thiefName);
+                [menu recordHijackerName:normThief actorID:thiefSnap.actorID];
 
-    // ننتظر 1.1 ثانية بعد دخول الروم حتى يكتمل تحميل الـ Scene والـ LocalPlayer بدون كراش!
-    bool roomSettled = ((now - enterTime) >= 1.1 && myPlayer != NULL && myID > 0);
-    int32_t forceReq = __atomic_exchange_n(&gOGS.forceHostReq, 0, __ATOMIC_ACQ_REL);
-
-    if (master) {
-        os_unfair_lock_lock(&gStateLock);
-        if (gOGS.masterAcquiredTime == 0.0) {
-            gOGS.masterAcquiredTime = now;
-        } else if ((now - gOGS.masterAcquiredTime) >= 0.35) {
-            __atomic_store_n(&gOGS.heldMasterStably, true, __ATOMIC_RELEASE);
-        }
-        os_unfair_lock_unlock(&gStateLock);
-    } else {
-        os_unfair_lock_lock(&gStateLock);
-        gOGS.masterAcquiredTime = 0.0;
-        int32_t curRetries = gOGS.kickRetries;
-        os_unfair_lock_unlock(&gStateLock);
-
-        if (roomSettled && (gOGS.autoHostOn || forceReq > 0 || curRetries > 0)) {
-            bool heldStably = __atomic_load_n(&gOGS.heldMasterStably, __ATOMIC_ACQUIRE);
-
-            // إذا كنا الهوست الفعلي وسحبه سارق منا، نسجل اسمه ونطرده
-            if (gOGS.autoHostOn && heldStably && masterPlayer && masterPlayer != myPlayer) {
-                OGSPeerSnapshot thiefSnap;
-                if (OGSReadPeer(masterPlayer, masterPlayer, &thiefSnap) && thiefSnap.actorID != myID && thiefSnap.actorID > 0) {
-                    NSString *thiefName = [NSString stringWithUTF8String:thiefSnap.name];
-                    NSString *normThief = OGSNormalizeKey(thiefName);
-                    [menu recordHijackerName:normThief actorID:thiefSnap.actorID];
-
-                    os_unfair_lock_lock(&gStateLock);
-                    gOGS.kickTargetID = thiefSnap.actorID;
-                    if (normThief.UTF8String) {
-                        snprintf(gOGS.kickTargetName, sizeof(gOGS.kickTargetName), "%s", normThief.UTF8String);
-                        snprintf(gOGS.lastHijackerName, sizeof(gOGS.lastHijackerName), "%s", thiefSnap.name);
-                    }
-                    gOGS.kickRetries = 25;
-                    os_unfair_lock_unlock(&gStateLock);
+                os_unfair_lock_lock(&gStateLock);
+                gOGS.kickTargetID = thiefSnap.actorID;
+                if (normThief.UTF8String) {
+                    snprintf(gOGS.kickTargetName, sizeof(gOGS.kickTargetName), "%s", normThief.UTF8String);
+                    snprintf(gOGS.lastHijackerName, sizeof(gOGS.lastHijackerName), "%s", thiefSnap.name);
                 }
+                gOGS.kickRetries = 30;
+                os_unfair_lock_unlock(&gStateLock);
             }
+        }
 
-            OGSClaimMasterReal(forceReq > 0);
-
-            if (gOGS.autoHostOn && heldStably && masterPlayer && masterPlayer != myPlayer) {
-                OGSKickPeerReal(masterPlayer, true);
-            }
+        OGSClaimMasterReal(forceReq > 0);
+        if (gOGS.autoHostOn && masterPlayer && masterPlayer != myPlayer) {
+            OGSKickPeerReal(masterPlayer, true);
         }
     }
+}
 
-    snapshot.isMaster = master;
-    __atomic_store_n(&gOGS.isMaster, master, __ATOMIC_RELEASE);
+snapshot.isMaster = master;
+__atomic_store_n(&gOGS.isMaster, master, __ATOMIC_RELEASE);
 
-    void *players[OGS_MAX_PEERS];
-    uint32_t count = OGSReadPlayerArray(gOffsets.rvaGetPeers, players);
-    bool targetStillInRoom = false;
+void *players[OGS_MAX_PEERS];
+uint32_t count = OGSReadPlayerArray(gOffsets.rvaGetPeers, players);
+bool targetStillInRoom = false;
 
-    int32_t curKickID = -1;
-    int32_t curRetries = 0;
-    char curKickName[OGS_MAX_NAME_BYTES];
-    memset(curKickName, 0, sizeof(curKickName));
+int32_t curKickID = -1;
+int32_t curRetries = 0;
+char curKickName[OGS_MAX_NAME_BYTES];
+memset(curKickName, 0, sizeof(curKickName));
 
-    os_unfair_lock_lock(&gStateLock);
-    curKickID = gOGS.kickTargetID;
-    curRetries = gOGS.kickRetries;
-    memcpy(curKickName, gOGS.kickTargetName, sizeof(curKickName));
-    os_unfair_lock_unlock(&gStateLock);
+os_unfair_lock_lock(&gStateLock);
+curKickID = gOGS.kickTargetID;
+curRetries = gOGS.kickRetries;
+memcpy(curKickName, gOGS.kickTargetName, sizeof(curKickName));
+os_unfair_lock_unlock(&gStateLock);
 
-    for (uint32_t i = 0; i < count; i++) {
-        OGSPeerSnapshot peerSnap;
-        if (!OGSReadPeer(players[i], masterPlayer, &peerSnap)) continue;
+for (uint32_t i = 0; i < count; i++) {
+    if (!players[i]) continue;
+    OGSPeerSnapshot peerSnap;
+    if (!OGSReadPeer(players[i], masterPlayer, &peerSnap)) continue;
 
-        snapshot.peers[snapshot.count++] = peerSnap;
+    snapshot.peers[snapshot.count++] = peerSnap;
+    NSString *normName = OGSNormalizeKey([NSString stringWithUTF8String:peerSnap.name]);
 
-        NSString *pName = [NSString stringWithUTF8String:peerSnap.name];
-        NSString *normName = OGSNormalizeKey(pName);
-
-        if (roomSettled && curRetries > 0) {
-            bool matchID = (curKickID > 0 && peerSnap.actorID == curKickID);
-            bool matchName = (curKickName[0] != '\0' && normName.UTF8String && strcmp(normName.UTF8String, curKickName) == 0);
-            if (matchID || matchName) {
-                targetStillInRoom = true;
-                OGSKickPeerReal(players[i], false);
-            }
-        }
-
-        if (roomSettled && [menu shouldAutoKickPeerWithName:normName actorID:peerSnap.actorID]) {
+    if (roomSettled && curRetries > 0) {
+        bool matchID = (curKickID > 0 && peerSnap.actorID == curKickID);
+        bool matchName = (curKickName[0] != '\0' && normName.UTF8String && strcmp(normName.UTF8String, curKickName) == 0);
+        if (matchID || matchName) {
+            targetStillInRoom = true;
             OGSKickPeerReal(players[i], false);
         }
     }
 
-    if (curRetries > 0) {
-        os_unfair_lock_lock(&gStateLock);
-        if (!targetStillInRoom) {
-            gOGS.kickRetries = 0;
-            gOGS.kickTargetID = -1;
-            gOGS.kickTargetName[0] = '\0';
-        } else if (gOGS.kickRetries > 0) {
-            gOGS.kickRetries--;
-        }
-        os_unfair_lock_unlock(&gStateLock);
+    if (roomSettled && [menu shouldAutoKickPeerWithName:normName actorID:peerSnap.actorID]) {
+        OGSKickPeerReal(players[i], false);
     }
+}
 
-    OGSPublishSnapshotValue(&snapshot);
-    __atomic_store_n(&s_inSnapshotUpdate, false, __ATOMIC_RELEASE);
+if (curRetries > 0) {
+    os_unfair_lock_lock(&gStateLock);
+    if (!targetStillInRoom) {
+        gOGS.kickRetries = 0;
+        gOGS.kickTargetID = -1;
+        gOGS.kickTargetName[0] = '\0';
+    } else if (gOGS.kickRetries > 0) {
+        gOGS.kickRetries--;
+    }
+    os_unfair_lock_unlock(&gStateLock);
+}
+
+OGSPublishSnapshotValue(&snapshot);
+__atomic_store_n(&s_inSnapshotUpdate, false, __ATOMIC_RELEASE);
+
+
 }
 
 static void OGSUnityThreadTick(void) {
-    double now = CFAbsoluteTimeGetCurrent();
-    os_unfair_lock_lock(&gStateLock);
-    gOGS.lastUnityFrameTick = now;
-    os_unfair_lock_unlock(&gStateLock);
+double now = CFAbsoluteTimeGetCurrent();
+os_unfair_lock_lock(&gStateLock);
+gOGS.lastUnityFrameTick = now;
+os_unfair_lock_unlock(&gStateLock);
 
-    OGSProcessSpeed();
+OGSProcessSpeed();
 
-    int32_t forceReq = __atomic_load_n(&gOGS.forceHostReq, __ATOMIC_ACQUIRE);
-    static double s_lastSnapTime = 0.0;
+int32_t forceReq = __atomic_load_n(&gOGS.forceHostReq, __ATOMIC_ACQUIRE);
+static double s_lastSnapTime = 0.0;
 
-    if (forceReq > 0 || (now - s_lastSnapTime) >= 0.16) {
-        s_lastSnapTime = now;
-        OGSUpdateRoomSnapshot();
+if (forceReq > 0 || (now - s_lastSnapTime) >= 0.12) {
+    s_lastSnapTime = now;
+    OGSUpdateRoomSnapshot();
+}
+
+
+}
+
+/* STREAMING_CHUNK:Implementing robust Photon event and disconnect interception hooks... */
+static void hook_OnEvent(void *self, void *eventData, void *method) {
+os_unfair_lock_lock(&gStateLock);
+double enterTime = gOGS.roomEnterTime;
+os_unfair_lock_unlock(&gStateLock);
+
+double now = CFAbsoluteTimeGetCurrent();
+bool settled = (__atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE) && enterTime > 0.0 && (now - enterTime) > 1.0);
+
+if (settled && eventData && (uintptr_t)eventData >= 0x100000000ULL) {
+    uint8_t eventCode = 0;
+    if (OGSReadMemory((uintptr_t)eventData + 0x10, &eventCode, sizeof(uint8_t))) {
+        // صد جميع الأحداث التدميرية (203 للطرد و 226/225 للتحكم بالسيرفر) عند تفعيل الحماية
+        if ((eventCode == 203 || eventCode == 225 || eventCode == 226) && (gOGS.antiKickHardLock || gOGS.autoHostOn)) {
+            __atomic_fetch_add(&gOGS.blockedKicksCount, 1, __ATOMIC_RELAXED);
+            return;
+        }
     }
 }
 
-// ============================================================
-// MARK: - Network, Chat & Lifecycle Hooks
-// ============================================================
-static void hook_OnEvent(void *self, void *eventData, void *method) {
-    os_unfair_lock_lock(&gStateLock);
-    double enterTime = gOGS.roomEnterTime;
-    os_unfair_lock_unlock(&gStateLock);
+__atomic_fetch_add(&gOGS.insideNetworkEvent, 1, __ATOMIC_ACQ_REL);
+if (orig_OnEvent) orig_OnEvent(self, eventData, method);
+__atomic_fetch_sub(&gOGS.insideNetworkEvent, 1, __ATOMIC_ACQ_REL);
 
-    double now = CFAbsoluteTimeGetCurrent();
-    bool settled = (__atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE) && enterTime > 0.0 && (now - enterTime) > 1.2);
 
-    // قراءة EventCode بأمان لصد حدث الطرد 203 فقط دون المساس بذاكرة الكائنات الأخرى
-    if (settled && eventData && (uintptr_t)eventData >= 0x100000000ULL) {
-        uint8_t eventCode = 0;
-        if (OGSReadMemory((uintptr_t)eventData + 0x10, &eventCode, sizeof(uint8_t))) {
-            if (eventCode == 203 && (gOGS.antiKickHardLock || gOGS.autoHostOn)) {
-                __atomic_fetch_add(&gOGS.blockedKicksCount, 1, __ATOMIC_RELAXED);
-                return; // إسقاط حزمة الطرد الشبكي (CloseConnection) بأمان
-            }
-        }
-    }
-
-    __atomic_fetch_add(&gOGS.insideNetworkEvent, 1, __ATOMIC_ACQ_REL);
-    if (orig_OnEvent) {
-        orig_OnEvent(self, eventData, method);
-    }
-    __atomic_fetch_sub(&gOGS.insideNetworkEvent, 1, __ATOMIC_ACQ_REL);
 }
 
 static bool hook_LeaveRoom(int32_t becomeInactive, void *method) {
-    double now = CFAbsoluteTimeGetCurrent();
-    os_unfair_lock_lock(&gStateLock);
-    double enterTime = gOGS.roomEnterTime;
-    os_unfair_lock_unlock(&gStateLock);
+double now = CFAbsoluteTimeGetCurrent();
+os_unfair_lock_lock(&gStateLock);
+double enterTime = gOGS.roomEnterTime;
+os_unfair_lock_unlock(&gStateLock);
 
-    bool settled = (__atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE) && enterTime > 0.0 && (now - enterTime) > 1.5);
-    if (settled && (gOGS.antiKickHardLock || (gOGS.autoHostOn && __atomic_load_n(&gOGS.insideNetworkEvent, __ATOMIC_ACQUIRE) > 0))) {
-        __atomic_fetch_add(&gOGS.blockedKicksCount, 1, __ATOMIC_RELAXED);
-        return false;
-    }
-    return orig_LeaveRoom ? orig_LeaveRoom(becomeInactive, method) : false;
+bool settled = (__atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE) && enterTime > 0.0 && (now - enterTime) > 1.2);
+if (settled && (gOGS.antiKickHardLock || gOGS.autoHostOn)) {
+    __atomic_fetch_add(&gOGS.blockedKicksCount, 1, __ATOMIC_RELAXED);
+    return false;
+}
+return orig_LeaveRoom ? orig_LeaveRoom(becomeInactive, method) : false;
+
+
 }
 
 static void hook_Type4995LeaveRoom(void *self, void *method) {
-    double now = CFAbsoluteTimeGetCurrent();
-    os_unfair_lock_lock(&gStateLock);
-    double enterTime = gOGS.roomEnterTime;
-    os_unfair_lock_unlock(&gStateLock);
+double now = CFAbsoluteTimeGetCurrent();
+os_unfair_lock_lock(&gStateLock);
+double enterTime = gOGS.roomEnterTime;
+os_unfair_lock_unlock(&gStateLock);
 
-    bool settled = (__atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE) && enterTime > 0.0 && (now - enterTime) > 1.5);
-    if (settled && (gOGS.antiKickHardLock || (gOGS.autoHostOn && __atomic_load_n(&gOGS.insideNetworkEvent, __ATOMIC_ACQUIRE) > 0))) {
-        __atomic_fetch_add(&gOGS.blockedKicksCount, 1, __ATOMIC_RELAXED);
-        return;
-    }
-    if (orig_Type4995Leave) orig_Type4995Leave(self, method);
+bool settled = (__atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE) && enterTime > 0.0 && (now - enterTime) > 1.2);
+if (settled && (gOGS.antiKickHardLock || gOGS.autoHostOn)) {
+    __atomic_fetch_add(&gOGS.blockedKicksCount, 1, __ATOMIC_RELAXED);
+    return;
+}
+if (orig_Type4995Leave) orig_Type4995Leave(self, method);
+
+
 }
 
 static void OGSHandleMasterSwitchIntercept(void *newMasterPlayer) {
-    double now = CFAbsoluteTimeGetCurrent();
+double now = CFAbsoluteTimeGetCurrent();
+os_unfair_lock_lock(&gStateLock);
+double enterTime = gOGS.roomEnterTime;
+os_unfair_lock_unlock(&gStateLock);
+
+bool settled = (__atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE) && enterTime > 0.0 && (now - enterTime) > 1.0);
+if (!settled || !gOGS.autoHostOn || !newMasterPlayer || (uintptr_t)newMasterPlayer < 0x100000000ULL) return;
+
+void *myPlayer = NULL;
+int32_t myID = OGSGetLocalPlayerID(&myPlayer);
+if (!myPlayer || newMasterPlayer == myPlayer) return;
+
+OGSPeerSnapshot thiefSnap;
+if (OGSReadPeer(newMasterPlayer, newMasterPlayer, &thiefSnap) && thiefSnap.actorID != myID && thiefSnap.actorID > 0) {
+    NSString *thiefName = [NSString stringWithUTF8String:thiefSnap.name];
+    NSString *normThief = OGSNormalizeKey(thiefName);
+    [[OGSModMenu sharedInstance] recordHijackerName:normThief actorID:thiefSnap.actorID];
+
     os_unfair_lock_lock(&gStateLock);
-    double enterTime = gOGS.roomEnterTime;
+    gOGS.kickTargetID = thiefSnap.actorID;
+    if (normThief.UTF8String) {
+        snprintf(gOGS.kickTargetName, sizeof(gOGS.kickTargetName), "%s", normThief.UTF8String);
+        snprintf(gOGS.lastHijackerName, sizeof(gOGS.lastHijackerName), "%s", thiefSnap.name);
+    }
+    gOGS.kickRetries = 30;
     os_unfair_lock_unlock(&gStateLock);
 
-    bool settled = (__atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE) && enterTime > 0.0 && (now - enterTime) > 1.2);
-    if (!settled || !gOGS.autoHostOn || !newMasterPlayer || (uintptr_t)newMasterPlayer < 0x100000000ULL) return;
+    __atomic_store_n(&gOGS.forceHostReq, 1, __ATOMIC_RELEASE);
+}
 
-    void *myPlayer = NULL;
-    int32_t myID = OGSGetLocalPlayerID(&myPlayer);
-    if (!myPlayer || newMasterPlayer == myPlayer) return;
 
-    OGSPeerSnapshot thiefSnap;
-    if (OGSReadPeer(newMasterPlayer, newMasterPlayer, &thiefSnap) && thiefSnap.actorID != myID && thiefSnap.actorID > 0) {
-        if (__atomic_load_n(&gOGS.heldMasterStably, __ATOMIC_ACQUIRE)) {
-            NSString *thiefName = [NSString stringWithUTF8String:thiefSnap.name];
-            NSString *normThief = OGSNormalizeKey(thiefName);
-            [[OGSModMenu sharedInstance] recordHijackerName:normThief actorID:thiefSnap.actorID];
-
-            os_unfair_lock_lock(&gStateLock);
-            gOGS.kickTargetID = thiefSnap.actorID;
-            if (normThief.UTF8String) {
-                snprintf(gOGS.kickTargetName, sizeof(gOGS.kickTargetName), "%s", normThief.UTF8String);
-                snprintf(gOGS.lastHijackerName, sizeof(gOGS.lastHijackerName), "%s", thiefSnap.name);
-            }
-            gOGS.kickRetries = 25;
-            os_unfair_lock_unlock(&gStateLock);
-        }
-
-        // نضع إشارة ليتم سحب الهوست في الفريم القادم بأمان بدون Re-entrancy Crash
-        __atomic_store_n(&gOGS.forceHostReq, 1, __ATOMIC_RELEASE);
-    }
 }
 
 static void hook_OnMasterSwitched1(void *self, void *p, void *m) { OGSHandleMasterSwitchIntercept(p); if (orig_OnMasterSwitch1) orig_OnMasterSwitch1(self, p, m); }
@@ -957,650 +886,563 @@ static void hook_OnMasterSwitched4(void *self, void *p, void *m) { OGSHandleMast
 static void hook_OnMasterSwitched5(void *self, void *p, void *m) { OGSHandleMasterSwitchIntercept(p); if (orig_OnMasterSwitch5) orig_OnMasterSwitch5(self, p, m); }
 
 static void hook_OnPhotonPlayerDisconnected(void *self, void *player, void *method) {
-    uintptr_t locManager = 0;
-    void *origLeaveStr = NULL;
-    void **leaveStrSlot = NULL;
+uintptr_t locManager = 0;
+void *origLeaveStr = NULL;
+void leaveStrSlot = NULL;
 
-    if (self && gOGS.kickMsgArmed > 0 && OGSReadMemory((uintptr_t)self + 0x2F8, &locManager, sizeof(uintptr_t)) && locManager > 0x100000000ULL) {
-        if (OGSReadPointer(locManager + 0x238, &origLeaveStr) && origLeaveStr != NULL) {
-            void *kickStr = OGSCreateFreshKickString(origLeaveStr);
-            if (kickStr) {
-                leaveStrSlot = (void **)(locManager + 0x238);
-                *leaveStrSlot = kickStr;
-            }
+if (self && gOGS.kickMsgArmed > 0 && OGSReadMemory((uintptr_t)self + 0x2F8, &locManager, sizeof(uintptr_t)) && locManager > 0x100000000ULL) {
+    if (OGSReadPointer(locManager + 0x238, &origLeaveStr) && origLeaveStr != NULL) {
+        void *kickStr = OGSCreateFreshKickString(origLeaveStr);
+        if (kickStr) {
+            leaveStrSlot = (void **)(locManager + 0x238);
+            *leaveStrSlot = kickStr;
         }
-        gOGS.kickMsgArmed = 0;
     }
-
-    if (orig_OnDisconnect) orig_OnDisconnect(self, player, method);
-    if (leaveStrSlot && origLeaveStr) *leaveStrSlot = origLeaveStr;
+    gOGS.kickMsgArmed = 0;
 }
 
-static void hook_SendChatRemote(
-    void *self,
-    void *senderStr,
-    void *msgStr,
-    int32_t senderTeam,
-    bool isTeamChat,
-    const void *method
-) {
-    int32_t mode = __atomic_load_n(&gOGS.chatMode, __ATOMIC_ACQUIRE);
-    if (mode == 1) {
-        return;
-    } else if (mode == 2) {
-        NSString *senderName = OGSReadIl2CppString(senderStr);
-        if (senderName.length > 0) {
-            NSString *normSender = OGSNormalizeKey(senderName);
-            const char *utf8 = normSender.UTF8String;
-            if (utf8) {
-                os_unfair_lock_lock(&gStateLock);
-                snprintf(gOGS.kickTargetName, sizeof(gOGS.kickTargetName), "%s", utf8);
-                gOGS.kickTargetID = -1;
-                gOGS.kickRetries = 20;
-                os_unfair_lock_unlock(&gStateLock);
-            }
-        }
-        return;
-    }
-    if (orig_SendChatRemote) {
-        orig_SendChatRemote(self, senderStr, msgStr, senderTeam, isTeamChat, method);
-    }
+if (orig_OnDisconnect) orig_OnDisconnect(self, player, method);
+if (leaveStrSlot && origLeaveStr) *leaveStrSlot = origLeaveStr;
+
+
+}
+
+static void hook_SendChatRemote(void *self, void *senderStr, void *msgStr, int32_t senderTeam, bool isTeamChat, const void *method) {
+int32_t mode = __atomic_load_n(&gOGS.chatMode, __ATOMIC_ACQUIRE);
+if (mode == 1) return;
+if (mode == 2) {
+NSString *senderName = OGSReadIl2CppString(senderStr);
+if (senderName.length > 0) {
+NSString *normSender = OGSNormalizeKey(senderName);
+const char *utf8 = normSender.UTF8String;
+if (utf8) {
+os_unfair_lock_lock(&gStateLock);
+snprintf(gOGS.kickTargetName, sizeof(gOGS.kickTargetName), "%s", utf8);
+gOGS.kickTargetID = -1;
+gOGS.kickRetries = 25;
+os_unfair_lock_unlock(&gStateLock);
+}
+}
+return;
+}
+if (orig_SendChatRemote) orig_SendChatRemote(self, senderStr, msgStr, senderTeam, isTeamChat, method);
 }
 
 static void hook_ChatUpdate(void *self, void *method) {
-    if (orig_ChatUpdate) {
-        orig_ChatUpdate(self, method);
-    }
-    OGSUnityThreadTick();
+if (orig_ChatUpdate) orig_ChatUpdate(self, method);
+OGSUnityThreadTick();
 }
 
 static void hook_CashUpdate(void *self, void *method) {
-    if (orig_CashUpdate) {
-        orig_CashUpdate(self, method);
-    }
-    OGSUnityThreadTick();
+if (orig_CashUpdate) orig_CashUpdate(self, method);
+OGSUnityThreadTick();
 }
 
 static void OGSInstallHooks(void) {
-    uintptr_t base = OGSFindGameImage();
-    if (!base) return;
-    if (gOffsets.tblCashUpdate)        { void **sl = (void **)(base + gOffsets.tblCashUpdate);        if (*sl != (void *)&hook_CashUpdate)                 { orig_CashUpdate      = (Update0Fn)*sl;        *sl = (void *)&hook_CashUpdate; } }
-    if (gOffsets.tblChatUpdate)        { void **sl = (void **)(base + gOffsets.tblChatUpdate);        if (*sl != (void *)&hook_ChatUpdate)                 { orig_ChatUpdate      = (Update0Fn)*sl;        *sl = (void *)&hook_ChatUpdate; } }
-    if (gOffsets.tblSendChatRemote)    { void **sl = (void **)(base + gOffsets.tblSendChatRemote);    if (*sl != (void *)&hook_SendChatRemote)             { orig_SendChatRemote  = (SendChatRemoteFn)*sl; *sl = (void *)&hook_SendChatRemote; } }
-    if (gOffsets.tblOnDisconnect)      { void **sl = (void **)(base + gOffsets.tblOnDisconnect);      if (*sl != (void *)&hook_OnPhotonPlayerDisconnected){ orig_OnDisconnect    = (OnDisconnectFn)*sl;   *sl = (void *)&hook_OnPhotonPlayerDisconnected; } }
-    if (gOffsets.tblOnEvent)           { void **sl = (void **)(base + gOffsets.tblOnEvent);           if (*sl != (void *)&hook_OnEvent)                    { orig_OnEvent         = (OnEventFn)*sl;        *sl = (void *)&hook_OnEvent; } }
-    if (gOffsets.tblLeaveRoom)         { void **sl = (void **)(base + gOffsets.tblLeaveRoom);         if (*sl != (void *)&hook_LeaveRoom)                  { orig_LeaveRoom       = (LeaveRoomFn)*sl;      *sl = (void *)&hook_LeaveRoom; } }
-    if (gOffsets.tblType4995LeaveRoom) { void **sl = (void **)(base + gOffsets.tblType4995LeaveRoom); if (*sl != (void *)&hook_Type4995LeaveRoom)          { orig_Type4995Leave   = (Type4995LeaveFn)*sl;  *sl = (void *)&hook_Type4995LeaveRoom; } }
-    if (gOffsets.tblOnMasterSwitched1) { void **sl = (void **)(base + gOffsets.tblOnMasterSwitched1); if (*sl != (void *)&hook_OnMasterSwitched1)          { orig_OnMasterSwitch1 = (OnMasterSwitchFn)*sl; *sl = (void *)&hook_OnMasterSwitched1; } }
-    if (gOffsets.tblOnMasterSwitched2) { void **sl = (void **)(base + gOffsets.tblOnMasterSwitched2); if (*sl != (void *)&hook_OnMasterSwitched2)          { orig_OnMasterSwitch2 = (OnMasterSwitchFn)*sl; *sl = (void *)&hook_OnMasterSwitched2; } }
-    if (gOffsets.tblOnMasterSwitched3) { void **sl = (void **)(base + gOffsets.tblOnMasterSwitched3); if (*sl != (void *)&hook_OnMasterSwitched3)          { orig_OnMasterSwitch3 = (OnMasterSwitchFn)*sl; *sl = (void *)&hook_OnMasterSwitched3; } }
-    if (gOffsets.tblOnMasterSwitched4) { void **sl = (void **)(base + gOffsets.tblOnMasterSwitched4); if (*sl != (void *)&hook_OnMasterSwitched4)          { orig_OnMasterSwitch4 = (OnMasterSwitchFn)*sl; *sl = (void *)&hook_OnMasterSwitched4; } }
-    if (gOffsets.tblOnMasterSwitched5) { void **sl = (void **)(base + gOffsets.tblOnMasterSwitched5); if (*sl != (void *)&hook_OnMasterSwitched5)          { orig_OnMasterSwitch5 = (OnMasterSwitchFn)*sl; *sl = (void *)&hook_OnMasterSwitched5; } }
+uintptr_t base = OGSFindGameImage();
+if (!base) return;
+if (gOffsets.tblCashUpdate)        { void sl = (void )(base + gOffsets.tblCashUpdate);        if (*sl != (void *)&hook_CashUpdate)                 { orig_CashUpdate      = (Update0Fn)*sl;        *sl = (void *)&hook_CashUpdate; } }
+if (gOffsets.tblChatUpdate)        { void sl = (void )(base + gOffsets.tblChatUpdate);        if (*sl != (void *)&hook_ChatUpdate)                 { orig_ChatUpdate      = (Update0Fn)*sl;        *sl = (void *)&hook_ChatUpdate; } }
+if (gOffsets.tblSendChatRemote)    { void sl = (void )(base + gOffsets.tblSendChatRemote);    if (*sl != (void *)&hook_SendChatRemote)             { orig_SendChatRemote  = (SendChatRemoteFn)*sl; *sl = (void *)&hook_SendChatRemote; } }
+if (gOffsets.tblOnDisconnect)      { void sl = (void )(base + gOffsets.tblOnDisconnect);      if (*sl != (void *)&hook_OnPhotonPlayerDisconnected){ orig_OnDisconnect    = (OnDisconnectFn)*sl;   *sl = (void *)&hook_OnPhotonPlayerDisconnected; } }
+if (gOffsets.tblOnEvent)           { void sl = (void )(base + gOffsets.tblOnEvent);           if (*sl != (void *)&hook_OnEvent)                    { orig_OnEvent         = (OnEventFn)*sl;        *sl = (void *)&hook_OnEvent; } }
+if (gOffsets.tblLeaveRoom)         { void sl = (void )(base + gOffsets.tblLeaveRoom);         if (*sl != (void *)&hook_LeaveRoom)                  { orig_LeaveRoom       = (LeaveRoomFn)*sl;      *sl = (void *)&hook_LeaveRoom; } }
+if (gOffsets.tblType4995LeaveRoom) { void sl = (void )(base + gOffsets.tblType4995LeaveRoom); if (*sl != (void *)&hook_Type4995LeaveRoom)          { orig_Type4995Leave   = (Type4995LeaveFn)*sl;  *sl = (void *)&hook_Type4995LeaveRoom; } }
+if (gOffsets.tblOnMasterSwitched1) { void sl = (void )(base + gOffsets.tblOnMasterSwitched1); if (*sl != (void *)&hook_OnMasterSwitched1)          { orig_OnMasterSwitch1 = (OnMasterSwitchFn)*sl; *sl = (void *)&hook_OnMasterSwitched1; } }
+if (gOffsets.tblOnMasterSwitched2) { void sl = (void )(base + gOffsets.tblOnMasterSwitched2); if (*sl != (void *)&hook_OnMasterSwitched2)          { orig_OnMasterSwitch2 = (OnMasterSwitchFn)*sl; *sl = (void *)&hook_OnMasterSwitched2; } }
+if (gOffsets.tblOnMasterSwitched3) { void sl = (void )(base + gOffsets.tblOnMasterSwitched3); if (*sl != (void *)&hook_OnMasterSwitched3)          { orig_OnMasterSwitch3 = (OnMasterSwitchFn)*sl; *sl = (void *)&hook_OnMasterSwitched3; } }
+if (gOffsets.tblOnMasterSwitched4) { void sl = (void )(base + gOffsets.tblOnMasterSwitched4); if (*sl != (void *)&hook_OnMasterSwitched4)          { orig_OnMasterSwitch4 = (OnMasterSwitchFn)*sl; *sl = (void *)&hook_OnMasterSwitched4; } }
+if (gOffsets.tblOnMasterSwitched5) { void sl = (void )(base + gOffsets.tblOnMasterSwitched5); if (*sl != (void *)&hook_OnMasterSwitched5)          { orig_OnMasterSwitch5 = (OnMasterSwitchFn)*sl; *sl = (void *)&hook_OnMasterSwitched5; } }
 }
 
-// ============================================================
-// MARK: - ModMenu UI Implementation
-// ============================================================
+/* STREAMING_CHUNK:Implementing the ModMenu user interface and controls... */
 @implementation OGSModMenu
-+ (instancetype)sharedInstance {
-    static OGSModMenu *inst = nil;
-    static dispatch_once_t t;
-    dispatch_once(&t, ^{
-        inst = [[OGSModMenu alloc] init];
-        inst.bannedNames = [NSMutableSet set];
-        inst.bannedActorIDs = [NSMutableSet set];
-        inst.allowedNamesWhenLocked = [NSMutableSet set];
-        NSArray *savedBans = [[NSUserDefaults standardUserDefaults] stringArrayForKey:@"OGS_SavedBannedNames"];
-        if (savedBans) [inst.bannedNames addObjectsFromArray:savedBans];
-    });
-    return inst;
+
+(instancetype)sharedInstance {
+static OGSModMenu *inst = nil;
+static dispatch_once_t t;
+dispatch_once(&t, ^{
+inst = [[OGSModMenu alloc] init];
+inst.bannedNames = [NSMutableSet set];
+inst.bannedActorIDs = [NSMutableSet set];
+inst.allowedNamesWhenLocked = [NSMutableSet set];
+NSArray *savedBans = [[NSUserDefaults standardUserDefaults] stringArrayForKey:@"OGS_SavedBannedNames"];
+if (savedBans) [inst.bannedNames addObjectsFromArray:savedBans];
+});
+return inst;
 }
 
-- (void)saveLocalBans {
-    os_unfair_lock_lock(&gBanSetLock);
-    NSArray *all = [self.bannedNames.allObjects copy];
-    os_unfair_lock_unlock(&gBanSetLock);
-    if (all) {
-        [[NSUserDefaults standardUserDefaults] setObject:all forKey:@"OGS_SavedBannedNames"];
-        [[NSUserDefaults standardUserDefaults] synchronize];
-    }
+(void)saveLocalBans {
+os_unfair_lock_lock(&gBanSetLock);
+NSArray *all = [self.bannedNames.allObjects copy];
+os_unfair_lock_unlock(&gBanSetLock);
+if (all) {
+[[NSUserDefaults standardUserDefaults] setObject:all forKey:@"OGS_SavedBannedNames"];
+[[NSUserDefaults standardUserDefaults] synchronize];
+}
 }
 
-- (NSUInteger)bannedCountSafe {
-    os_unfair_lock_lock(&gBanSetLock);
-    NSUInteger c = self.bannedNames.count;
-    os_unfair_lock_unlock(&gBanSetLock);
-    return c;
+(NSUInteger)bannedCountSafe {
+os_unfair_lock_lock(&gBanSetLock);
+NSUInteger c = self.bannedNames.count;
+os_unfair_lock_unlock(&gBanSetLock);
+return c;
 }
 
-- (void)recordHijackerName:(NSString *)normName actorID:(int32_t)actID {
-    os_unfair_lock_lock(&gBanSetLock);
-    if (normName.length > 0) [self.bannedNames addObject:normName];
-    if (actID > 0) [self.bannedActorIDs addObject:@(actID)];
-    os_unfair_lock_unlock(&gBanSetLock);
-    [self saveLocalBans];
+(void)recordHijackerName:(NSString *)normName actorID:(int32_t)actID {
+os_unfair_lock_lock(&gBanSetLock);
+if (normName.length > 0) [self.bannedNames addObject:normName];
+if (actID > 0) [self.bannedActorIDs addObject:@(actID)];
+os_unfair_lock_unlock(&gBanSetLock);
+[self saveLocalBans];
 }
 
-- (BOOL)shouldAutoKickPeerWithName:(NSString *)normName actorID:(int32_t)actID {
-    BOOL res = NO;
-    os_unfair_lock_lock(&gBanSetLock);
-    if (normName.length > 0 && [self.bannedNames containsObject:normName]) res = YES;
-    else if (actID > 0 && [self.bannedActorIDs containsObject:@(actID)]) res = YES;
-    else if (self.roomLockActive && normName.length > 0 && ![self.allowedNamesWhenLocked containsObject:normName]) res = YES;
-    os_unfair_lock_unlock(&gBanSetLock);
-    return res;
+(BOOL)shouldAutoKickPeerWithName:(NSString *)normName actorID:(int32_t)actID {
+BOOL res = NO;
+os_unfair_lock_lock(&gBanSetLock);
+if (normName.length > 0 && [self.bannedNames containsObject:normName]) res = YES;
+else if (actID > 0 && [self.bannedActorIDs containsObject:@(actID)]) res = YES;
+else if (self.roomLockActive && normName.length > 0 && ![self.allowedNamesWhenLocked containsObject:normName]) res = YES;
+os_unfair_lock_unlock(&gBanSetLock);
+return res;
 }
 
-- (UIWindow *)gameMainWindow {
-    UIWindow *bestWindow = nil;
-    for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
-        if ([s isKindOfClass:[UIWindowScene class]]) {
-            for (UIWindow *w in ((UIWindowScene *)s).windows) {
-                if (w.isKeyWindow) return w;
-                if (!w.hidden && w.alpha > 0.01f) bestWindow = w;
-            }
-        }
-    }
-    if (bestWindow) return bestWindow;
-    return [UIApplication sharedApplication].windows.firstObject;
+(UIWindow *)gameMainWindow {
+UIWindow *bestWindow = nil;
+for (UIScene *s in [UIApplication sharedApplication].connectedScenes) {
+if ([s isKindOfClass:[UIWindowScene class]]) {
+for (UIWindow *w in ((UIWindowScene *)s).windows) {
+if (w.isKeyWindow) return w;
+if (!w.hidden && w.alpha > 0.01f) bestWindow = w;
+}
+}
+}
+return bestWindow ?: [UIApplication sharedApplication].windows.firstObject;
 }
 
-- (UIButton *)makeBtn:(CGRect)f title:(NSString *)t bg:(UIColor *)bg action:(SEL)a {
-    UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
-    b.frame = f;
-    b.backgroundColor = bg;
-    [b setTitle:t forState:UIControlStateNormal];
-    [b setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    b.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
-    b.layer.cornerRadius = 7.0;
-    [b addTarget:self action:a forControlEvents:UIControlEventTouchUpInside];
-    return b;
+(UIButton *)makeBtn:(CGRect)f title:(NSString *)t bg:(UIColor *)bg action:(SEL)a {
+UIButton *b = [UIButton buttonWithType:UIButtonTypeSystem];
+b.frame = f;
+b.backgroundColor = bg;
+[b setTitle:t forState:UIControlStateNormal];
+[b setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+b.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
+b.layer.cornerRadius = 7.0;
+[b addTarget:self action:a forControlEvents:UIControlEventTouchUpInside];
+return b;
 }
 
-- (void)ensureMenuVisible {
-    UIWindow *gw = [self gameMainWindow];
-    if (!gw || !self.containerView) return;
-
-    if (self.containerView.superview != gw) {
-        [gw addSubview:self.containerView];
-    }
-    if (!CGRectEqualToRect(self.containerView.frame, gw.bounds)) {
-        self.containerView.frame = gw.bounds;
-    }
-    self.containerView.hidden = NO;
-    self.floatingButton.hidden = NO;
-    [gw bringSubviewToFront:self.containerView];
+(void)ensureMenuVisible {
+UIWindow *gw = [self gameMainWindow];
+if (!gw || !self.containerView) return;
+if (self.containerView.superview != gw) [gw addSubview:self.containerView];
+if (!CGRectEqualToRect(self.containerView.frame, gw.bounds)) self.containerView.frame = gw.bounds;
+self.containerView.hidden = NO;
+self.floatingButton.hidden = NO;
+[gw bringSubviewToFront:self.containerView];
 }
 
-- (void)setupMenu {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        if (self.containerView) {
-            [self ensureMenuVisible];
-            return;
-        }
-        UIWindow *gw = [self gameMainWindow];
-        if (!gw) return;
+(void)setupMenu {
+dispatch_async(dispatch_get_main_queue(), ^{
+if (self.containerView) {
+[self ensureMenuVisible];
+return;
+}
+UIWindow *gw = [self gameMainWindow];
+if (!gw) return;
 
-        self.containerView = [[OGSPassthroughContainer alloc] initWithFrame:gw.bounds];
-        self.containerView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+  self.containerView = [[OGSPassthroughContainer alloc] initWithFrame:gw.bounds];
+  self.containerView.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
 
-        self.floatingButton = [UIButton buttonWithType:UIButtonTypeCustom];
-        self.floatingButton.frame = CGRectMake(18, 95, 48, 48);
-        self.floatingButton.backgroundColor = [UIColor blackColor];
-        self.floatingButton.opaque = YES;
-        [self.floatingButton setTitle:@"OGS" forState:UIControlStateNormal];
-        self.floatingButton.titleLabel.font = [UIFont boldSystemFontOfSize:13];
-        self.floatingButton.layer.cornerRadius = 24.0;
-        self.floatingButton.layer.borderWidth = 2.0f;
-        self.floatingButton.layer.borderColor = [UIColor systemRedColor].CGColor;
-        [self.floatingButton addTarget:self action:@selector(toggleMenu) forControlEvents:UIControlEventTouchUpInside];
-        [self.floatingButton addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)]];
-        [self.containerView addSubview:self.floatingButton];
+  self.floatingButton = [UIButton buttonWithType:UIButtonTypeCustom];
+  self.floatingButton.frame = CGRectMake(18, 95, 48, 48);
+  self.floatingButton.backgroundColor = [UIColor blackColor];
+  [self.floatingButton setTitle:@"OGS" forState:UIControlStateNormal];
+  self.floatingButton.titleLabel.font = [UIFont boldSystemFontOfSize:13];
+  self.floatingButton.layer.cornerRadius = 24.0;
+  self.floatingButton.layer.borderWidth = 2.0f;
+  self.floatingButton.layer.borderColor = [UIColor systemRedColor].CGColor;
+  [self.floatingButton addTarget:self action:@selector(toggleMenu) forControlEvents:UIControlEventTouchUpInside];
+  [self.floatingButton addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)]];
+  [self.containerView addSubview:self.floatingButton];
 
-        self.menuPanel = [[UIView alloc] initWithFrame:CGRectMake(75, 18, 315, 252)];
-        self.menuPanel.backgroundColor = [UIColor colorWithRed:0.09 green:0.09 blue:0.11 alpha:0.96];
-        self.menuPanel.layer.cornerRadius = 14.0;
-        self.menuPanel.layer.borderWidth = 2.0f;
-        self.menuPanel.layer.borderColor = [UIColor systemRedColor].CGColor;
-        self.menuPanel.hidden = YES;
+  self.menuPanel = [[UIView alloc] initWithFrame:CGRectMake(75, 18, 315, 252)];
+  self.menuPanel.backgroundColor = [UIColor colorWithRed:0.09 green:0.09 blue:0.11 alpha:0.96];
+  self.menuPanel.layer.cornerRadius = 14.0;
+  self.menuPanel.layer.borderWidth = 2.0f;
+  self.menuPanel.layer.borderColor = [UIColor systemRedColor].CGColor;
+  self.menuPanel.hidden = YES;
 
-        self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 5, 260, 18)];
-        self.titleLabel.text = @"OGS v13.1: هوست مستقر وضد الطرد 👑🛡️";
-        self.titleLabel.textColor = [UIColor whiteColor];
-        self.titleLabel.textAlignment = NSTextAlignmentCenter;
-        self.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
-        [self.menuPanel addSubview:self.titleLabel];
+  self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 5, 260, 18)];
+  self.titleLabel.text = @"OGS v13.2: درع الهوست المطلق 👑🛡️";
+  self.titleLabel.textColor = [UIColor whiteColor];
+  self.titleLabel.textAlignment = NSTextAlignmentCenter;
+  self.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
+  [self.menuPanel addSubview:self.titleLabel];
 
-        self.syncCloudButton = [self makeBtn:CGRectMake(273, 3, 32, 21)
-                                       title:@"🔄"
-                                          bg:[UIColor colorWithRed:0.18 green:0.45 blue:0.75 alpha:1.0]
-                                      action:@selector(syncCloudTapped:)];
-        [self.menuPanel addSubview:self.syncCloudButton];
+  self.syncCloudButton = [self makeBtn:CGRectMake(273, 3, 32, 21) title:@"🔄" bg:[UIColor colorWithRed:0.18 green:0.45 blue:0.75 alpha:1.0] action:@selector(syncCloudTapped:)];
+  [self.menuPanel addSubview:self.syncCloudButton];
 
-        UIView *infoBox = [[UIView alloc] initWithFrame:CGRectMake(10, 25, 295, 40)];
-        infoBox.backgroundColor = [UIColor colorWithRed:0.16 green:0.17 blue:0.20 alpha:1.0];
-        infoBox.layer.cornerRadius = 8.0;
+  UIView *infoBox = [[UIView alloc] initWithFrame:CGRectMake(10, 25, 295, 40)];
+  infoBox.backgroundColor = [UIColor colorWithRed:0.16 green:0.17 blue:0.20 alpha:1.0];
+  infoBox.layer.cornerRadius = 8.0;
 
-        self.playerLabel = [[UILabel alloc] initWithFrame:CGRectMake(6, 2, 283, 18)];
-        self.playerLabel.text = @"المحدد: لا يوجد لاعبين";
-        self.playerLabel.textColor = [UIColor systemYellowColor];
-        self.playerLabel.textAlignment = NSTextAlignmentCenter;
-        self.playerLabel.font = [UIFont boldSystemFontOfSize:12.0];
-        [infoBox addSubview:self.playerLabel];
+  self.playerLabel = [[UILabel alloc] initWithFrame:CGRectMake(6, 2, 283, 18)];
+  self.playerLabel.text = @"المحدد: جاري الفحص...";
+  self.playerLabel.textColor = [UIColor systemYellowColor];
+  self.playerLabel.textAlignment = NSTextAlignmentCenter;
+  self.playerLabel.font = [UIFont boldSystemFontOfSize:12.0];
+  [infoBox addSubview:self.playerLabel];
 
-        self.statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(6, 20, 283, 17)];
-        self.statusLabel.text = @"الغرفة: غير متصل";
-        self.statusLabel.textColor = [UIColor systemGreenColor];
-        self.statusLabel.textAlignment = NSTextAlignmentCenter;
-        self.statusLabel.font = [UIFont systemFontOfSize:10.5];
-        [infoBox addSubview:self.statusLabel];
-        [self.menuPanel addSubview:infoBox];
+  self.statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(6, 20, 283, 17)];
+  self.statusLabel.text = @"الحماية القصوى نشطة ✅";
+  self.statusLabel.textColor = [UIColor systemGreenColor];
+  self.statusLabel.textAlignment = NSTextAlignmentCenter;
+  self.statusLabel.font = [UIFont systemFontOfSize:10.5];
+  [infoBox addSubview:self.statusLabel];
+  [self.menuPanel addSubview:infoBox];
 
-        UIColor *darkGray   = [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
-        UIColor *kickOrange = [UIColor colorWithRed:0.80 green:0.35 blue:0.10 alpha:1.0];
-        UIColor *banRed     = [UIColor colorWithRed:0.70 green:0.12 blue:0.15 alpha:1.0];
-        UIColor *hostBlue   = [UIColor colorWithRed:0.14 green:0.42 blue:0.72 alpha:1.0];
-        UIColor *wpnGreen   = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
+  UIColor *darkGray   = [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
+  UIColor *kickOrange = [UIColor colorWithRed:0.80 green:0.35 blue:0.10 alpha:1.0];
+  UIColor *banRed     = [UIColor colorWithRed:0.70 green:0.12 blue:0.15 alpha:1.0];
+  UIColor *hostBlue   = [UIColor colorWithRed:0.14 green:0.42 blue:0.72 alpha:1.0];
+  UIColor *wpnGreen   = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
 
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(10, 70, 95, 30) title:@"▶ السابق" bg:darkGray action:@selector(prevPlayer:)]];
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(110, 70, 95, 30) title:@"سحب الهوست 👑" bg:hostBlue action:@selector(claimHostNow:)]];
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(210, 70, 95, 30) title:@"التالي ◀" bg:darkGray action:@selector(nextPlayer:)]];
+  [self.menuPanel addSubview:[self makeBtn:CGRectMake(10, 70, 95, 30) title:@"▶ السابق" bg:darkGray action:@selector(prevPlayer:)]];
+  [self.menuPanel addSubview:[self makeBtn:CGRectMake(110, 70, 95, 30) title:@"سحب الهوست 👑" bg:hostBlue action:@selector(claimHostNow:)]];
+  [self.menuPanel addSubview:[self makeBtn:CGRectMake(210, 70, 95, 30) title:@"التالي ◀" bg:darkGray action:@selector(nextPlayer:)]];
 
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(161, 105, 144, 32) title:@"طرد المحدد فقط" bg:kickOrange action:@selector(kickSelected:)]];
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(10, 105, 144, 32) title:@"طرد وحظر (Ban)" bg:banRed action:@selector(banSelected:)]];
+  [self.menuPanel addSubview:[self makeBtn:CGRectMake(161, 105, 144, 32) title:@"طرد المحدد فقط" bg:kickOrange action:@selector(kickSelected:)]];
+  [self.menuPanel addSubview:[self makeBtn:CGRectMake(10, 105, 144, 32) title:@"طرد وحظر (Ban)" bg:banRed action:@selector(banSelected:)]];
 
-        self.hostLockButton = [self makeBtn:CGRectMake(155, 142, 150, 32) title:@"حماية الهوست: مفعّل 👑" bg:wpnGreen action:@selector(toggleAutoHost:)];
-        [self.menuPanel addSubview:self.hostLockButton];
+  self.hostLockButton = [self makeBtn:CGRectMake(155, 142, 150, 32) title:@"حماية الهوست: مفعّل 👑" bg:wpnGreen action:@selector(toggleAutoHost:)];
+  [self.menuPanel addSubview:self.hostLockButton];
 
-        self.antiKickLockButton = [self makeBtn:CGRectMake(10, 142, 140, 32) title:@"قفل البقاء: تلقائي 🛡️" bg:darkGray action:@selector(toggleAntiKickHardLock:)];
-        [self.menuPanel addSubview:self.antiKickLockButton];
+  self.antiKickLockButton = [self makeBtn:CGRectMake(10, 142, 140, 32) title:@"قفل البقاء: صارم 🔒" bg:wpnGreen action:@selector(toggleAntiKickHardLock:)];
+  [self.menuPanel addSubview:self.antiKickLockButton];
 
-        self.lockButton = [self makeBtn:CGRectMake(205, 179, 100, 30) title:@"قفل الروم: مفتوح" bg:darkGray action:@selector(toggleRoomLock:)];
-        [self.menuPanel addSubview:self.lockButton];
+  self.lockButton = [self makeBtn:CGRectMake(205, 179, 100, 30) title:@"قفل الروم: مفتوح" bg:darkGray action:@selector(toggleRoomLock:)];
+  [self.menuPanel addSubview:self.lockButton];
 
-        self.muteChatButton = [self makeBtn:CGRectMake(105, 179, 95, 30) title:@"الشات: مفتوح" bg:darkGray action:@selector(cycleChatMode:)];
-        [self.menuPanel addSubview:self.muteChatButton];
+  self.muteChatButton = [self makeBtn:CGRectMake(105, 179, 95, 30) title:@"الشات: مفتوح" bg:darkGray action:@selector(cycleChatMode:)];
+  [self.menuPanel addSubview:self.muteChatButton];
 
-        self.unbanButton = [self makeBtn:CGRectMake(10, 179, 90, 30) title:@"فك الحظر (0)" bg:darkGray action:@selector(clearBanList:)];
-        [self.menuPanel addSubview:self.unbanButton];
+  self.unbanButton = [self makeBtn:CGRectMake(10, 179, 90, 30) title:@"فك الحظر (0)" bg:darkGray action:@selector(clearBanList:)];
+  [self.menuPanel addSubview:self.unbanButton];
 
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(10, 214, 55, 30) title:@"سرعة -" bg:darkGray action:@selector(speedDown:)]];
-        self.speedSetButton = [self makeBtn:CGRectMake(70, 214, 175, 30) title:@"السرعة: 1.0x (اضغط للكتابة)" bg:hostBlue action:@selector(promptCustomSpeed:)];
-        [self.menuPanel addSubview:self.speedSetButton];
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(250, 214, 55, 30) title:@"سرعة +" bg:darkGray action:@selector(speedUp:)]];
+  [self.menuPanel addSubview:[self makeBtn:CGRectMake(10, 214, 55, 30) title:@"سرعة -" bg:darkGray action:@selector(speedDown:)]];
+  self.speedSetButton = [self makeBtn:CGRectMake(70, 214, 175, 30) title:@"السرعة: 1.0x (اضغط للكتابة)" bg:hostBlue action:@selector(promptCustomSpeed:)];
+  [self.menuPanel addSubview:self.speedSetButton];
+  [self.menuPanel addSubview:[self makeBtn:CGRectMake(250, 214, 55, 30) title:@"سرعة +" bg:darkGray action:@selector(speedUp:)]];
 
-        [self.containerView addSubview:self.menuPanel];
-        self.containerView.floatingButton = self.floatingButton;
-        self.containerView.menuPanel = self.menuPanel;
-        [gw addSubview:self.containerView];
-        [gw bringSubviewToFront:self.containerView];
+  [self.containerView addSubview:self.menuPanel];
+  self.containerView.floatingButton = self.floatingButton;
+  self.containerView.menuPanel = self.menuPanel;
+  [gw addSubview:self.containerView];
+  [gw bringSubviewToFront:self.containerView];
 
-        self.masterTimer = [NSTimer scheduledTimerWithTimeInterval:0.18 target:self selector:@selector(onMasterTick) userInfo:nil repeats:YES];
-        self.masterTimer.tolerance = 0.03;
+  self.masterTimer = [NSTimer scheduledTimerWithTimeInterval:0.15 target:self selector:@selector(onMasterTick) userInfo:nil repeats:YES];
+  self.masterTimer.tolerance = 0.02;
 
-        [self fetchGitHubCloudConfigWithFeedback:NO];
-    });
+  [self fetchGitHubCloudConfigWithFeedback:NO];
+
+
+});
 }
 
-- (void)syncCloudTapped:(UIButton *)sender {
-    [self fetchGitHubCloudConfigWithFeedback:YES];
+(void)syncCloudTapped:(UIButton *)sender { [self fetchGitHubCloudConfigWithFeedback:YES]; }
+
+(void)tryFetchFromCandidateURLs:(NSArray<NSString *> *)candidates index:(NSUInteger)idx showFeedback:(BOOL)showFeedback {
+if (idx >= candidates.count) {
+if (showFeedback) self.statusLabel.text = @"فشل التحديث من GitHub";
+return;
+}
+NSString *urlStr = [NSString stringWithFormat:@"%@?t=%lld", candidates[idx], (long long)([[NSDate date] timeIntervalSince1970] * 1000)];
+NSURL *url = [NSURL URLWithString:urlStr];
+if (!url) {
+[self tryFetchFromCandidateURLs:candidates index:idx + 1 showFeedback:showFeedback];
+return;
+}
+NSURLRequest *req = [NSURLRequest requestWithURL:url cachePolicy:NSURLRequestReloadIgnoringLocalAndRemoteCacheData timeoutInterval:5.0];
+[[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+NSHTTPURLResponse *httpResp = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
+if (error || !data || (httpResp && httpResp.statusCode != 200)) {
+dispatch_async(dispatch_get_main_queue(), ^{ [self tryFetchFromCandidateURLs:candidates index:idx + 1 showFeedback:showFeedback]; });
+return;
+}
+NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+if (![json isKindOfClass:[NSDictionary class]]) {
+dispatch_async(dispatch_get_main_queue(), ^{ [self tryFetchFromCandidateURLs:candidates index:idx + 1 showFeedback:showFeedback]; });
+return;
+}
+dispatch_async(dispatch_get_main_queue(), ^{
+[self applyCloudConfigDictionary:json];
+if (showFeedback) self.statusLabel.text = @"تم التحديث بنجاح ✅";
+});
+}] resume];
 }
 
-- (void)tryFetchFromCandidateURLs:(NSArray<NSString *> *)candidates index:(NSUInteger)idx showFeedback:(BOOL)showFeedback {
-    if (idx >= candidates.count) {
-        if (showFeedback) {
-            self.statusLabel.text = @"تأكد أن المستودع Public وملف JSON موجود";
-        }
-        return;
-    }
-
-    NSString *baseUrl = candidates[idx];
-    NSString *sep = [baseUrl containsString:@"?"] ? @"&" : @"?";
-    NSString *bustUrl = [NSString stringWithFormat:@"%@%@t=%lld", baseUrl, sep, (long long)([[NSDate date] timeIntervalSince1970] * 1000)];
-    NSURL *url = [NSURL URLWithString:bustUrl];
-    if (!url) {
-        [self tryFetchFromCandidateURLs:candidates index:idx + 1 showFeedback:showFeedback];
-        return;
-    }
-
-    NSURLRequest *req = [NSURLRequest requestWithURL:url cachePolicy:NSURLRequestReloadIgnoringLocalAndRemoteCacheData timeoutInterval:6.0];
-    [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-        NSHTTPURLResponse *httpResp = [response isKindOfClass:[NSHTTPURLResponse class]] ? (NSHTTPURLResponse *)response : nil;
-        if (error || !data || (httpResp && httpResp.statusCode != 200)) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [self tryFetchFromCandidateURLs:candidates index:idx + 1 showFeedback:showFeedback];
-            });
-            return;
-        }
-
-        NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-        if (![json isKindOfClass:[NSDictionary class]]) {
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [self tryFetchFromCandidateURLs:candidates index:idx + 1 showFeedback:showFeedback];
-            });
-            return;
-        }
-
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [self applyCloudConfigDictionary:json];
-            if (showFeedback) {
-                self.statusLabel.text = @"تم التحديث من GitHub بنجاح ✅";
-            }
-        });
-    }] resume];
+(void)fetchGitHubCloudConfigWithFeedback:(BOOL)showFeedback {
+if (showFeedback) self.statusLabel.text = @"جاري التحديث...";
+NSString *savedCustom = [[NSUserDefaults standardUserDefaults] stringForKey:@"OGS_GitHubConfigURL"];
+[self tryFetchFromCandidateURLs:OGSCandidateCloudURLs(savedCustom ?: kDefaultGitHubConfigURL) index:0 showFeedback:showFeedback];
 }
 
-- (void)fetchGitHubCloudConfigWithFeedback:(BOOL)showFeedback {
-    if (showFeedback) {
-        self.statusLabel.text = @"جاري التحديث من GitHub...";
-    }
-    NSString *savedCustom = [[NSUserDefaults standardUserDefaults] stringForKey:@"OGS_GitHubConfigURL"];
-    NSArray<NSString *> *candidates = OGSCandidateCloudURLs(savedCustom ?: kDefaultGitHubConfigURL);
-    [self tryFetchFromCandidateURLs:candidates index:0 showFeedback:showFeedback];
+(void)applyCloudConfigDictionary:(NSDictionary *)json {
+if ([json[@"kick_message"] isKindOfClass:[NSString class]]) {
+const char *utf8 = [json[@"kick_message"] UTF8String];
+if (utf8) {
+os_unfair_lock_lock(&gStateLock);
+snprintf(gOGS.customKickPhrase, sizeof(gOGS.customKickPhrase), "%s", utf8);
+os_unfair_lock_unlock(&gStateLock);
+}
+}
+if ([json[@"default_speed"] isKindOfClass:[NSNumber class]]) {
+[self applySpeed:[json[@"default_speed"] floatValue]];
+}
+os_unfair_lock_lock(&gBanSetLock);
+if ([json[@"banned_names"] isKindOfClass:[NSArray class]]) {
+for (id item in (NSArray *)json[@"banned_names"]) {
+if ([item isKindOfClass:[NSString class]]) {
+NSString *norm = OGSNormalizeKey(item);
+if (norm.length > 0) [self.bannedNames addObject:norm];
+}
+}
+}
+if ([json[@"banned_ids"] isKindOfClass:[NSArray class]]) {
+for (id item in (NSArray *)json[@"banned_ids"]) {
+if ([item isKindOfClass:[NSNumber class]]) [self.bannedActorIDs addObject:item];
+}
+}
+os_unfair_lock_unlock(&gBanSetLock);
+[self saveLocalBans];
+[self refreshUI];
 }
 
-- (void)applyCloudConfigDictionary:(NSDictionary *)json {
-    if ([json[@"kick_message"] isKindOfClass:[NSString class]]) {
-        const char *utf8 = [json[@"kick_message"] UTF8String];
-        if (utf8) {
-            os_unfair_lock_lock(&gStateLock);
-            snprintf(gOGS.customKickPhrase, sizeof(gOGS.customKickPhrase), "%s", utf8);
-            os_unfair_lock_unlock(&gStateLock);
-        }
-    }
-    if ([json[@"default_speed"] isKindOfClass:[NSNumber class]]) {
-        [self applySpeed:[json[@"default_speed"] floatValue]];
-    }
-    os_unfair_lock_lock(&gBanSetLock);
-    if ([json[@"banned_names"] isKindOfClass:[NSArray class]]) {
-        for (id item in (NSArray *)json[@"banned_names"]) {
-            if ([item isKindOfClass:[NSString class]]) {
-                NSString *norm = OGSNormalizeKey(item);
-                if (norm.length > 0) [self.bannedNames addObject:norm];
-            }
-        }
-    }
-    if ([json[@"banned_ids"] isKindOfClass:[NSArray class]]) {
-        for (id item in (NSArray *)json[@"banned_ids"]) {
-            if ([item isKindOfClass:[NSNumber class]]) {
-                [self.bannedActorIDs addObject:item];
-            }
-        }
-    }
-    os_unfair_lock_unlock(&gBanSetLock);
-    [self saveLocalBans];
-    [self refreshUI];
+(void)onMasterTick {
+[self ensureMenuVisible];
+double now = CFAbsoluteTimeGetCurrent();
+os_unfair_lock_lock(&gStateLock);
+double lastUnity = gOGS.lastUnityFrameTick;
+os_unfair_lock_unlock(&gStateLock);
+
+if ((now - lastUnity) > 0.3) {
+OGSProcessSpeed();
+OGSUpdateRoomSnapshot();
+}
+if (self.menuPanel && !self.menuPanel.hidden) [self refreshUI];
 }
 
-- (void)onMasterTick {
-    [self ensureMenuVisible];
+(void)refreshUI {
+OGSRoomSnapshot snapshot = OGSCurrentSnapshot();
+uint32_t count = snapshot.count;
+uint32_t selected = __atomic_load_n(&gOGS.selectedPeer, __ATOMIC_ACQUIRE);
 
-    double now = CFAbsoluteTimeGetCurrent();
-    os_unfair_lock_lock(&gStateLock);
-    double lastUnity = gOGS.lastUnityFrameTick;
-    os_unfair_lock_unlock(&gStateLock);
-
-    if ((now - lastUnity) > 0.35) {
-        OGSProcessSpeed();
-        OGSUpdateRoomSnapshot();
-    }
-
-    if (!self.menuPanel || self.menuPanel.hidden) return;
-    [self refreshUI];
+if (count == 0) {
+__atomic_store_n(&gOGS.selectedPeer, 0, __ATOMIC_RELEASE);
+self.playerLabel.text = @"المحدد: لا يوجد لاعبين";
+} else {
+if (selected >= count) { selected = 0; __atomic_store_n(&gOGS.selectedPeer, 0, __ATOMIC_RELEASE); }
+OGSPeerSnapshot peer = snapshot.peers[selected];
+NSString *name = [NSString stringWithUTF8String:peer.name];
+if (!name.length) name = @"لاعب";
+self.playerLabel.text = [NSString stringWithFormat:@"(%u/%u) %@%@", selected + 1, count, name, peer.isHost ? @" 👑" : @""];
 }
 
-- (void)refreshUI {
-    OGSRoomSnapshot snapshot = OGSCurrentSnapshot();
-    uint32_t count = snapshot.count;
-    uint32_t selected = __atomic_load_n(&gOGS.selectedPeer, __ATOMIC_ACQUIRE);
+uint32_t blocked = __atomic_load_n(&gOGS.blockedKicksCount, __ATOMIC_RELAXED);
+int32_t retries = 0;
+char hjBuf[OGS_MAX_NAME_BYTES];
+memset(hjBuf, 0, sizeof(hjBuf));
 
-    if (count == 0) {
-        __atomic_store_n(&gOGS.selectedPeer, 0, __ATOMIC_RELEASE);
-        self.playerLabel.text = @"المحدد: لا يوجد لاعبين معك حالياً";
-    } else {
-        if (selected >= count) {
-            selected = 0;
-            __atomic_store_n(&gOGS.selectedPeer, 0, __ATOMIC_RELEASE);
-        }
-        OGSPeerSnapshot peer = snapshot.peers[selected];
-        NSString *name = [NSString stringWithUTF8String:peer.name];
-        if (!name.length) name = @"لاعب";
-        self.playerLabel.text = [NSString stringWithFormat:@"(%u/%u) %@%@",
-                                 selected + 1, count, name, peer.isHost ? @" 👑" : @""];
-    }
+os_unfair_lock_lock(&gStateLock);
+retries = gOGS.kickRetries;
+memcpy(hjBuf, gOGS.lastHijackerName, sizeof(hjBuf));
+os_unfair_lock_unlock(&gStateLock);
 
-    uint32_t blocked = __atomic_load_n(&gOGS.blockedKicksCount, __ATOMIC_RELAXED);
-    int32_t retries = 0;
-    char hjBuf[OGS_MAX_NAME_BYTES];
-    memset(hjBuf, 0, sizeof(hjBuf));
-
-    os_unfair_lock_lock(&gStateLock);
-    retries = gOGS.kickRetries;
-    memcpy(hjBuf, gOGS.lastHijackerName, sizeof(hjBuf));
-    os_unfair_lock_unlock(&gStateLock);
-
-    if (retries > 0) {
-        self.statusLabel.text = @"جاري إرسال حزمة الطرد للسيرفر...";
-    } else if (hjBuf[0] != '\0') {
-        NSString *hj = [NSString stringWithUTF8String:hjBuf];
-        self.statusLabel.text = [NSString stringWithFormat:@"طُرد السارق: %@ | صد طرد: %u 🛡️", hj ?: @"", blocked];
-    } else {
-        self.statusLabel.text = [NSString stringWithFormat:@"%@ | بالروم: %u | صد طرد: %u 🛡️",
-                                 snapshot.inRoom ? (snapshot.isMaster ? @"الهوست الفعلي: أنت 👑" : @"متصل (بانتظار الهوست)") : @"غير متصل",
-                                 count,
-                                 blocked];
-    }
-    [self.unbanButton setTitle:[NSString stringWithFormat:@"فك الحظر (%lu)", (unsigned long)[self bannedCountSafe]] forState:UIControlStateNormal];
+if (retries > 0) {
+self.statusLabel.text = @"جاري تأديب السارق وطرده... 👑";
+} else if (hjBuf[0] != '\0') {
+self.statusLabel.text = [NSString stringWithFormat:@"تم طرد السارق! | صد: %u 🛡️", blocked];
+} else {
+self.statusLabel.text = [NSString stringWithFormat:@"%@ | بالروم: %u | صد: %u 🛡️",
+snapshot.inRoom ? (snapshot.isMaster ? @"الهوست: أنت 👑" : @"متصل") : @"غير متصل", count, blocked];
+}
+[self.unbanButton setTitle:[NSString stringWithFormat:@"فك الحظر (%lu)", (unsigned long)[self bannedCountSafe]] forState:UIControlStateNormal];
 }
 
-- (void)toggleMenu {
-    self.menuPanel.hidden = !self.menuPanel.hidden;
-    if (!self.menuPanel.hidden) {
-        OGSInstallHooks();
-        [self refreshUI];
-    }
+(void)toggleMenu {
+self.menuPanel.hidden = !self.menuPanel.hidden;
+if (!self.menuPanel.hidden) {
+OGSInstallHooks();
+[self refreshUI];
+}
 }
 
-- (void)handlePan:(UIPanGestureRecognizer *)g {
-    CGPoint t = [g translationInView:self.containerView];
-    g.view.center = CGPointMake(g.view.center.x + t.x, g.view.center.y + t.y);
-    [g setTranslation:CGPointZero inView:self.containerView];
+(void)handlePan:(UIPanGestureRecognizer *)g {
+CGPoint t = [g translationInView:self.containerView];
+g.view.center = CGPointMake(g.view.center.x + t.x, g.view.center.y + t.y);
+[g setTranslation:CGPointZero inView:self.containerView];
 }
 
-- (void)nextPlayer:(UIButton *)sender {
-    OGSRoomSnapshot snapshot = OGSCurrentSnapshot();
-    if (!snapshot.count) return;
-    uint32_t current = __atomic_load_n(&gOGS.selectedPeer, __ATOMIC_ACQUIRE);
-    __atomic_store_n(&gOGS.selectedPeer, (current + 1) % snapshot.count, __ATOMIC_RELEASE);
-    [self refreshUI];
+(void)nextPlayer:(UIButton *)sender {
+OGSRoomSnapshot snapshot = OGSCurrentSnapshot();
+if (!snapshot.count) return;
+uint32_t current = __atomic_load_n(&gOGS.selectedPeer, __ATOMIC_ACQUIRE);
+__atomic_store_n(&gOGS.selectedPeer, (current + 1) % snapshot.count, __ATOMIC_RELEASE);
+[self refreshUI];
 }
 
-- (void)prevPlayer:(UIButton *)sender {
-    OGSRoomSnapshot snapshot = OGSCurrentSnapshot();
-    if (!snapshot.count) return;
-    uint32_t current = __atomic_load_n(&gOGS.selectedPeer, __ATOMIC_ACQUIRE);
-    __atomic_store_n(&gOGS.selectedPeer, (current + snapshot.count - 1) % snapshot.count, __ATOMIC_RELEASE);
-    [self refreshUI];
+(void)prevPlayer:(UIButton *)sender {
+OGSRoomSnapshot snapshot = OGSCurrentSnapshot();
+if (!snapshot.count) return;
+uint32_t current = __atomic_load_n(&gOGS.selectedPeer, __ATOMIC_ACQUIRE);
+__atomic_store_n(&gOGS.selectedPeer, (current + snapshot.count - 1) % snapshot.count, __ATOMIC_RELEASE);
+[self refreshUI];
 }
 
-- (void)claimHostNow:(UIButton *)sender {
-    OGSRoomSnapshot snapshot = OGSCurrentSnapshot();
-    if (!snapshot.inRoom) {
-        self.statusLabel.text = @"ادخل داخل روم أولاً لسحب الهوست!";
-        return;
-    }
-    __atomic_store_n(&gOGS.forceHostReq, 1, __ATOMIC_RELEASE);
-    self.statusLabel.text = @"تم إرسال حزمة سحب الهوست للسيرفر (208) 👑";
+(void)claimHostNow:(UIButton *)sender {
+__atomic_store_n(&gOGS.forceHostReq, 1, __ATOMIC_RELEASE);
+self.statusLabel.text = @"تم سحب الهوست بقوة فورية! 👑";
 }
 
-- (void)toggleAutoHost:(UIButton *)s {
-    gOGS.autoHostOn = !gOGS.autoHostOn;
-    if (gOGS.autoHostOn) {
-        __atomic_store_n(&gOGS.forceHostReq, 1, __ATOMIC_RELEASE);
-        [s setTitle:@"حماية الهوست: مفعّل 👑" forState:UIControlStateNormal];
-        s.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
-    } else {
-        [s setTitle:@"حماية الهوست: متوقف" forState:UIControlStateNormal];
-        s.backgroundColor = [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
-    }
-    [self refreshUI];
+(void)toggleAutoHost:(UIButton *)s {
+gOGS.autoHostOn = !gOGS.autoHostOn;
+if (gOGS.autoHostOn) {
+__atomic_store_n(&gOGS.forceHostReq, 1, __ATOMIC_RELEASE);
+[s setTitle:@"حماية الهوست: مفعّل 👑" forState:UIControlStateNormal];
+s.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
+} else {
+[s setTitle:@"حماية الهوست: متوقف" forState:UIControlStateNormal];
+s.backgroundColor = [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
+}
 }
 
-- (void)toggleAntiKickHardLock:(UIButton *)s {
-    gOGS.antiKickHardLock = !gOGS.antiKickHardLock;
-    if (gOGS.antiKickHardLock) {
-        [s setTitle:@"قفل البقاء: صارم 🔒" forState:UIControlStateNormal];
-        s.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
-        self.statusLabel.text = @"قفل البقاء الصارم مفعّل (أوقفه قبل الخروج)";
-    } else {
-        [s setTitle:@"قفل البقاء: تلقائي 🛡️" forState:UIControlStateNormal];
-        s.backgroundColor = [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
-        self.statusLabel.text = @"الحماية التلقائية ضد الطرد الشبكي نشطة";
-    }
+(void)toggleAntiKickHardLock:(UIButton *)s {
+gOGS.antiKickHardLock = !gOGS.antiKickHardLock;
+if (gOGS.antiKickHardLock) {
+[s setTitle:@"قفل البقاء: صارم 🔒" forState:UIControlStateNormal];
+s.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
+self.statusLabel.text = @"قفل البقاء الصارم مفعّل (مستحيل طردك)";
+} else {
+[s setTitle:@"قفل البقاء: عادي 🛡️" forState:UIControlStateNormal];
+s.backgroundColor = [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
+}
 }
 
-- (void)cycleChatMode:(UIButton *)s {
-    gOGS.chatMode = (gOGS.chatMode + 1) % 3;
-    if (gOGS.chatMode == 1) {
-        [s setTitle:@"الشات: كتم 🔇" forState:UIControlStateNormal];
-        s.backgroundColor = [UIColor colorWithRed:0.80 green:0.35 blue:0.10 alpha:1.0];
-    } else if (gOGS.chatMode == 2) {
-        [s setTitle:@"الشات: طرد 🚫" forState:UIControlStateNormal];
-        s.backgroundColor = [UIColor colorWithRed:0.70 green:0.12 blue:0.15 alpha:1.0];
-    } else {
-        [s setTitle:@"الشات: مفتوح" forState:UIControlStateNormal];
-        s.backgroundColor = [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
-    }
+(void)cycleChatMode:(UIButton *)s {
+gOGS.chatMode = (gOGS.chatMode + 1) % 3;
+if (gOGS.chatMode == 1) {
+[s setTitle:@"الشات: كتم 🔇" forState:UIControlStateNormal];
+s.backgroundColor = [UIColor colorWithRed:0.80 green:0.35 blue:0.10 alpha:1.0];
+} else if (gOGS.chatMode == 2) {
+[s setTitle:@"الشات: طرد 🚫" forState:UIControlStateNormal];
+s.backgroundColor = [UIColor colorWithRed:0.70 green:0.12 blue:0.15 alpha:1.0];
+} else {
+[s setTitle:@"الشات: مفتوح" forState:UIControlStateNormal];
+s.backgroundColor = [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
+}
 }
 
-- (void)triggerImmediateKick:(OGSPeerSnapshot)peer {
-    NSString *pName = [NSString stringWithUTF8String:peer.name];
-    NSString *normName = OGSNormalizeKey(pName);
-    const char *utf8 = normName.UTF8String;
-
-    os_unfair_lock_lock(&gStateLock);
-    gOGS.kickTargetID = peer.actorID;
-    if (utf8) {
-        snprintf(gOGS.kickTargetName, sizeof(gOGS.kickTargetName), "%s", utf8);
-    }
-    gOGS.kickRetries = 22;
-    os_unfair_lock_unlock(&gStateLock);
-
-    __atomic_store_n(&gOGS.forceHostReq, 1, __ATOMIC_RELEASE);
+(void)triggerImmediateKick:(OGSPeerSnapshot)peer {
+os_unfair_lock_lock(&gStateLock);
+gOGS.kickTargetID = peer.actorID;
+snprintf(gOGS.kickTargetName, sizeof(gOGS.kickTargetName), "%s", peer.name);
+gOGS.kickRetries = 25;
+os_unfair_lock_unlock(&gStateLock);
+__atomic_store_n(&gOGS.forceHostReq, 1, __ATOMIC_RELEASE);
 }
 
-- (void)kickSelected:(UIButton *)s {
-    OGSRoomSnapshot snapshot = OGSCurrentSnapshot();
-    if (!snapshot.count) return;
-    uint32_t selected = __atomic_load_n(&gOGS.selectedPeer, __ATOMIC_ACQUIRE);
-    if (selected >= snapshot.count) selected = 0;
-
-    OGSPeerSnapshot peer = snapshot.peers[selected];
-    NSString *pName = [NSString stringWithUTF8String:peer.name];
-    [self triggerImmediateKick:peer];
-    self.statusLabel.text = [NSString stringWithFormat:@"تم طرد: %@", pName ?: @"اللاعب"];
+(void)kickSelected:(UIButton *)s {
+OGSRoomSnapshot snapshot = OGSCurrentSnapshot();
+if (!snapshot.count) return;
+uint32_t selected = __atomic_load_n(&gOGS.selectedPeer, __ATOMIC_ACQUIRE);
+if (selected >= snapshot.count) selected = 0;
+[self triggerImmediateKick:snapshot.peers[selected]];
+self.statusLabel.text = @"جاري طرد اللاعب المحدد...";
 }
 
-- (void)banSelected:(UIButton *)s {
-    OGSRoomSnapshot snapshot = OGSCurrentSnapshot();
-    if (!snapshot.count) return;
-    uint32_t selected = __atomic_load_n(&gOGS.selectedPeer, __ATOMIC_ACQUIRE);
-    if (selected >= snapshot.count) selected = 0;
-
-    OGSPeerSnapshot peer = snapshot.peers[selected];
-    NSString *pName = [NSString stringWithUTF8String:peer.name];
-    NSString *normName = OGSNormalizeKey(pName);
-
-    [self recordHijackerName:normName actorID:peer.actorID];
-    [self triggerImmediateKick:peer];
-    [self refreshUI];
-    self.statusLabel.text = [NSString stringWithFormat:@"تم طرد وحظر: %@", pName ?: @"اللاعب"];
+(void)banSelected:(UIButton *)s {
+OGSRoomSnapshot snapshot = OGSCurrentSnapshot();
+if (!snapshot.count) return;
+uint32_t selected = __atomic_load_n(&gOGS.selectedPeer, __ATOMIC_ACQUIRE);
+if (selected >= snapshot.count) selected = 0;
+OGSPeerSnapshot peer = snapshot.peers[selected];
+[self recordHijackerName:OGSNormalizeKey([NSString stringWithUTF8String:peer.name]) actorID:peer.actorID];
+[self triggerImmediateKick:peer];
+[self refreshUI];
+self.statusLabel.text = @"تم طرد اللاعب وحظره نهائياً!";
 }
 
-- (void)toggleRoomLock:(UIButton *)s {
-    OGSRoomSnapshot snapshot = OGSCurrentSnapshot();
-    os_unfair_lock_lock(&gBanSetLock);
-    self.roomLockActive = !self.roomLockActive;
-    [self.allowedNamesWhenLocked removeAllObjects];
+(void)toggleRoomLock:(UIButton *)s {
+OGSRoomSnapshot snapshot = OGSCurrentSnapshot();
+os_unfair_lock_lock(&gBanSetLock);
+self.roomLockActive = !self.roomLockActive;
+[self.allowedNamesWhenLocked removeAllObjects];
+if (self.roomLockActive) {
+for (uint32_t i = 0; i < snapshot.count; i++) {
+NSString *norm = OGSNormalizeKey([NSString stringWithUTF8String:snapshot.peers[i].name]);
+if (norm.length > 0) [self.allowedNamesWhenLocked addObject:norm];
+}
+}
+BOOL locked = self.roomLockActive;
+os_unfair_lock_unlock(&gBanSetLock);
 
-    if (self.roomLockActive) {
-        for (uint32_t i = 0; i < snapshot.count; i++) {
-            NSString *pName = [NSString stringWithUTF8String:snapshot.peers[i].name];
-            NSString *norm = OGSNormalizeKey(pName);
-            if (norm.length > 0) [self.allowedNamesWhenLocked addObject:norm];
-        }
-    }
-    BOOL isLocked = self.roomLockActive;
-    os_unfair_lock_unlock(&gBanSetLock);
-
-    if (isLocked) {
-        [s setTitle:@"قفل الروم: مقفل 🔒" forState:UIControlStateNormal];
-        s.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
-    } else {
-        [s setTitle:@"قفل الروم: مفتوح" forState:UIControlStateNormal];
-        s.backgroundColor = [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
-    }
-    [self refreshUI];
+if (locked) {
+[s setTitle:@"قفل الروم: مقفل 🔒" forState:UIControlStateNormal];
+s.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
+} else {
+[s setTitle:@"قفل الروم: مفتوح" forState:UIControlStateNormal];
+s.backgroundColor = [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
+}
+[self refreshUI];
 }
 
-- (void)clearBanList:(UIButton *)s {
-    os_unfair_lock_lock(&gBanSetLock);
-    [self.bannedNames removeAllObjects];
-    [self.bannedActorIDs removeAllObjects];
-    os_unfair_lock_unlock(&gBanSetLock);
-
-    os_unfair_lock_lock(&gStateLock);
-    gOGS.lastHijackerName[0] = '\0';
-    gOGS.kickRetries = 0;
-    gOGS.kickTargetID = -1;
-    os_unfair_lock_unlock(&gStateLock);
-
-    [self saveLocalBans];
-    [self refreshUI];
-    self.statusLabel.text = @"تم مسح قائمة المحظورين بالكامل";
+(void)clearBanList:(UIButton *)s {
+os_unfair_lock_lock(&gBanSetLock);
+[self.bannedNames removeAllObjects];
+[self.bannedActorIDs removeAllObjects];
+os_unfair_lock_unlock(&gBanSetLock);
+os_unfair_lock_lock(&gStateLock);
+gOGS.lastHijackerName[0] = '\0';
+gOGS.kickRetries = 0;
+gOGS.kickTargetID = -1;
+os_unfair_lock_unlock(&gStateLock);
+[self saveLocalBans];
+[self refreshUI];
+self.statusLabel.text = @"تم مسح قائمة الحظر";
 }
 
-- (void)applySpeed:(float)value {
-    OGSRequestSpeed(value);
-    float actual = gOGS.gameSpeed;
-    [self.speedSetButton setTitle:[NSString stringWithFormat:@"السرعة: %.1fx (اضغط للكتابة)", actual]
-                         forState:UIControlStateNormal];
+(void)applySpeed:(float)value {
+OGSRequestSpeed(value);
+[self.speedSetButton setTitle:[NSString stringWithFormat:@"السرعة: %.1fx (اضغط للكتابة)", gOGS.gameSpeed] forState:UIControlStateNormal];
 }
 
-- (void)speedDown:(UIButton *)sender {
-    [self applySpeed:gOGS.gameSpeed - 0.5f];
-}
+(void)speedDown:(UIButton *)sender { [self applySpeed:gOGS.gameSpeed - 0.5f]; }
 
-- (void)speedUp:(UIButton *)sender {
-    [self applySpeed:gOGS.gameSpeed + 0.5f];
-}
+(void)speedUp:(UIButton *)sender { [self applySpeed:gOGS.gameSpeed + 0.5f]; }
 
-- (void)promptCustomSpeed:(UIButton *)s {
-    UIWindow *gw = [self gameMainWindow];
-    UIViewController *rootVC = gw.rootViewController;
-    if (!rootVC) return;
-
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"تحديد السرعة"
-                                                                   message:@"اكتب رقم السرعة المطلوبة (مثلاً 0.5 للبطيء، 1.0 للطبيعي، 3.0 للسريع):"
-                                                            preferredStyle:UIAlertControllerStyleAlert];
-    [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
-        tf.placeholder = @"1.0";
-        tf.text = [NSString stringWithFormat:@"%.1f", gOGS.gameSpeed];
-        tf.keyboardType = UIKeyboardTypeDecimalPad;
-    }];
-    [alert addAction:[UIAlertAction actionWithTitle:@"تطبيق" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
-        float val = [alert.textFields.firstObject.text floatValue];
-        if (val >= 0.1f && val <= 20.0f) [self applySpeed:val];
-    }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"إلغاء" style:UIAlertActionStyleCancel handler:nil]];
-    [rootVC presentViewController:alert animated:YES completion:nil];
+(void)promptCustomSpeed:(UIButton *)s {
+UIWindow *gw = [self gameMainWindow];
+if (!gw.rootViewController) return;
+UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"تحديد السرعة" message:@"اكتب سرعة اللعبة (0.1 إلى 20.0):" preferredStyle:UIAlertControllerStyleAlert];
+[alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
+tf.placeholder = @"1.0";
+tf.text = [NSString stringWithFormat:@"%.1f", gOGS.gameSpeed];
+tf.keyboardType = UIKeyboardTypeDecimalPad;
+}];
+[alert addAction:[UIAlertAction actionWithTitle:@"تطبيق" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+float val = [alert.textFields.firstObject.text floatValue];
+if (val >= 0.1f && val <= 20.0f) [self applySpeed:val];
+}]];
+[alert addAction:[UIAlertAction actionWithTitle:@"إلغاء" style:UIAlertActionStyleCancel handler:nil]];
+[gw.rootViewController presentViewController:alert animated:YES completion:nil];
 }
 @end
 
-__attribute__((constructor))
+attribute((constructor))
 static void ogs_init(void) {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        OGSInstallHooks();
-        [[OGSModMenu sharedInstance] setupMenu];
-    });
+dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_Time_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+OGSInstallHooks();
+[[OGSModMenu sharedInstance] setupMenu];
+});
 }
