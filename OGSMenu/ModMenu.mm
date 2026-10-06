@@ -1,4 +1,3 @@
-/* STREAMING_CHUNK:Importing required frameworks and defining core constants... */
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <os/lock.h>
@@ -26,7 +25,7 @@ return urls;
 }
 
 // ============================================================
-// MARK: - Verified Engine Offsets
+// MARK: - Verified Engine Offsets (Full Extended Config)
 // ============================================================
 static const uintptr_t RVA_PHOTON_NET_TYPEINFO = 0x0281B1C8;
 
@@ -105,7 +104,14 @@ static OGSOffsetsConfig gOffsets = {
 /* STREAMING_CHUNK:Defining function signatures and original function pointers... */
 typedef void    (*Update0Fn)(void *, void *);
 typedef void    (*SetTime1Fn)(float, void *);
-typedef void    (*SendChatRemoteFn)(void *self, void *senderName, void *text, int32_t senderTeam, bool isTeamChat, const void *method);
+typedef void    (*SendChatRemoteFn)(
+void *self,
+void *senderName,
+void *text,
+int32_t senderTeam,
+bool isTeamChat,
+const void *method
+);
 typedef void    (*OnEventFn)(void *, void *, void *);
 typedef bool    (*LeaveRoomFn)(int32_t, void *);
 typedef void    (*Type4995LeaveFn)(void *, void *);
@@ -168,8 +174,31 @@ char              customKickPhrase[OGS_MAX_NAME_BYTES];
 } OGSRuntimeState;
 
 static OGSRuntimeState gOGS = {
-false, false, false, 0, 1.0f, false, 0, 1, 1, 0, 0, 0, 0, -1, 0, 0, 0,
-NULL, 0.0, 0.0, 0.0, 0.0, 0.0, {0}, {0}, " تم طرده من الغرفة "
+false,
+false,
+false,
+0,
+1.0f,
+false,
+0,
+1,
+0,
+0,
+0,
+0,
+-1,
+0,
+0,
+0,
+NULL,
+0.0,
+0.0,
+0.0,
+0.0,
+0.0,
+{0},
+{0},
+" تم طرده من الغرفة بواسطة الهوست الملكي "
 };
 
 /* STREAMING_CHUNK:Configuring safe memory validation and bounds checks... */
@@ -459,7 +488,7 @@ uintptr_t inRoomAddr = OGSResolveRVA(gOffsets.rvaInRoom);
 if (!inRoomAddr || !((Bool0Fn)inRoomAddr)(NULL)) return false;
 
 double now = CFAbsoluteTimeGetCurrent();
-if (!bypassCooldown && (now - gOGS.lastMasterClaimTime) < 0.25) return false;
+if (!bypassCooldown && (now - gOGS.lastMasterClaimTime) < 0.20) return false;
 gOGS.lastMasterClaimTime = now;
 
 void *myPlayer = NULL;
@@ -500,7 +529,7 @@ static bool OGSKickPeerReal(void *peerObj, bool bypassCooldown) {
 if (!peerObj || (uintptr_t)peerObj < 0x100000000ULL) return false;
 
 double now = CFAbsoluteTimeGetCurrent();
-if (!bypassCooldown && (now - gOGS.lastKickPacketTime) < 0.18) return false;
+if (!bypassCooldown && (now - gOGS.lastKickPacketTime) < 0.15) return false;
 gOGS.lastKickPacketTime = now;
 gOGS.kickMsgArmed = 1;
 
@@ -665,14 +694,14 @@ void *myPlayer = NULL;
 int32_t myID = OGSGetLocalPlayerID(&myPlayer);
 OGSModMenu *menu = [OGSModMenu sharedInstance];
 
-bool roomSettled = ((now - enterTime) >= 1.0 && myPlayer != NULL && myID > 0);
+bool roomSettled = ((now - enterTime) >= 0.8 && myPlayer != NULL && myID > 0);
 int32_t forceReq = __atomic_exchange_n(&gOGS.forceHostReq, 0, __ATOMIC_ACQ_REL);
 
 if (master) {
     os_unfair_lock_lock(&gStateLock);
     if (gOGS.masterAcquiredTime == 0.0) {
         gOGS.masterAcquiredTime = now;
-    } else if ((now - gOGS.masterAcquiredTime) >= 0.25) {
+    } else if ((now - gOGS.masterAcquiredTime) >= 0.20) {
         __atomic_store_n(&gOGS.heldMasterStably, true, __ATOMIC_RELEASE);
     }
     os_unfair_lock_unlock(&gStateLock);
@@ -697,7 +726,7 @@ if (master) {
                     snprintf(gOGS.kickTargetName, sizeof(gOGS.kickTargetName), "%s", normThief.UTF8String);
                     snprintf(gOGS.lastHijackerName, sizeof(gOGS.lastHijackerName), "%s", thiefSnap.name);
                 }
-                gOGS.kickRetries = 30;
+                gOGS.kickRetries = 35;
                 os_unfair_lock_unlock(&gStateLock);
             }
         }
@@ -778,7 +807,7 @@ OGSProcessSpeed();
 int32_t forceReq = __atomic_load_n(&gOGS.forceHostReq, __ATOMIC_ACQUIRE);
 static double s_lastSnapTime = 0.0;
 
-if (forceReq > 0 || (now - s_lastSnapTime) >= 0.12) {
+if (forceReq > 0 || (now - s_lastSnapTime) >= 0.10) {
     s_lastSnapTime = now;
     OGSUpdateRoomSnapshot();
 }
@@ -793,12 +822,11 @@ double enterTime = gOGS.roomEnterTime;
 os_unfair_lock_unlock(&gStateLock);
 
 double now = CFAbsoluteTimeGetCurrent();
-bool settled = (__atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE) && enterTime > 0.0 && (now - enterTime) > 1.0);
+bool settled = (__atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE) && enterTime > 0.0 && (now - enterTime) > 0.8);
 
 if (settled && eventData && (uintptr_t)eventData >= 0x100000000ULL) {
     uint8_t eventCode = 0;
     if (OGSReadMemory((uintptr_t)eventData + 0x10, &eventCode, sizeof(uint8_t))) {
-        // صد جميع الأحداث التدميرية (203 للطرد و 226/225 للتحكم بالسيرفر) عند تفعيل الحماية
         if ((eventCode == 203 || eventCode == 225 || eventCode == 226) && (gOGS.antiKickHardLock || gOGS.autoHostOn)) {
             __atomic_fetch_add(&gOGS.blockedKicksCount, 1, __ATOMIC_RELAXED);
             return;
@@ -819,7 +847,7 @@ os_unfair_lock_lock(&gStateLock);
 double enterTime = gOGS.roomEnterTime;
 os_unfair_lock_unlock(&gStateLock);
 
-bool settled = (__atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE) && enterTime > 0.0 && (now - enterTime) > 1.2);
+bool settled = (__atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE) && enterTime > 0.0 && (now - enterTime) > 1.0);
 if (settled && (gOGS.antiKickHardLock || gOGS.autoHostOn)) {
     __atomic_fetch_add(&gOGS.blockedKicksCount, 1, __ATOMIC_RELAXED);
     return false;
@@ -835,7 +863,7 @@ os_unfair_lock_lock(&gStateLock);
 double enterTime = gOGS.roomEnterTime;
 os_unfair_lock_unlock(&gStateLock);
 
-bool settled = (__atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE) && enterTime > 0.0 && (now - enterTime) > 1.2);
+bool settled = (__atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE) && enterTime > 0.0 && (now - enterTime) > 1.0);
 if (settled && (gOGS.antiKickHardLock || gOGS.autoHostOn)) {
     __atomic_fetch_add(&gOGS.blockedKicksCount, 1, __ATOMIC_RELAXED);
     return;
@@ -851,7 +879,7 @@ os_unfair_lock_lock(&gStateLock);
 double enterTime = gOGS.roomEnterTime;
 os_unfair_lock_unlock(&gStateLock);
 
-bool settled = (__atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE) && enterTime > 0.0 && (now - enterTime) > 1.0);
+bool settled = (__atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE) && enterTime > 0.0 && (now - enterTime) > 0.8);
 if (!settled || !gOGS.autoHostOn || !newMasterPlayer || (uintptr_t)newMasterPlayer < 0x100000000ULL) return;
 
 void *myPlayer = NULL;
@@ -870,7 +898,7 @@ if (OGSReadPeer(newMasterPlayer, newMasterPlayer, &thiefSnap) && thiefSnap.actor
         snprintf(gOGS.kickTargetName, sizeof(gOGS.kickTargetName), "%s", normThief.UTF8String);
         snprintf(gOGS.lastHijackerName, sizeof(gOGS.lastHijackerName), "%s", thiefSnap.name);
     }
-    gOGS.kickRetries = 30;
+    gOGS.kickRetries = 35;
     os_unfair_lock_unlock(&gStateLock);
 
     __atomic_store_n(&gOGS.forceHostReq, 1, __ATOMIC_RELEASE);
@@ -919,7 +947,7 @@ if (utf8) {
 os_unfair_lock_lock(&gStateLock);
 snprintf(gOGS.kickTargetName, sizeof(gOGS.kickTargetName), "%s", utf8);
 gOGS.kickTargetID = -1;
-gOGS.kickRetries = 25;
+gOGS.kickRetries = 30;
 os_unfair_lock_unlock(&gStateLock);
 }
 }
@@ -1141,7 +1169,7 @@ if (!gw) return;
   [gw addSubview:self.containerView];
   [gw bringSubviewToFront:self.containerView];
 
-  self.masterTimer = [NSTimer scheduledTimerWithTimeInterval:0.15 target:self selector:@selector(onMasterTick) userInfo:nil repeats:YES];
+  self.masterTimer = [NSTimer scheduledTimerWithTimeInterval:0.12 target:self selector:@selector(onMasterTick) userInfo:nil repeats:YES];
   self.masterTimer.tolerance = 0.02;
 
   [self fetchGitHubCloudConfigWithFeedback:NO];
@@ -1226,7 +1254,7 @@ os_unfair_lock_lock(&gStateLock);
 double lastUnity = gOGS.lastUnityFrameTick;
 os_unfair_lock_unlock(&gStateLock);
 
-if ((now - lastUnity) > 0.3) {
+if ((now - lastUnity) > 0.25) {
 OGSProcessSpeed();
 OGSUpdateRoomSnapshot();
 }
@@ -1347,7 +1375,7 @@ s.backgroundColor = [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
 os_unfair_lock_lock(&gStateLock);
 gOGS.kickTargetID = peer.actorID;
 snprintf(gOGS.kickTargetName, sizeof(gOGS.kickTargetName), "%s", peer.name);
-gOGS.kickRetries = 25;
+gOGS.kickRetries = 30;
 os_unfair_lock_unlock(&gStateLock);
 __atomic_store_n(&gOGS.forceHostReq, 1, __ATOMIC_RELEASE);
 }
@@ -1441,7 +1469,7 @@ if (val >= 0.1f && val <= 20.0f) [self applySpeed:val];
 
 attribute((constructor))
 static void ogs_init(void) {
-dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_Time_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
 OGSInstallHooks();
 [[OGSModMenu sharedInstance] setupMenu];
 });
