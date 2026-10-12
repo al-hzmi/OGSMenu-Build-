@@ -910,27 +910,48 @@ static const uintptr_t OGS_GOD_SLOT = 0x2813EF8;
 static const uintptr_t OGS_MAGIC_ORIGINAL = 0x3014;
 static const uintptr_t OGS_GOD_ORIGINAL = 0x3054;
 
+// Safe, runtime-only diagnostics for the pre-sign bridge.
+// Counts let us distinguish a working bridge from an unused game call path.
+static volatile uint32_t gMagicCallbacks = 0;
+static volatile uint32_t gMagicArrayReads = 0;
+static volatile uint32_t gMagicMutations = 0;
+static volatile int32_t gMagicLastOriginalDamage = 0;
+static volatile uintptr_t gMagicLastArrayCount = 0;
+static volatile uint32_t gGodCallbacks = 0;
+static volatile uint32_t gGodLocalBypasses = 0;
+
 // RVA 0x137CF70 constructs an Int32[3] with damage at +0x20.
 // DamageRemote calls Abs(int32) on negative incoming damage values.
 static void OGSBridgeOutgoingDamage(void *self, void *values, const void *method) {
+    __atomic_fetch_add(&gMagicCallbacks, 1u, __ATOMIC_RELAXED);
     if (values && __atomic_load_n(&gOGS.magicBulletOn, __ATOMIC_ACQUIRE)) {
         uintptr_t a = (uintptr_t)values;
         uintptr_t n = 0;
         int32_t damage = 0;
-        if (OGSReadMemory(a + 0x18, &n, sizeof(n)) && n == 3 &&
-            OGSReadMemory(a + 0x20, &damage, sizeof(damage)) &&
-            damage < 0 && damage > -10000 &&
-            OGSIsWritableMappedSlot(a + 0x20)) {
-            __atomic_store_n((int32_t *)(a + 0x20), -50000, __ATOMIC_RELEASE);
+        bool hasCount = OGSReadMemory(a + 0x18, &n, sizeof(n));
+        if (hasCount) __atomic_store_n(&gMagicLastArrayCount, n, __ATOMIC_RELAXED);
+        if (hasCount && n == 3 &&
+            OGSReadMemory(a + 0x20, &damage, sizeof(damage))) {
+            __atomic_fetch_add(&gMagicArrayReads, 1u, __ATOMIC_RELAXED);
+            __atomic_store_n(&gMagicLastOriginalDamage, damage, __ATOMIC_RELAXED);
+            if (damage < 0 && damage > -10000 &&
+                OGSIsWritableMappedSlot(a + 0x20)) {
+                __atomic_store_n((int32_t *)(a + 0x20), -50000, __ATOMIC_RELEASE);
+                __atomic_fetch_add(&gMagicMutations, 1u, __ATOMIC_RELAXED);
+            }
         }
     }
     if (orig_ApplyDamage) orig_ApplyDamage(self, values, method);
 }
 
 static void OGSBridgeIncomingDamage(void *self, void *values, int32_t killerID, const void *method) {
+    __atomic_fetch_add(&gGodCallbacks, 1u, __ATOMIC_RELAXED);
     if (self && __atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE)) {
         void *local = OGSFindLocalPlayer();
-        if (local && local == self) return; // only protect ourselves
+        if (local && local == self) {
+            __atomic_fetch_add(&gGodLocalBypasses, 1u, __ATOMIC_RELAXED);
+            return;
+        }
     }
     if (orig_DamageRemote) orig_DamageRemote(self, values, killerID, method);
 }
@@ -1541,6 +1562,15 @@ static void OGSInstallHooks(void) {
 
     if (!OGSFindGameImage()) {
         self.statusLabel.text = @"تعذر العثور على صورة اللعبة fps؛ البيانات والهوست غير متاحين";
+    } else if (__atomic_load_n(&gOGS.magicBulletOn, __ATOMIC_ACQUIRE)) {
+        uint32_t calls = __atomic_load_n(&gMagicCallbacks, __ATOMIC_RELAXED);
+        uint32_t reads = __atomic_load_n(&gMagicArrayReads, __ATOMIC_RELAXED);
+        uint32_t edits = __atomic_load_n(&gMagicMutations, __ATOMIC_RELAXED);
+        self.statusLabel.text = [NSString stringWithFormat:@"السحري: مرور %u | مصفوفة %u | تعديل %u", calls, reads, edits];
+    } else if (__atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE)) {
+        uint32_t calls = __atomic_load_n(&gGodCallbacks, __ATOMIC_RELAXED);
+        uint32_t blocks = __atomic_load_n(&gGodLocalBypasses, __ATOMIC_RELAXED);
+        self.statusLabel.text = [NSString stringWithFormat:@"الدرع: ورود %u | حماية %u", calls, blocks];
     } else if (retries > 0) {
         self.statusLabel.text = @"جاري إرسال حزمة الطرد للسيرفر...";
     } else if (hjBuf[0] != '\0') {
@@ -1623,9 +1653,11 @@ static void OGSInstallHooks(void) {
     }
     __atomic_store_n(&gOGS.godModeOn, next, __ATOMIC_RELEASE);
     if (next) {
-        [s setTitle:@"درع الحماية: مفعّل 🛡️" forState:UIControlStateNormal];
+        __atomic_store_n(&gGodCallbacks, 0u, __ATOMIC_RELAXED);
+        __atomic_store_n(&gGodLocalBypasses, 0u, __ATOMIC_RELAXED);
+        [s setTitle:@"درع الحماية: قيد الاختبار 🛡️" forState:UIControlStateNormal];
         s.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
-        self.statusLabel.text = @"أنت الآن محمي ضد الرصاص السحري ودمج الجدران!";
+        self.statusLabel.text = @"اختبر إصابة واردة: ورود / حماية";
     } else {
         [s setTitle:@"درع الحماية: متوقف 🛡️" forState:UIControlStateNormal];
         s.backgroundColor = [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
@@ -1647,9 +1679,14 @@ static void OGSInstallHooks(void) {
     }
     __atomic_store_n(&gOGS.magicBulletOn, next, __ATOMIC_RELEASE);
     if (next) {
-        [s setTitle:@"طلقة سحرية: مفعّل 🔫" forState:UIControlStateNormal];
+        __atomic_store_n(&gMagicCallbacks, 0u, __ATOMIC_RELAXED);
+        __atomic_store_n(&gMagicArrayReads, 0u, __ATOMIC_RELAXED);
+        __atomic_store_n(&gMagicMutations, 0u, __ATOMIC_RELAXED);
+        __atomic_store_n(&gMagicLastOriginalDamage, 0, __ATOMIC_RELAXED);
+        __atomic_store_n(&gMagicLastArrayCount, (uintptr_t)0, __ATOMIC_RELAXED);
+        [s setTitle:@"طلقة سحرية: قيد الاختبار 🔫" forState:UIControlStateNormal];
         s.backgroundColor = [UIColor colorWithRed:0.80 green:0.35 blue:0.10 alpha:1.0];
-        self.statusLabel.text = @"أي طلقة منك ستقتل الخصم فوراً (One Hit Kill)!";
+        self.statusLabel.text = @"اختبر إصابة فعلية: مرور / مصفوفة / تعديل";
     } else {
         [s setTitle:@"طلقة سحرية: متوقف 🔫" forState:UIControlStateNormal];
         s.backgroundColor = [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
