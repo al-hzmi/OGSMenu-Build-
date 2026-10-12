@@ -1094,6 +1094,28 @@ static bool OGSInstallDamageHookOnDemand(bool godMode) {
         NSLog(@"[OGS] Damage hook skipped: target missing or non-executable (%d)", index);
         return false;
     }
+    // iOS terminates a normally signed app when an inline hook changes a
+    // file-backed __TEXT code page. The user's fps 3.4.0 crash report has
+    // CODESIGNING / Invalid Page at another PC in this very same 16KB page.
+    // Never attempt DobbyInstrument on a read/execute-only mapped image.
+    // Both UI buttons stay clickable and explain the incompatibility.
+    vm_address_t regionAddress = (vm_address_t)target;
+    vm_size_t regionSize = 0;
+    vm_region_basic_info_data_64_t pageInfo = {};
+    mach_msg_type_number_t infoCount = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t objectName = MACH_PORT_NULL;
+    kern_return_t regionKr = vm_region_64(mach_task_self(), &regionAddress, &regionSize,
+                                         VM_REGION_BASIC_INFO_64,
+                                         (vm_region_info_t)&pageInfo, &infoCount, &objectName);
+    if (objectName != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), objectName);
+    if (regionKr != KERN_SUCCESS ||
+        (pageInfo.protection & (VM_PROT_WRITE | VM_PROT_EXECUTE)) != (VM_PROT_WRITE | VM_PROT_EXECUTE)) {
+        NSLog(@"[OGS] Protected signed code page: damage instrument rejected to avoid CodeSigning Invalid Page; index=%d target=%p", index, (void *)target);
+        return false;
+    }
+
+    // This branch is only for a separately verified writable-executable
+    // development mapping. Shipping signed __TEXT does not meet this guard.
     dobby_instrument_callback_t callback = godMode ? OGSInstrumentIncomingDamage : OGSInstrumentOutgoingDamage;
     NSLog(@"[OGS] Installing damage instrument: index=%d target=%p", index, (void *)target);
     int result = DobbyInstrument((void *)target, callback);
@@ -1579,7 +1601,13 @@ static void OGSInstallHooks(void) {
     int32_t current = __atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE);
     int32_t next = current ? 0 : 1;
     if (next && (!__atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE) || !OGSInstallDamageHookOnDemand(true))) {
-        self.statusLabel.text = @"ادخل رومًا أولًا؛ وإذا كنت داخله فتحقق من توافق عنوان الضرر";
+        self.statusLabel.text = @"حماية iOS تمنع تعديل كود الضرر؛ لم تُنفذ العملية لتجنب الكراش";
+        UIAlertController *warning = [UIAlertController alertControllerWithTitle:@"حماية من الكراش"
+            message:@"هذا الإصدار موقّع ويمنع تركيب Hook على صفحة كود الضرر. تم منع العملية الخطرة؛ تحتاج النسخة إلى تكامل مسبق قبل توقيع التطبيق لكي تعمل الميزة."
+            preferredStyle:UIAlertControllerStyleAlert];
+        [warning addAction:[UIAlertAction actionWithTitle:@"فهمت" style:UIAlertActionStyleDefault handler:nil]];
+        UIViewController *root = [self gameMainWindow].rootViewController;
+        if (root && !root.presentedViewController) [root presentViewController:warning animated:YES completion:nil];
         return;
     }
     __atomic_store_n(&gOGS.godModeOn, next, __ATOMIC_RELEASE);
@@ -1597,7 +1625,13 @@ static void OGSInstallHooks(void) {
     int32_t current = __atomic_load_n(&gOGS.magicBulletOn, __ATOMIC_ACQUIRE);
     int32_t next = current ? 0 : 1;
     if (next && (!__atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE) || !OGSInstallDamageHookOnDemand(false))) {
-        self.statusLabel.text = @"ادخل رومًا أولًا؛ وإذا كنت داخله فتحقق من توافق عنوان الضرر";
+        self.statusLabel.text = @"حماية iOS تمنع تعديل كود الضرر؛ لم تُنفذ العملية لتجنب الكراش";
+        UIAlertController *warning = [UIAlertController alertControllerWithTitle:@"حماية من الكراش"
+            message:@"هذا الإصدار موقّع ويمنع تركيب Hook على صفحة كود الضرر. تم منع العملية الخطرة؛ تحتاج النسخة إلى تكامل مسبق قبل توقيع التطبيق لكي تعمل الميزة."
+            preferredStyle:UIAlertControllerStyleAlert];
+        [warning addAction:[UIAlertAction actionWithTitle:@"فهمت" style:UIAlertActionStyleDefault handler:nil]];
+        UIViewController *root = [self gameMainWindow].rootViewController;
+        if (root && !root.presentedViewController) [root presentViewController:warning animated:YES completion:nil];
         return;
     }
     __atomic_store_n(&gOGS.magicBulletOn, next, __ATOMIC_RELEASE);
