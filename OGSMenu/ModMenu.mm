@@ -142,8 +142,9 @@ typedef void*   (*ArabicFixFn)(void *, void *);
 typedef void*   (*FastAllocateStringFn)(int32_t length, const void *);
 typedef void    (*OnDisconnectFn)(void *, void *, void *);
 
-// Damage Signatures (Safe ARM64 Hooking)
-typedef void    (*DamageFn)(void* self, float damage, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6);
+// IL2CPP fps 3.4.0: values points to Int32[3], not an ARM64 float register.
+typedef void (*ApplyDamageFn)(void *, void *, const void *);
+typedef void (*DamageRemoteFn)(void *, void *, int32_t, const void *);
 
 // Unity Engine Signatures
 typedef void*   (*Camera_GetMain_Fn)();
@@ -164,8 +165,8 @@ static OnMasterSwitchFn orig_OnMasterSwitch3 = NULL;
 static OnMasterSwitchFn orig_OnMasterSwitch4 = NULL;
 static OnMasterSwitchFn orig_OnMasterSwitch5 = NULL;
 
-static DamageFn         orig_ApplyDamage     = NULL;
-static DamageFn         orig_DamageRemote    = NULL;
+static ApplyDamageFn  orig_ApplyDamage = NULL;
+static DamageRemoteFn orig_DamageRemote = NULL;
 
 // ============================================================
 // MARK: - Thread-Safe Runtime State & Locks
@@ -900,24 +901,39 @@ static void OGSUnityThreadTick(void) {
 // MARK: - Damage, Network, Chat & Lifecycle Hooks
 // ============================================================
 
-// Instrumentation preserves all original arguments, register state, return value,
-// and control flow. The native function runs unmodified except for the ARM64 s0
-// float value when the verified target receives a plausible positive damage value.
-// This still requires the RVA to match the installed game version.
-static void OGSInstrumentOutgoingDamage(void *address, DobbyRegisterContext *ctx) {
-    if (!ctx || !__atomic_load_n(&gOGS.magicBulletOn, __ATOMIC_ACQUIRE)) return;
-    float value = ctx->floating.regs.q0.f.f1;
-    if (isfinite(value) && value > 0.0f && value < 1000.0f) {
-        ctx->floating.regs.q0.f.f1 = 9999.0f;
+// Executable trampolines are installed OFFLINE into the unsigned IPA, before
+// the device signs it. Runtime changes only writable callback pointers.
+static bool OGSIsWritableMappedSlot(uintptr_t address);
+static const uintptr_t OGS_MAGIC_STUB = 0x3000;
+static const uintptr_t OGS_GOD_STUB = 0x3040;
+static const uintptr_t OGS_MAGIC_SLOT = 0x2813EF0;
+static const uintptr_t OGS_GOD_SLOT = 0x2813EF8;
+static const uintptr_t OGS_MAGIC_ORIGINAL = 0x3014;
+static const uintptr_t OGS_GOD_ORIGINAL = 0x3054;
+
+// RVA 0x137CF70 constructs an Int32[3] with damage at +0x20.
+// DamageRemote calls Abs(int32) on negative incoming damage values.
+static void OGSBridgeOutgoingDamage(void *self, void *values, const void *method) {
+    if (values && __atomic_load_n(&gOGS.magicBulletOn, __ATOMIC_ACQUIRE)) {
+        uintptr_t a = (uintptr_t)values;
+        uintptr_t n = 0;
+        int32_t damage = 0;
+        if (OGSReadMemory(a + 0x18, &n, sizeof(n)) && n == 3 &&
+            OGSReadMemory(a + 0x20, &damage, sizeof(damage)) &&
+            damage < 0 && damage > -10000 &&
+            OGSIsWritableMappedSlot(a + 0x20)) {
+            __atomic_store_n((int32_t *)(a + 0x20), -50000, __ATOMIC_RELEASE);
+        }
     }
+    if (orig_ApplyDamage) orig_ApplyDamage(self, values, method);
 }
 
-static void OGSInstrumentIncomingDamage(void *address, DobbyRegisterContext *ctx) {
-    if (!ctx || !__atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE)) return;
-    float value = ctx->floating.regs.q0.f.f1;
-    if (isfinite(value) && value > 0.0f && value < 1000.0f) {
-        ctx->floating.regs.q0.f.f1 = 0.0f;
+static void OGSBridgeIncomingDamage(void *self, void *values, int32_t killerID, const void *method) {
+    if (self && __atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE)) {
+        void *local = OGSFindLocalPlayer();
+        if (local && local == self) return; // only protect ourselves
     }
+    if (orig_DamageRemote) orig_DamageRemote(self, values, killerID, method);
 }
 
 static void hook_OnEvent(void *self, void *eventData, void *method) {
@@ -1063,68 +1079,64 @@ static void hook_CashUpdate(void *self, void *method) {
     OGSUnityThreadTick();
 }
 
-// Damage hooks must be installed as *inline code hooks*, not by treating
-// executable machine instructions as a writable function-pointer table.
-// Installation is deferred until the corresponding button is pressed, after
-// the game image has loaded. Both buttons remain fully interactive.
+// PRE-SIGN bridge only. No DobbyHook, DobbyInstrument or vm_protect.
 static bool gOGSDamageHookInstalled[2] = {false, false};
-
 static bool OGSIsExecutableGameAddress(uintptr_t addr) {
-    if (addr < 0x100000000ULL || (addr & 0x3u) != 0) return false;
-    vm_address_t regionAddress = (vm_address_t)addr;
-    vm_size_t regionSize = 0;
+    if (addr < 0x100000000ULL || (addr & 3)) return false;
+    vm_address_t start = (vm_address_t)addr;
+    vm_size_t size = 0;
     vm_region_basic_info_data_64_t info = {};
     mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
-    mach_port_t objectName = MACH_PORT_NULL;
-    kern_return_t kr = vm_region_64(mach_task_self(), &regionAddress, &regionSize,
-                                    VM_REGION_BASIC_INFO_64,
-                                    (vm_region_info_t)&info, &count, &objectName);
-    if (objectName != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), objectName);
-    if (kr != KERN_SUCCESS || regionAddress > (vm_address_t)addr) return false;
-    if ((uintptr_t)regionSize < sizeof(uint32_t) ||
-        addr - (uintptr_t)regionAddress > (uintptr_t)regionSize - sizeof(uint32_t)) return false;
-    return (info.protection & VM_PROT_READ) && (info.protection & VM_PROT_EXECUTE);
+    mach_port_t object = MACH_PORT_NULL;
+    kern_return_t kr = vm_region_64(mach_task_self(), &start, &size,
+                                    VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info,
+                                    &count, &object);
+    if (object != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), object);
+    return kr == KERN_SUCCESS && start <= (vm_address_t)addr &&
+           (uintptr_t)size >= sizeof(uint32_t) &&
+           addr-(uintptr_t)start <= (uintptr_t)size-sizeof(uint32_t) &&
+           (info.protection & (VM_PROT_READ | VM_PROT_EXECUTE)) ==
+           (VM_PROT_READ | VM_PROT_EXECUTE);
 }
-
 static bool OGSInstallDamageHookOnDemand(bool godMode) {
     int index = godMode ? 1 : 0;
     if (gOGSDamageHookInstalled[index]) return true;
-    uintptr_t target = OGSResolveRVA(godMode ? gOffsets.rvaDamageRemote : gOffsets.rvaApplyDamage);
-    if (!target || !OGSIsExecutableGameAddress(target)) {
-        NSLog(@"[OGS] Damage hook skipped: target missing or non-executable (%d)", index);
+    uintptr_t base = OGSFindGameImage();
+    if (!base) return false;
+    uintptr_t entryRVA = godMode ? gOffsets.rvaDamageRemote : gOffsets.rvaApplyDamage;
+    uintptr_t stubRVA = godMode ? OGS_GOD_STUB : OGS_MAGIC_STUB;
+    uintptr_t slotRVA = godMode ? OGS_GOD_SLOT : OGS_MAGIC_SLOT;
+    uintptr_t originalRVA = godMode ? OGS_GOD_ORIGINAL : OGS_MAGIC_ORIGINAL;
+    uintptr_t entry = base + entryRVA, stub = base + stubRVA;
+    uintptr_t slot = base + slotRVA, trampoline = base + originalRVA;
+    if (!OGSIsExecutableGameAddress(entry) ||
+        !OGSIsExecutableGameAddress(stub) ||
+        !OGSIsWritableMappedSlot(slot)) return false;
+    int64_t distance = (int64_t)stubRVA - (int64_t)entryRVA;
+    if ((distance & 3) || distance <= -(1LL << 27) || distance >= (1LL << 27)) return false;
+    uint32_t expectBranch = 0x14000000u | (uint32_t)((distance / 4) & 0x03ffffffu);
+    uint32_t branch = 0, adrp = 0, ldr = 0, br = 0, prolog = 0;
+    if (!OGSReadMemory(entry, &branch, 4) ||
+        !OGSReadMemory(stub, &adrp, 4) ||
+        !OGSReadMemory(stub + 8, &ldr, 4) ||
+        !OGSReadMemory(stub + 16, &br, 4) ||
+        !OGSReadMemory(trampoline, &prolog, 4) ||
+        branch != expectBranch || adrp != 0x90014090u ||
+        ldr != 0xF9400210u || br != 0xD61F0200u ||
+        prolog != (godMode ? 0xD10183FFu : 0xD10103FFu)) {
+        NSLog(@"[OGS] IPA not prepared with verified fps 3.4.0 bridge (%d)", index);
         return false;
     }
-    // iOS terminates a normally signed app when an inline hook changes a
-    // file-backed __TEXT code page. The user's fps 3.4.0 crash report has
-    // CODESIGNING / Invalid Page at another PC in this very same 16KB page.
-    // Never attempt DobbyInstrument on a read/execute-only mapped image.
-    // Both UI buttons stay clickable and explain the incompatibility.
-    vm_address_t regionAddress = (vm_address_t)target;
-    vm_size_t regionSize = 0;
-    vm_region_basic_info_data_64_t pageInfo = {};
-    mach_msg_type_number_t infoCount = VM_REGION_BASIC_INFO_COUNT_64;
-    mach_port_t objectName = MACH_PORT_NULL;
-    kern_return_t regionKr = vm_region_64(mach_task_self(), &regionAddress, &regionSize,
-                                         VM_REGION_BASIC_INFO_64,
-                                         (vm_region_info_t)&pageInfo, &infoCount, &objectName);
-    if (objectName != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), objectName);
-    if (regionKr != KERN_SUCCESS ||
-        (pageInfo.protection & (VM_PROT_WRITE | VM_PROT_EXECUTE)) != (VM_PROT_WRITE | VM_PROT_EXECUTE)) {
-        NSLog(@"[OGS] Protected signed code page: damage instrument rejected to avoid CodeSigning Invalid Page; index=%d target=%p", index, (void *)target);
-        return false;
-    }
-
-    // This branch is only for a separately verified writable-executable
-    // development mapping. Shipping signed __TEXT does not meet this guard.
-    dobby_instrument_callback_t callback = godMode ? OGSInstrumentIncomingDamage : OGSInstrumentOutgoingDamage;
-    NSLog(@"[OGS] Installing damage instrument: index=%d target=%p", index, (void *)target);
-    int result = DobbyInstrument((void *)target, callback);
-    if (result != 0) {
-        NSLog(@"[OGS] Damage instrument failed: index=%d code=%d", index, result);
-        return false;
-    }
+    uintptr_t old = 0;
+    if (!OGSReadMemory(slot, &old, sizeof(old))) return false;
+    uintptr_t callback = godMode ? (uintptr_t)&OGSBridgeIncomingDamage :
+                                    (uintptr_t)&OGSBridgeOutgoingDamage;
+    if (old && old != callback) return false;
+    if (godMode) orig_DamageRemote = (DamageRemoteFn)trampoline;
+    else orig_ApplyDamage = (ApplyDamageFn)trampoline;
+    __atomic_store_n((uintptr_t *)slot, callback, __ATOMIC_RELEASE);
     gOGSDamageHookInstalled[index] = true;
-    NSLog(@"[OGS] Damage instrument installed: index=%d", index);
+    NSLog(@"[OGS] Offline-prepared bridge registered safely: %d", index);
     return true;
 }
 
@@ -1601,9 +1613,9 @@ static void OGSInstallHooks(void) {
     int32_t current = __atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE);
     int32_t next = current ? 0 : 1;
     if (next && (!__atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE) || !OGSInstallDamageHookOnDemand(true))) {
-        self.statusLabel.text = @"حماية iOS تمنع تعديل كود الضرر؛ لم تُنفذ العملية لتجنب الكراش";
+        self.statusLabel.text = @"نسخة IPA الحالية لا تحتوي جسر الضرر المجهز قبل التوقيع";
         UIAlertController *warning = [UIAlertController alertControllerWithTitle:@"حماية من الكراش"
-            message:@"هذا الإصدار موقّع ويمنع تركيب Hook على صفحة كود الضرر. تم منع العملية الخطرة؛ تحتاج النسخة إلى تكامل مسبق قبل توقيع التطبيق لكي تعمل الميزة."
+            message:@"الميزات تتطلب تجهيز ملف fps 3.4.0 قبل توقيع التطبيق وإعادة حقن OGSMenu. النسخة الأصلية لا تحتوي جسر الضرر."
             preferredStyle:UIAlertControllerStyleAlert];
         [warning addAction:[UIAlertAction actionWithTitle:@"فهمت" style:UIAlertActionStyleDefault handler:nil]];
         UIViewController *root = [self gameMainWindow].rootViewController;
@@ -1625,9 +1637,9 @@ static void OGSInstallHooks(void) {
     int32_t current = __atomic_load_n(&gOGS.magicBulletOn, __ATOMIC_ACQUIRE);
     int32_t next = current ? 0 : 1;
     if (next && (!__atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE) || !OGSInstallDamageHookOnDemand(false))) {
-        self.statusLabel.text = @"حماية iOS تمنع تعديل كود الضرر؛ لم تُنفذ العملية لتجنب الكراش";
+        self.statusLabel.text = @"نسخة IPA الحالية لا تحتوي جسر الضرر المجهز قبل التوقيع";
         UIAlertController *warning = [UIAlertController alertControllerWithTitle:@"حماية من الكراش"
-            message:@"هذا الإصدار موقّع ويمنع تركيب Hook على صفحة كود الضرر. تم منع العملية الخطرة؛ تحتاج النسخة إلى تكامل مسبق قبل توقيع التطبيق لكي تعمل الميزة."
+            message:@"الميزات تتطلب تجهيز ملف fps 3.4.0 قبل توقيع التطبيق وإعادة حقن OGSMenu. النسخة الأصلية لا تحتوي جسر الضرر."
             preferredStyle:UIAlertControllerStyleAlert];
         [warning addAction:[UIAlertAction actionWithTitle:@"فهمت" style:UIAlertActionStyleDefault handler:nil]];
         UIViewController *root = [self gameMainWindow].rootViewController;
