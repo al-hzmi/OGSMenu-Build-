@@ -10,34 +10,13 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
-      - name: Build iOS arm64 Dobby (inline hook engine)
-        shell: bash
-        run: |
-          set -euo pipefail
-          git clone --quiet https://github.com/jmpews/Dobby.git external/Dobby
-          git -C external/Dobby checkout --quiet 5dfc8546954ce3b3198132ab13fddb89ee92cdd7
-          cmake -S external/Dobby -B "${RUNNER_TEMP}/dobby-build" \
-            -DCMAKE_SYSTEM_NAME=iOS \
-            -DCMAKE_OSX_SYSROOT=iphoneos \
-            -DCMAKE_OSX_ARCHITECTURES=arm64 \
-            -DDOBBY_BUILD_SILICON=ON \
-            -DCMAKE_SYSTEM_PROCESSOR=arm64 \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
-            -DPlugin.SymbolResolver=ON \
-            -DDOBBY_BUILD_TEST=OFF \
-            -DDOBBY_BUILD_EXAMPLE=OFF
-          cmake --build "${RUNNER_TEMP}/dobby-build" --target dobby_static --parallel 4
       - name: Compile iOS arm64 dylib
         shell: bash
         run: |
           set -euo pipefail
           SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
           mkdir -p dist
-          DOBBY_LIB="$(find "${RUNNER_TEMP}/dobby-build" -name libdobby.a -print -quit)"
-          test -s "$DOBBY_LIB"
-          xcrun --sdk iphoneos clang++ -target arm64-apple-ios14.0 -isysroot "$SDK" -std=c++17 -fobjc-arc -fblocks -dynamiclib -I external/Dobby/include -framework UIKit -framework Foundation -framework QuartzCore -framework CoreGraphics -Wl,-install_name,@rpath/OGSMenu.dylib OGSMenu/ModMenu.mm "$DOBBY_LIB" -lc++ -o dist/OGSMenu.dylib
+          xcrun --sdk iphoneos clang++ -target arm64-apple-ios14.0 -isysroot "$SDK" -std=c++17 -fobjc-arc -fblocks -dynamiclib -framework UIKit -framework Foundation -framework QuartzCore -framework CoreGraphics -Wl,-install_name,@rpath/OGSMenu.dylib OGSMenu/ModMenu.mm -lc++ -o dist/OGSMenu.dylib
           file dist/OGSMenu.dylib
           xcrun vtool -show-build dist/OGSMenu.dylib
       - uses: actions/upload-artifact@v4
