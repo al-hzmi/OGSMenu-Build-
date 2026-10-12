@@ -1562,6 +1562,16 @@ static void OGSInstallHooks(void) {
 - (void)refreshUI {
     OGSRoomSnapshot snapshot = OGSCurrentSnapshot();
     uint32_t count = snapshot.count;
+    // Read-only diagnostics: distinguish a queued UI request from an active
+    // game-thread hook and an actually observed MasterClient.
+    double lastUpdate = 0.0;
+    os_unfair_lock_lock(&gStateLock);
+    lastUpdate = gOGS.lastUnityFrameTick;
+    os_unfair_lock_unlock(&gStateLock);
+    BOOL hookActive = lastUpdate > 0.0 && (CFAbsoluteTimeGetCurrent() - lastUpdate) <= 0.5;
+    int32_t pending = __atomic_load_n(&gOGS.forceHostReq, __ATOMIC_ACQUIRE);
+    NSString *masterStatus = !snapshot.inRoom ? @"خارج" : (snapshot.isMaster ? @"أنت" : @"غيرك");
+    self.titleLabel.text = [NSString stringWithFormat:@"OGS | هوست:%@ | تحديث:%@ | طلب:%@", masterStatus, hookActive ? @"نشط" : @"متوقف", pending ? @"معلق" : @"لا"];
     uint32_t selected = __atomic_load_n(&gOGS.selectedPeer, __ATOMIC_ACQUIRE);
 
     if (count == 0) {
@@ -1652,7 +1662,7 @@ static void OGSInstallHooks(void) {
         return;
     }
     __atomic_store_n(&gOGS.forceHostReq, 1, __ATOMIC_RELEASE);
-    self.statusLabel.text = @"تم إرسال حزمة سحب الهوست للسيرفر (208) 👑";
+    self.statusLabel.text = @"تم إدراج طلب السحب؛ انتظر تأكيد انتقال الهوست من Photon";
 }
 
 - (void)toggleAutoHost:(UIButton *)s {
