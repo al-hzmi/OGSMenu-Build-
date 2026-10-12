@@ -1062,8 +1062,11 @@ static void OGSInstallHooks(void) {
     uintptr_t base = OGSFindGameImage();
     if (!base) return;
 
-    if (gOffsets.rvaApplyDamage) { void **sl = (void **)(base + gOffsets.rvaApplyDamage); if (*sl != (void *)&hook_ApplyDamage) { orig_ApplyDamage = (DamageFn)*sl; *sl = (void *)&hook_ApplyDamage; } }
-    if (gOffsets.rvaDamageRemote) { void **sl = (void **)(base + gOffsets.rvaDamageRemote); if (*sl != (void *)&hook_DamageRemote) { orig_DamageRemote = (DamageFn)*sl; *sl = (void *)&hook_DamageRemote; } }
+    // Startup-crash protection: these RVAs point to function entry code, not
+    // writable function-pointer slots. Treating their instructions as pointers
+    // and writing a replacement address can fault immediately on iOS.
+    // Keep these hooks disabled until a proper, validated hooking mechanism
+    // and the exact game build's ABI are available.
 
     if (gOffsets.tblCashUpdate)        { void **sl = (void **)(base + gOffsets.tblCashUpdate);        if (*sl != (void *)&hook_CashUpdate)                 { orig_CashUpdate      = (Update0Fn)*sl;        *sl = (void *)&hook_CashUpdate; } }
     if (gOffsets.tblChatUpdate)        { void **sl = (void **)(base + gOffsets.tblChatUpdate);        if (*sl != (void *)&hook_ChatUpdate)                 { orig_ChatUpdate      = (Update0Fn)*sl;        *sl = (void *)&hook_ChatUpdate; } }
@@ -1257,10 +1260,14 @@ static void OGSInstallHooks(void) {
         [self.menuPanel addSubview:self.antiKickLockButton];
 
         // الأزرار الجديدة
-        self.godModeButton = [self makeBtn:CGRectMake(155, 179, 150, 30) title:@"درع الحماية: متوقف 🛡️" bg:darkGray action:@selector(toggleGodMode:)];
+        self.godModeButton = [self makeBtn:CGRectMake(155, 179, 150, 30) title:@"درع الحماية: غير متاح 🛡️" bg:darkGray action:@selector(toggleGodMode:)];
+        self.godModeButton.enabled = NO;
+        self.godModeButton.alpha = 0.55;
         [self.menuPanel addSubview:self.godModeButton];
 
-        self.magicBulletButton = [self makeBtn:CGRectMake(10, 179, 140, 30) title:@"طلقة سحرية: متوقف 🔫" bg:darkGray action:@selector(toggleMagicBullet:)];
+        self.magicBulletButton = [self makeBtn:CGRectMake(10, 179, 140, 30) title:@"طلقة سحرية: غير متاحة 🔫" bg:darkGray action:@selector(toggleMagicBullet:)];
+        self.magicBulletButton.enabled = NO;
+        self.magicBulletButton.alpha = 0.55;
         [self.menuPanel addSubview:self.magicBulletButton];
 
         self.muteChatButton = [self makeBtn:CGRectMake(105, 214, 95, 30) title:@"الشات: مفتوح" bg:darkGray action:@selector(cycleChatMode:)];
