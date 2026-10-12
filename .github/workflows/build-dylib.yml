@@ -5,11 +5,21 @@ on:
       - 'OGSMenu/**'
       - '.github/workflows/build-dylib.yml'
   workflow_dispatch:
+permissions:
+  contents: write
 jobs:
   build:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+      - name: Record run ID for artifact retrieval
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          printf '%s %s\n' "$GITHUB_RUN_ID" "$GITHUB_SHA" > .ogs-latest-build-run
+          git add .ogs-latest-build-run
+          git diff --cached --quiet || (git commit -m "chore: record build run [skip ci]" && git push origin HEAD:main)
       - name: Compile iOS arm64 dylib
         shell: bash
         run: |
