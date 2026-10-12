@@ -1106,25 +1106,58 @@ static bool OGSInstallDamageHookOnDemand(bool godMode) {
     return true;
 }
 
+// Writes to pointer tables are permitted only if the slot is actually writable
+// and the existing pointer resolves into mapped executable code. Wrong offsets
+// must never be dereferenced or force-written.
+static bool OGSIsWritableMappedSlot(uintptr_t address) {
+    if (address < 0x100000000ULL || (address & (sizeof(void *) - 1))) return false;
+    vm_address_t regionAddress = (vm_address_t)address;
+    vm_size_t regionSize = 0;
+    vm_region_basic_info_data_64_t info = {};
+    mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t objectName = MACH_PORT_NULL;
+    kern_return_t kr = vm_region_64(mach_task_self(), &regionAddress, &regionSize,
+                                    VM_REGION_BASIC_INFO_64,
+                                    (vm_region_info_t)&info, &count, &objectName);
+    if (objectName != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), objectName);
+    if (kr != KERN_SUCCESS || regionAddress > (vm_address_t)address) return false;
+    if ((uintptr_t)regionSize < sizeof(void *) ||
+        address - (uintptr_t)regionAddress > (uintptr_t)regionSize - sizeof(void *)) return false;
+    return (info.protection & (VM_PROT_READ | VM_PROT_WRITE)) ==
+           (VM_PROT_READ | VM_PROT_WRITE);
+}
+
+static bool OGSInstallPointerSlotHook(uintptr_t rva, void *replacement, void **outOriginal) {
+    uintptr_t addr = OGSResolveRVA(rva);
+    if (!addr || !OGSIsWritableMappedSlot(addr)) return false;
+    void *prior = NULL;
+    if (!OGSReadPointer(addr, &prior)) return false;
+    if (prior == replacement) return true;
+    if (!OGSIsExecutableGameAddress((uintptr_t)prior)) return false;
+
+    uintptr_t expected = (uintptr_t)prior;
+    if (!__atomic_compare_exchange_n((uintptr_t *)addr, &expected, (uintptr_t)replacement,
+                                     false, __ATOMIC_RELEASE, __ATOMIC_RELAXED)) return false;
+    if (outOriginal) *outOriginal = prior;
+    return true;
+}
+
 static void OGSInstallHooks(void) {
-    uintptr_t base = OGSFindGameImage();
-    if (!base) return;
-
-    // Damage hooks are attached on demand with DobbyHook (code trampoline),
-    // never via unsafe direct pointer writes during initial loading.
-
-    if (gOffsets.tblCashUpdate)        { void **sl = (void **)(base + gOffsets.tblCashUpdate);        if (*sl != (void *)&hook_CashUpdate)                 { orig_CashUpdate      = (Update0Fn)*sl;        *sl = (void *)&hook_CashUpdate; } }
-    if (gOffsets.tblChatUpdate)        { void **sl = (void **)(base + gOffsets.tblChatUpdate);        if (*sl != (void *)&hook_ChatUpdate)                 { orig_ChatUpdate      = (Update0Fn)*sl;        *sl = (void *)&hook_ChatUpdate; } }
-    if (gOffsets.tblSendChatRemote)    { void **sl = (void **)(base + gOffsets.tblSendChatRemote);    if (*sl != (void *)&hook_SendChatRemote)             { orig_SendChatRemote  = (SendChatRemoteFn)*sl; *sl = (void *)&hook_SendChatRemote; } }
-    if (gOffsets.tblOnDisconnect)      { void **sl = (void **)(base + gOffsets.tblOnDisconnect);      if (*sl != (void *)&hook_OnPhotonPlayerDisconnected){ orig_OnDisconnect    = (OnDisconnectFn)*sl;   *sl = (void *)&hook_OnPhotonPlayerDisconnected; } }
-    if (gOffsets.tblOnEvent)           { void **sl = (void **)(base + gOffsets.tblOnEvent);           if (*sl != (void *)&hook_OnEvent)                    { orig_OnEvent         = (OnEventFn)*sl;        *sl = (void *)&hook_OnEvent; } }
-    if (gOffsets.tblLeaveRoom)         { void **sl = (void **)(base + gOffsets.tblLeaveRoom);         if (*sl != (void *)&hook_LeaveRoom)                  { orig_LeaveRoom       = (LeaveRoomFn)*sl;      *sl = (void *)&hook_LeaveRoom; } }
-    if (gOffsets.tblType4995LeaveRoom) { void **sl = (void **)(base + gOffsets.tblType4995LeaveRoom); if (*sl != (void *)&hook_Type4995LeaveRoom)          { orig_Type4995Leave   = (Type4995LeaveFn)*sl;  *sl = (void *)&hook_Type4995LeaveRoom; } }
-    if (gOffsets.tblOnMasterSwitched1) { void **sl = (void **)(base + gOffsets.tblOnMasterSwitched1); if (*sl != (void *)&hook_OnMasterSwitched1)          { orig_OnMasterSwitch1 = (OnMasterSwitchFn)*sl; *sl = (void *)&hook_OnMasterSwitched1; } }
-    if (gOffsets.tblOnMasterSwitched2) { void **sl = (void **)(base + gOffsets.tblOnMasterSwitched2); if (*sl != (void *)&hook_OnMasterSwitched2)          { orig_OnMasterSwitch2 = (OnMasterSwitchFn)*sl; *sl = (void *)&hook_OnMasterSwitched2; } }
-    if (gOffsets.tblOnMasterSwitched3) { void **sl = (void **)(base + gOffsets.tblOnMasterSwitched3); if (*sl != (void *)&hook_OnMasterSwitched3)          { orig_OnMasterSwitch3 = (OnMasterSwitchFn)*sl; *sl = (void *)&hook_OnMasterSwitched3; } }
-    if (gOffsets.tblOnMasterSwitched4) { void **sl = (void **)(base + gOffsets.tblOnMasterSwitched4); if (*sl != (void *)&hook_OnMasterSwitched4)          { orig_OnMasterSwitch4 = (OnMasterSwitchFn)*sl; *sl = (void *)&hook_OnMasterSwitched4; } }
-    if (gOffsets.tblOnMasterSwitched5) { void **sl = (void **)(base + gOffsets.tblOnMasterSwitched5); if (*sl != (void *)&hook_OnMasterSwitched5)          { orig_OnMasterSwitch5 = (OnMasterSwitchFn)*sl; *sl = (void *)&hook_OnMasterSwitched5; } }
+    if (!OGSFindGameImage()) return;
+    // Lifecycle hooks retain their existing behavior, but table slot
+    // validation prevents faults from invalid or read-only RVAs.
+    OGSInstallPointerSlotHook(gOffsets.tblCashUpdate, (void *)&hook_CashUpdate, (void **)&orig_CashUpdate);
+    OGSInstallPointerSlotHook(gOffsets.tblChatUpdate, (void *)&hook_ChatUpdate, (void **)&orig_ChatUpdate);
+    OGSInstallPointerSlotHook(gOffsets.tblSendChatRemote, (void *)&hook_SendChatRemote, (void **)&orig_SendChatRemote);
+    OGSInstallPointerSlotHook(gOffsets.tblOnDisconnect, (void *)&hook_OnPhotonPlayerDisconnected, (void **)&orig_OnDisconnect);
+    OGSInstallPointerSlotHook(gOffsets.tblOnEvent, (void *)&hook_OnEvent, (void **)&orig_OnEvent);
+    OGSInstallPointerSlotHook(gOffsets.tblLeaveRoom, (void *)&hook_LeaveRoom, (void **)&orig_LeaveRoom);
+    OGSInstallPointerSlotHook(gOffsets.tblType4995LeaveRoom, (void *)&hook_Type4995LeaveRoom, (void **)&orig_Type4995Leave);
+    OGSInstallPointerSlotHook(gOffsets.tblOnMasterSwitched1, (void *)&hook_OnMasterSwitched1, (void **)&orig_OnMasterSwitch1);
+    OGSInstallPointerSlotHook(gOffsets.tblOnMasterSwitched2, (void *)&hook_OnMasterSwitched2, (void **)&orig_OnMasterSwitch2);
+    OGSInstallPointerSlotHook(gOffsets.tblOnMasterSwitched3, (void *)&hook_OnMasterSwitched3, (void **)&orig_OnMasterSwitch3);
+    OGSInstallPointerSlotHook(gOffsets.tblOnMasterSwitched4, (void *)&hook_OnMasterSwitched4, (void **)&orig_OnMasterSwitch4);
+    OGSInstallPointerSlotHook(gOffsets.tblOnMasterSwitched5, (void *)&hook_OnMasterSwitched5, (void **)&orig_OnMasterSwitch5);
 }
 
 // ============================================================
@@ -1428,7 +1461,11 @@ static void OGSInstallHooks(void) {
     // path. Without it, room data never updates when Cash/Chat update hooks
     // don't fire. Do not invoke game code until fps and its in-room RVA exist.
     if ((now - lastUnity) > 0.35) {
-        OGSInstallHooks();
+        static double s_lastHookRetry = 0.0;
+        if ((now - s_lastHookRetry) >= 2.0) {
+            s_lastHookRetry = now;
+            OGSInstallHooks();
+        }
         uintptr_t inRoomAddr = OGSResolveRVA(gOffsets.rvaInRoom);
         if (inRoomAddr && OGSIsExecutableGameAddress(inRoomAddr)) {
             OGSUpdateRoomSnapshot();
