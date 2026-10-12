@@ -727,7 +727,7 @@ static void OGSProcessSpeed(void) {
 // ============================================================
 static volatile bool s_inSnapshotUpdate = false;
 
-static void OGSUpdateRoomSnapshot(void) {
+static void OGSUpdateRoomSnapshot(bool passive = false) {
     if (__atomic_exchange_n(&s_inSnapshotUpdate, true, __ATOMIC_ACQ_REL)) return;
 
     uintptr_t inRoomAddress       = OGSResolveRVA(gOffsets.rvaInRoom);
@@ -777,7 +777,9 @@ static void OGSUpdateRoomSnapshot(void) {
     OGSModMenu *menu = [OGSModMenu sharedInstance];
 
     bool roomSettled = ((now - enterTime) >= 1.1 && myPlayer != NULL && myID > 0);
-    int32_t forceReq = __atomic_exchange_n(&gOGS.forceHostReq, 0, __ATOMIC_ACQ_REL);
+    // The timer fallback only reads a snapshot; it never dispatches
+    // ownership or kick operations from UIKit's timer callback.
+    int32_t forceReq = passive ? 0 : __atomic_exchange_n(&gOGS.forceHostReq, 0, __ATOMIC_ACQ_REL);
 
     if (master) {
         os_unfair_lock_lock(&gStateLock);
@@ -793,7 +795,7 @@ static void OGSUpdateRoomSnapshot(void) {
         int32_t curRetries = gOGS.kickRetries;
         os_unfair_lock_unlock(&gStateLock);
 
-        if (roomSettled && (gOGS.autoHostOn || forceReq > 0 || curRetries > 0)) {
+        if (!passive && roomSettled && (gOGS.autoHostOn || forceReq > 0 || curRetries > 0)) {
             bool heldStably = __atomic_load_n(&gOGS.heldMasterStably, __ATOMIC_ACQUIRE);
 
             if (gOGS.autoHostOn && heldStably && masterPlayer && masterPlayer != myPlayer) {
@@ -847,7 +849,7 @@ static void OGSUpdateRoomSnapshot(void) {
         NSString *pName = [NSString stringWithUTF8String:peerSnap.name];
         NSString *normName = OGSNormalizeKey(pName);
 
-        if (roomSettled && master && curRetries > 0) {
+        if (!passive && roomSettled && master && curRetries > 0) {
             bool matchID = (curKickID > 0 && peerSnap.actorID == curKickID);
             bool matchName = (curKickName[0] != '\0' && normName.UTF8String && strcmp(normName.UTF8String, curKickName) == 0);
             if (matchID || matchName) {
@@ -856,12 +858,12 @@ static void OGSUpdateRoomSnapshot(void) {
             }
         }
 
-        if (roomSettled && master && [menu shouldAutoKickPeerWithName:normName actorID:peerSnap.actorID]) {
+        if (!passive && roomSettled && master && [menu shouldAutoKickPeerWithName:normName actorID:peerSnap.actorID]) {
             OGSKickPeerReal(players[i], false);
         }
     }
 
-    if (curRetries > 0) {
+    if (!passive && curRetries > 0) {
         os_unfair_lock_lock(&gStateLock);
         if (!targetStillInRoom) {
             gOGS.kickRetries = 0;
@@ -1544,9 +1546,13 @@ static void OGSInstallHooks(void) {
             s_lastHookRetry = now;
             OGSInstallHooks();
         }
-        // Keep this UI timer read-only: calling IL2CPP room APIs here
-        // can access stale Photon objects during a master transition.
-        // Room snapshots are refreshed by the hooked game update tick.
+        // The cash/chat hooks are not guaranteed to tick during every match.
+        // Refresh only the read-only player snapshot on the timer fallback.
+        // Never send host-change or kick requests from this callback.
+        uintptr_t inRoomAddr = OGSResolveRVA(gOffsets.rvaInRoom);
+        if (inRoomAddr && OGSIsExecutableGameAddress(inRoomAddr)) {
+            OGSUpdateRoomSnapshot(true);
+        }
     }
 
     if (!self.menuPanel || self.menuPanel.hidden) return;
