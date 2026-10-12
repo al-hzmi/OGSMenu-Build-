@@ -215,7 +215,7 @@ static OGSRuntimeState gOGS = {
     1.0f,  // gameSpeed
     false, // speedDirty
     0,     // readFailures
-    1,     // autoHostOn
+    0,     // autoHostOn
     0,     // aimbotOn
     0,     // godModeOn
     0,     // magicBulletOn
@@ -997,6 +997,7 @@ static void OGSBridgeIncomingDamage(void *self, void *values, int32_t killerID, 
 }
 
 static void hook_OnEvent(void *self, void *eventData, void *method) {
+    __atomic_fetch_add(&gOGSNetworkEvents, 1ULL, __ATOMIC_RELAXED);
     os_unfair_lock_lock(&gStateLock);
     double enterTime = gOGS.roomEnterTime;
     os_unfair_lock_unlock(&gStateLock);
@@ -1050,6 +1051,7 @@ static void hook_Type4995LeaveRoom(void *self, void *method) {
 }
 
 static void OGSHandleMasterSwitchIntercept(void *newMasterPlayer) {
+    __atomic_fetch_add(&gOGSMasterSwitchEvents, 1ULL, __ATOMIC_RELAXED);
     double now = CFAbsoluteTimeGetCurrent();
     os_unfair_lock_lock(&gStateLock);
     double enterTime = gOGS.roomEnterTime;
@@ -1115,12 +1117,20 @@ static void hook_SendChatRemote(void *self, void *senderStr, void *msgStr, int32
     if (orig_SendChatRemote) orig_SendChatRemote(self, senderStr, msgStr, senderTeam, isTeamChat, method);
 }
 
+static volatile uint64_t gOGSCashHookCalls = 0;
+static volatile uint64_t gOGSChatHookCalls = 0;
+static volatile uint64_t gOGSNetworkEvents = 0;
+static volatile uint64_t gOGSMasterSwitchEvents = 0;
+static volatile int32_t gOGSHostMonitorOn = 0;
+
 static void hook_ChatUpdate(void *self, void *method) {
+    __atomic_fetch_add(&gOGSChatHookCalls, 1ULL, __ATOMIC_RELAXED);
     if (orig_ChatUpdate) orig_ChatUpdate(self, method);
     OGSUnityThreadTick();
 }
 
 static void hook_CashUpdate(void *self, void *method) {
+    __atomic_fetch_add(&gOGSCashHookCalls, 1ULL, __ATOMIC_RELAXED);
     if (orig_CashUpdate) orig_CashUpdate(self, method);
     OGSUnityThreadTick();
 }
@@ -1407,13 +1417,13 @@ static void OGSInstallHooks(void) {
         UIColor *wpnGreen   = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
 
         [self.menuPanel addSubview:[self makeBtn:CGRectMake(10, 70, 95, 30) title:@"▶ السابق" bg:darkGray action:@selector(prevPlayer:)]];
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(110, 70, 95, 30) title:@"سحب الهوست 👑" bg:hostBlue action:@selector(claimHostNow:)]];
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(110, 70, 95, 30) title:@"فحص الهوست 👑" bg:hostBlue action:@selector(claimHostNow:)]];
         [self.menuPanel addSubview:[self makeBtn:CGRectMake(210, 70, 95, 30) title:@"التالي ◀" bg:darkGray action:@selector(nextPlayer:)]];
 
         [self.menuPanel addSubview:[self makeBtn:CGRectMake(161, 105, 144, 32) title:@"طرد المحدد فقط" bg:kickOrange action:@selector(kickSelected:)]];
         [self.menuPanel addSubview:[self makeBtn:CGRectMake(10, 105, 144, 32) title:@"طرد وحظر (Ban)" bg:banRed action:@selector(banSelected:)]];
 
-        self.hostLockButton = [self makeBtn:CGRectMake(155, 142, 150, 32) title:@"حماية الهوست: مفعّل 👑" bg:wpnGreen action:@selector(toggleAutoHost:)];
+        self.hostLockButton = [self makeBtn:CGRectMake(155, 142, 150, 32) title:@"رصد الهوست: متوقف" bg:darkGray action:@selector(toggleAutoHost:)];
         [self.menuPanel addSubview:self.hostLockButton];
 
         self.antiKickLockButton = [self makeBtn:CGRectMake(10, 142, 140, 32) title:@"قفل البقاء: تلقائي 🛡️" bg:darkGray action:@selector(toggleAntiKickHardLock:)];
@@ -1663,6 +1673,11 @@ static void OGSInstallHooks(void) {
         chatHook ? @"مركب" : (chatReadable ? @"غير مركب" : @"غير قابل للقراءة"),
         chatWritable ? @"نعم" : @"لا",
         queued ? @"نعم" : @"لا"];
+    details = [details stringByAppendingFormat:@"\nCash calls: %llu | Chat calls: %llu\nNetwork events: %llu | Host switches: %llu",
+        (unsigned long long)__atomic_load_n(&gOGSCashHookCalls, __ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&gOGSChatHookCalls, __ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&gOGSNetworkEvents, __ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&gOGSMasterSwitchEvents, __ATOMIC_RELAXED)];
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"تشخيص تحديث OGS"
                              message:details preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"نسخ" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
@@ -1706,25 +1721,28 @@ static void OGSInstallHooks(void) {
 }
 
 - (void)claimHostNow:(UIButton *)sender {
+    (void)sender;
     OGSRoomSnapshot snapshot = OGSCurrentSnapshot();
-    if (!snapshot.inRoom) {
-        self.statusLabel.text = @"ادخل داخل روم أولاً لسحب الهوست!";
-        return;
-    }
-    __atomic_store_n(&gOGS.forceHostReq, 1, __ATOMIC_RELEASE);
-    self.statusLabel.text = @"تم إدراج طلب السحب؛ انتظر تأكيد انتقال الهوست من Photon";
+    __atomic_store_n(&gOGS.forceHostReq, 0, __ATOMIC_RELEASE);
+    NSString *msg = !snapshot.inRoom ? @"ادخل روم أولاً" :
+        snapshot.isMaster ? @"اللعبة تؤكد أنك الهوست الحالي 👑" :
+        @"الهوست الحالي لاعب آخر. لا توجد صلاحية مؤكدة لتغييره من جهازك.";
+    self.statusLabel.text = msg;
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"الهوست الفعلي"
+        message:msg preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"إغلاق" style:UIAlertActionStyleDefault handler:nil]];
+    UIViewController *root = [self gameMainWindow].rootViewController;
+    if (root && !root.presentedViewController) [root presentViewController:alert animated:YES completion:nil];
 }
 
-- (void)toggleAutoHost:(UIButton *)s {
-    gOGS.autoHostOn = !gOGS.autoHostOn;
-    if (gOGS.autoHostOn) {
-        __atomic_store_n(&gOGS.forceHostReq, 1, __ATOMIC_RELEASE);
-        [s setTitle:@"حماية الهوست: مفعّل 👑" forState:UIControlStateNormal];
-        s.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
-    } else {
-        [s setTitle:@"حماية الهوست: متوقف" forState:UIControlStateNormal];
-        s.backgroundColor = [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
-    }
+- (void)toggleAutoHost:(UIButton *)sender {
+    int32_t next = !__atomic_load_n(&gOGSHostMonitorOn, __ATOMIC_ACQUIRE);
+    __atomic_store_n(&gOGSHostMonitorOn, next, __ATOMIC_RELEASE);
+    __atomic_store_n(&gOGS.autoHostOn, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&gOGS.forceHostReq, 0, __ATOMIC_RELEASE);
+    [sender setTitle:(next ? @"رصد الهوست: مفعّل" : @"رصد الهوست: متوقف") forState:UIControlStateNormal];
+    sender.backgroundColor = next ? [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0] :
+        [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
     [self refreshUI];
 }
 
