@@ -450,6 +450,9 @@ static uint32_t OGSReadPlayerArray(uintptr_t listRVA, void *output[OGS_MAX_PEERS
 // ============================================================
 // MARK: - Aimbot Engine Implementation (Using your RVAs)
 // ============================================================
+// Declared here because the implementation appears later in this file.
+static int32_t OGSGetLocalPlayerID(void **outPlayerObj);
+
 static void OGSExecuteAimbot(void) {
     if (!__atomic_load_n(&gOGS.aimbotOn, __ATOMIC_ACQUIRE)) return;
     if (!__atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE)) return;
