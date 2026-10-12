@@ -8,6 +8,8 @@
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
+#include <mach/vm_region.h>
+#include <dobby.h>
 
 #define OGS_MAX_PEERS       64
 #define OGS_MAX_NAME_BYTES  128
@@ -1058,15 +1060,57 @@ static void hook_CashUpdate(void *self, void *method) {
     OGSUnityThreadTick();
 }
 
+// Damage hooks must be installed as *inline code hooks*, not by treating
+// executable machine instructions as a writable function-pointer table.
+// Installation is deferred until the corresponding button is pressed, after
+// the game image has loaded. Both buttons remain fully interactive.
+static bool gOGSDamageHookInstalled[2] = {false, false};
+
+static bool OGSIsExecutableGameAddress(uintptr_t addr) {
+    if (addr < 0x100000000ULL || (addr & 0x3u) != 0) return false;
+    vm_address_t regionAddress = (vm_address_t)addr;
+    vm_size_t regionSize = 0;
+    vm_region_basic_info_data_64_t info = {};
+    mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t objectName = MACH_PORT_NULL;
+    kern_return_t kr = vm_region_64(mach_task_self(), &regionAddress, &regionSize,
+                                    VM_REGION_BASIC_INFO_64,
+                                    (vm_region_info_t)&info, &count, &objectName);
+    if (objectName != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), objectName);
+    if (kr != KERN_SUCCESS || regionAddress > (vm_address_t)addr) return false;
+    if ((uintptr_t)regionSize < sizeof(uint32_t) ||
+        addr - (uintptr_t)regionAddress > (uintptr_t)regionSize - sizeof(uint32_t)) return false;
+    return (info.protection & VM_PROT_READ) && (info.protection & VM_PROT_EXECUTE);
+}
+
+static bool OGSInstallDamageHookOnDemand(bool godMode) {
+    int index = godMode ? 1 : 0;
+    if (gOGSDamageHookInstalled[index]) return true;
+    uintptr_t target = OGSResolveRVA(godMode ? gOffsets.rvaDamageRemote : gOffsets.rvaApplyDamage);
+    if (!target || !OGSIsExecutableGameAddress(target)) {
+        NSLog(@"[OGS] Damage hook skipped: target missing or non-executable (%d)", index);
+        return false;
+    }
+    void *replacement = godMode ? (void *)&hook_DamageRemote : (void *)&hook_ApplyDamage;
+    void *original = NULL;
+    int result = DobbyHook((void *)target, replacement, &original);
+    if (result != 0 || !original || original == (void *)target) {
+        NSLog(@"[OGS] Damage hook failed: index=%d code=%d original=%p", index, result, original);
+        return false;
+    }
+    if (godMode) orig_DamageRemote = (DamageFn)original;
+    else orig_ApplyDamage = (DamageFn)original;
+    gOGSDamageHookInstalled[index] = true;
+    NSLog(@"[OGS] Damage hook installed: index=%d", index);
+    return true;
+}
+
 static void OGSInstallHooks(void) {
     uintptr_t base = OGSFindGameImage();
     if (!base) return;
 
-    // Startup-crash protection: these RVAs point to function entry code, not
-    // writable function-pointer slots. Treating their instructions as pointers
-    // and writing a replacement address can fault immediately on iOS.
-    // Keep these hooks disabled until a proper, validated hooking mechanism
-    // and the exact game build's ABI are available.
+    // Damage hooks are attached on demand with DobbyHook (code trampoline),
+    // never via unsafe direct pointer writes during initial loading.
 
     if (gOffsets.tblCashUpdate)        { void **sl = (void **)(base + gOffsets.tblCashUpdate);        if (*sl != (void *)&hook_CashUpdate)                 { orig_CashUpdate      = (Update0Fn)*sl;        *sl = (void *)&hook_CashUpdate; } }
     if (gOffsets.tblChatUpdate)        { void **sl = (void **)(base + gOffsets.tblChatUpdate);        if (*sl != (void *)&hook_ChatUpdate)                 { orig_ChatUpdate      = (Update0Fn)*sl;        *sl = (void *)&hook_ChatUpdate; } }
@@ -1260,14 +1304,10 @@ static void OGSInstallHooks(void) {
         [self.menuPanel addSubview:self.antiKickLockButton];
 
         // الأزرار الجديدة
-        self.godModeButton = [self makeBtn:CGRectMake(155, 179, 150, 30) title:@"درع الحماية: غير متاح 🛡️" bg:darkGray action:@selector(toggleGodMode:)];
-        self.godModeButton.enabled = NO;
-        self.godModeButton.alpha = 0.55;
+        self.godModeButton = [self makeBtn:CGRectMake(155, 179, 150, 30) title:@"درع الحماية: متوقف 🛡️" bg:darkGray action:@selector(toggleGodMode:)];
         [self.menuPanel addSubview:self.godModeButton];
 
-        self.magicBulletButton = [self makeBtn:CGRectMake(10, 179, 140, 30) title:@"طلقة سحرية: غير متاحة 🔫" bg:darkGray action:@selector(toggleMagicBullet:)];
-        self.magicBulletButton.enabled = NO;
-        self.magicBulletButton.alpha = 0.55;
+        self.magicBulletButton = [self makeBtn:CGRectMake(10, 179, 140, 30) title:@"طلقة سحرية: متوقف 🔫" bg:darkGray action:@selector(toggleMagicBullet:)];
         [self.menuPanel addSubview:self.magicBulletButton];
 
         self.muteChatButton = [self makeBtn:CGRectMake(105, 214, 95, 30) title:@"الشات: مفتوح" bg:darkGray action:@selector(cycleChatMode:)];
@@ -1491,6 +1531,10 @@ static void OGSInstallHooks(void) {
 - (void)toggleGodMode:(UIButton *)s {
     int32_t current = __atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE);
     int32_t next = current ? 0 : 1;
+    if (next && !OGSInstallDamageHookOnDemand(true)) {
+        self.statusLabel.text = @"تعذر ربط درع الحماية بهذه النسخة؛ جرّب بعد تحميل اللعبة";
+        return;
+    }
     __atomic_store_n(&gOGS.godModeOn, next, __ATOMIC_RELEASE);
     if (next) {
         [s setTitle:@"درع الحماية: مفعّل 🛡️" forState:UIControlStateNormal];
@@ -1505,6 +1549,10 @@ static void OGSInstallHooks(void) {
 - (void)toggleMagicBullet:(UIButton *)s {
     int32_t current = __atomic_load_n(&gOGS.magicBulletOn, __ATOMIC_ACQUIRE);
     int32_t next = current ? 0 : 1;
+    if (next && !OGSInstallDamageHookOnDemand(false)) {
+        self.statusLabel.text = @"تعذر ربط الطلقة السحرية بهذه النسخة؛ جرّب بعد تحميل اللعبة";
+        return;
+    }
     __atomic_store_n(&gOGS.magicBulletOn, next, __ATOMIC_RELEASE);
     if (next) {
         [s setTitle:@"طلقة سحرية: مفعّل 🔫" forState:UIControlStateNormal];
