@@ -1262,6 +1262,11 @@ static void OGSInstallHooks(void) {
 static int32_t sOGSTransferTargetID = 0;
 static double sOGSTransferRequestTime = 0.0;
 
+// A queued kick is not proof that the remote player was disconnected.
+// These variables only track the UI confirmation from room snapshots.
+static int32_t sOGSKickPendingTargetID = 0;
+static double sOGSKickRequestTime = 0.0;
+
 @implementation OGSModMenu
 + (instancetype)sharedInstance {
     static OGSModMenu *inst = nil;
@@ -1639,10 +1644,10 @@ static double sOGSTransferRequestTime = 0.0;
         uint32_t unknown = __atomic_load_n(&gGodUnverifiedPasses, __ATOMIC_RELAXED);
         self.statusLabel.text = [NSString stringWithFormat:@"الدرع: ورود %u | منع %u | مجهول %u", calls, blocks, unknown];
     } else if (retries > 0) {
-        self.statusLabel.text = @"جاري إرسال حزمة الطرد للسيرفر...";
+        self.statusLabel.text = @"طلب طرد قيد المعالجة؛ لم يتم تأكيد خروج اللاعب";
     } else if (hjBuf[0] != '\0') {
         NSString *hj = [NSString stringWithUTF8String:hjBuf];
-        self.statusLabel.text = [NSString stringWithFormat:@"طُرد السارق: %@ | صد طرد: %u 🛡️", hj ?: @"", blocked];
+        self.statusLabel.text = [NSString stringWithFormat:@"آخر لاعب مرصود: %@ | صد طرد: %u 🛡️", hj ?: @"", blocked];
     } else {
         self.statusLabel.text = [NSString stringWithFormat:@"%@ | بالروم: %u | صد طرد: %u 🛡️",
                                  snapshot.inRoom ? (snapshot.isMaster ? @"الهوست الفعلي: أنت 👑" : @"متصل (بانتظار الهوست)") : @"غير متصل",
@@ -1669,6 +1674,28 @@ static double sOGSTransferRequestTime = 0.0;
             sOGSTransferTargetID = 0;
         } else {
             self.statusLabel.text = @"جار انتظار تأكيد انتقال الهوست من اللعبة...";
+        }
+    }
+    // Room membership, not sending a request, is the only observation
+    // available here. Departure could also be voluntary.
+    if (sOGSKickPendingTargetID > 0) {
+        int32_t targetID = sOGSKickPendingTargetID;
+        BOOL stillPresent = NO;
+        for (uint32_t i = 0; i < snapshot.count; i++) {
+            if (snapshot.peers[i].actorID == targetID) { stillPresent = YES; break; }
+        }
+        double age = CFAbsoluteTimeGetCurrent() - sOGSKickRequestTime;
+        if (!snapshot.inRoom) {
+            self.statusLabel.text = @"خرجت من الروم؛ ألغي التحقق من الطرد";
+            sOGSKickPendingTargetID = 0;
+        } else if (!stillPresent && age >= 0.3) {
+            self.statusLabel.text = @"اللاعب لم يعد بالروم؛ سبب المغادرة غير مؤكد";
+            sOGSKickPendingTargetID = 0;
+        } else if (age >= 6.0) {
+            self.statusLabel.text = @"لم يتم تأكيد خروج اللاعب؛ تحقق من صلاحية الهوست";
+            sOGSKickPendingTargetID = 0;
+        } else {
+            self.statusLabel.text = @"طلب الطرد قيد الانتظار؛ نتحقق من حالة اللاعب...";
         }
     }
     [self.unbanButton setTitle:[NSString stringWithFormat:@"فك الحظر (%lu)", (unsigned long)[self bannedCountSafe]] forState:UIControlStateNormal];
@@ -2006,35 +2033,84 @@ static double sOGSTransferRequestTime = 0.0;
     gOGS.kickRetries = 22;
     os_unfair_lock_unlock(&gStateLock);
 
-    __atomic_store_n(&gOGS.forceHostReq, 1, __ATOMIC_RELEASE);
+    // Do not queue a separate master-claim attempt as a side effect of kicking.
+    // The active Unity tick will process this request for an actual host.
+    sOGSKickPendingTargetID = peer.actorID;
+    sOGSKickRequestTime = CFAbsoluteTimeGetCurrent();
 }
 
 - (void)kickSelected:(UIButton *)s {
+    (void)s;
     OGSRoomSnapshot snapshot = OGSCurrentSnapshot();
-    if (!snapshot.count) return;
-    uint32_t selected = __atomic_load_n(&gOGS.selectedPeer, __ATOMIC_ACQUIRE);
-    if (selected >= snapshot.count) selected = 0;
+    if (!snapshot.inRoom || !snapshot.count) {
+        self.statusLabel.text = @"ادخل الروم وحدد لاعبًا أولًا";
+        return;
+    }
+    if (!snapshot.isMaster) {
+        self.statusLabel.text = @"لم يتم الطرد: أنت لست الهوست الفعلي";
+        return;
+    }
 
+    double lastTick = 0.0;
+    os_unfair_lock_lock(&gStateLock);
+    lastTick = gOGS.lastUnityFrameTick;
+    os_unfair_lock_unlock(&gStateLock);
+    if (lastTick <= 0.0 || CFAbsoluteTimeGetCurrent() - lastTick > 0.5) {
+        self.statusLabel.text = @"لم يتم الطرد: تحديث محرك اللعبة غير نشط";
+        return;
+    }
+
+    uint32_t selected = __atomic_load_n(&gOGS.selectedPeer, __ATOMIC_ACQUIRE);
+    if (selected >= snapshot.count) {
+        self.statusLabel.text = @"حدد لاعبًا موجودًا في الروم";
+        return;
+    }
     OGSPeerSnapshot peer = snapshot.peers[selected];
+    if (peer.actorID <= 0 || peer.isHost) {
+        self.statusLabel.text = @"لا يمكن طرد الهوست أو لاعب غير صالح";
+        return;
+    }
     NSString *pName = [NSString stringWithUTF8String:peer.name];
     [self triggerImmediateKick:peer];
-    self.statusLabel.text = [NSString stringWithFormat:@"تم طرد: %@", pName ?: @"اللاعب"];
+    self.statusLabel.text = [NSString stringWithFormat:@"سُجل طلب طرد %@؛ ننتظر التحقق", pName ?: @"اللاعب"];
 }
 
 - (void)banSelected:(UIButton *)s {
+    (void)s;
     OGSRoomSnapshot snapshot = OGSCurrentSnapshot();
-    if (!snapshot.count) return;
+    if (!snapshot.inRoom || !snapshot.count) {
+        self.statusLabel.text = @"لا يوجد لاعب لحظره";
+        return;
+    }
     uint32_t selected = __atomic_load_n(&gOGS.selectedPeer, __ATOMIC_ACQUIRE);
-    if (selected >= snapshot.count) selected = 0;
-
+    if (selected >= snapshot.count) {
+        self.statusLabel.text = @"حدد لاعبًا موجودًا في الروم";
+        return;
+    }
     OGSPeerSnapshot peer = snapshot.peers[selected];
+    if (peer.actorID <= 0 || peer.isHost) {
+        self.statusLabel.text = @"لا يمكن حظر الهوست أو لاعب غير صالح";
+        return;
+    }
+
     NSString *pName = [NSString stringWithUTF8String:peer.name];
     NSString *normName = OGSNormalizeKey(pName);
-
     [self recordHijackerName:normName actorID:peer.actorID];
+
+    if (!snapshot.isMaster) {
+        self.statusLabel.text = @"حظر محلي فقط؛ أنت لست الهوست الفعلي";
+        return;
+    }
+    double lastTick = 0.0;
+    os_unfair_lock_lock(&gStateLock);
+    lastTick = gOGS.lastUnityFrameTick;
+    os_unfair_lock_unlock(&gStateLock);
+    if (lastTick <= 0.0 || CFAbsoluteTimeGetCurrent() - lastTick > 0.5) {
+        self.statusLabel.text = @"حظر محلي فقط؛ تحديث اللعبة غير نشط";
+        return;
+    }
     [self triggerImmediateKick:peer];
-    [self refreshUI];
-    self.statusLabel.text = [NSString stringWithFormat:@"تم طرد وحظر: %@", pName ?: @"اللاعب"];
+    self.statusLabel.text = [NSString stringWithFormat:@"حُظر %@ محليًا؛ طلب الطرد قيد التحقق", pName ?: @"اللاعب"];
 }
 
 - (void)toggleRoomLock:(UIButton *)s {
