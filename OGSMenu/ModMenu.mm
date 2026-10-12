@@ -919,6 +919,41 @@ static volatile int32_t gMagicLastOriginalDamage = 0;
 static volatile uintptr_t gMagicLastArrayCount = 0;
 static volatile uint32_t gGodCallbacks = 0;
 static volatile uint32_t gGodLocalBypasses = 0;
+static volatile uint32_t gGodOtherPlayerPasses = 0;
+static volatile uint32_t gGodUnverifiedPasses = 0;
+
+// Verified in the original fps 3.4.0 ARM64 executable:
+// PlayerNetwork.GetPhotonView RVA 0x13A9964 (self -> PhotonView),
+// PhotonView.ownerId at +0x20,
+// PhotonNetwork.get_player RVA 0x13CABF0 (PhotonPlayer),
+// PhotonPlayer.ID at +0x10.
+// The old comparison between PlayerNetwork* and PhotonPlayer* can never
+// identify the same object reliably. Check owner actor IDs instead.
+static bool OGSIsDamageToLocalPlayer(void *playerNetwork, bool *verified) {
+    if (verified) *verified = false;
+    if (!playerNetwork || (uintptr_t)playerNetwork < 0x100000000ULL) return false;
+    void *klass = NULL;
+    if (!OGSReadPointer((uintptr_t)playerNetwork, &klass)) return false;
+
+    uintptr_t localGetter = OGSResolveRVA(gOffsets.rvaGetLocalPlayer);
+    uintptr_t viewGetter = OGSResolveRVA(0x13A9964);
+    if (!localGetter || !viewGetter) return false;
+
+    void *localPhotonPlayer = ((Object0Fn)localGetter)(NULL);
+    if (!localPhotonPlayer) return false;
+    int32_t localActorID = 0;
+    if (!OGSReadMemory((uintptr_t)localPhotonPlayer + 0x10, &localActorID, sizeof(localActorID)) ||
+        localActorID <= 0) return false;
+
+    // Use the same cached/getter PhotonView that DamageRemote itself uses.
+    void *photonView = ((void *(*)(void *, const void *))viewGetter)(playerNetwork, NULL);
+    if (!photonView) return false;
+    int32_t ownerActorID = 0;
+    if (!OGSReadMemory((uintptr_t)photonView + 0x20, &ownerActorID, sizeof(ownerActorID)) ||
+        ownerActorID <= 0) return false;
+    if (verified) *verified = true;
+    return localActorID == ownerActorID;
+}
 
 // RVA 0x137CF70 constructs an Int32[3] with damage at +0x20.
 // DamageRemote calls Abs(int32) on negative incoming damage values.
@@ -947,11 +982,16 @@ static void OGSBridgeOutgoingDamage(void *self, void *values, const void *method
 static void OGSBridgeIncomingDamage(void *self, void *values, int32_t killerID, const void *method) {
     __atomic_fetch_add(&gGodCallbacks, 1u, __ATOMIC_RELAXED);
     if (self && __atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE)) {
-        void *local = OGSFindLocalPlayer();
-        if (local && local == self) {
+        bool verified = false;
+        bool isLocalOwner = OGSIsDamageToLocalPlayer(self, &verified);
+        if (verified && isLocalOwner) {
             __atomic_fetch_add(&gGodLocalBypasses, 1u, __ATOMIC_RELAXED);
+            // Do not run local DamageRemote when protection is armed.
+            // Other players and unknown owners continue through normal code.
             return;
         }
+        if (verified) __atomic_fetch_add(&gGodOtherPlayerPasses, 1u, __ATOMIC_RELAXED);
+        else __atomic_fetch_add(&gGodUnverifiedPasses, 1u, __ATOMIC_RELAXED);
     }
     if (orig_DamageRemote) orig_DamageRemote(self, values, killerID, method);
 }
@@ -1570,7 +1610,8 @@ static void OGSInstallHooks(void) {
     } else if (__atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE)) {
         uint32_t calls = __atomic_load_n(&gGodCallbacks, __ATOMIC_RELAXED);
         uint32_t blocks = __atomic_load_n(&gGodLocalBypasses, __ATOMIC_RELAXED);
-        self.statusLabel.text = [NSString stringWithFormat:@"الدرع: ورود %u | حماية %u", calls, blocks];
+        uint32_t unknown = __atomic_load_n(&gGodUnverifiedPasses, __ATOMIC_RELAXED);
+        self.statusLabel.text = [NSString stringWithFormat:@"الدرع: ورود %u | منع %u | مجهول %u", calls, blocks, unknown];
     } else if (retries > 0) {
         self.statusLabel.text = @"جاري إرسال حزمة الطرد للسيرفر...";
     } else if (hjBuf[0] != '\0') {
@@ -1641,7 +1682,8 @@ static void OGSInstallHooks(void) {
 - (void)toggleGodMode:(UIButton *)s {
     int32_t current = __atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE);
     int32_t next = current ? 0 : 1;
-    if (next && (!__atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE) || !OGSInstallDamageHookOnDemand(true))) {
+    // Allow arming the shield from the lobby, before entering a dangerous room.
+    if (next && !OGSInstallDamageHookOnDemand(true)) {
         self.statusLabel.text = @"نسخة IPA الحالية لا تحتوي جسر الضرر المجهز قبل التوقيع";
         UIAlertController *warning = [UIAlertController alertControllerWithTitle:@"حماية من الكراش"
             message:@"الميزات تتطلب تجهيز ملف fps 3.4.0 قبل توقيع التطبيق وإعادة حقن OGSMenu. النسخة الأصلية لا تحتوي جسر الضرر."
@@ -1655,9 +1697,11 @@ static void OGSInstallHooks(void) {
     if (next) {
         __atomic_store_n(&gGodCallbacks, 0u, __ATOMIC_RELAXED);
         __atomic_store_n(&gGodLocalBypasses, 0u, __ATOMIC_RELAXED);
-        [s setTitle:@"درع الحماية: قيد الاختبار 🛡️" forState:UIControlStateNormal];
+        __atomic_store_n(&gGodOtherPlayerPasses, 0u, __ATOMIC_RELAXED);
+        __atomic_store_n(&gGodUnverifiedPasses, 0u, __ATOMIC_RELAXED);
+        [s setTitle:@"درع الحماية: مسلّح 🛡️" forState:UIControlStateNormal];
         s.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
-        self.statusLabel.text = @"اختبر إصابة واردة: ورود / حماية";
+        self.statusLabel.text = @"الدرع جاهز للاختبار؛ تحقق من عدّاد المنع عند وصول ضرر";
     } else {
         [s setTitle:@"درع الحماية: متوقف 🛡️" forState:UIControlStateNormal];
         s.backgroundColor = [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
