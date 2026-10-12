@@ -244,6 +244,8 @@ static OGSRuntimeState gOGS = {
 // MARK: - Safe Memory Layer & Image Resolver
 // ============================================================
 static volatile uintptr_t gImageBase = 0;
+// Ensure every direct engine call targets executable mapped game code.
+static bool OGSIsExecutableGameAddress(uintptr_t addr);
 
 static uintptr_t OGSFindGameImage(void) {
     uintptr_t cached = __atomic_load_n(&gImageBase, __ATOMIC_ACQUIRE);
@@ -552,7 +554,7 @@ static void *OGSGetNetworkingPeerSafe(void) {
 
 static bool OGSClaimMasterReal(bool bypassCooldown) {
     uintptr_t inRoomAddr = OGSResolveRVA(gOffsets.rvaInRoom);
-    if (!inRoomAddr || !((Bool0Fn)inRoomAddr)(NULL)) return false;
+    if (!OGSIsExecutableGameAddress(inRoomAddr) || !((Bool0Fn)inRoomAddr)(NULL)) return false;
 
     double now = CFAbsoluteTimeGetCurrent();
     if (!bypassCooldown && (now - gOGS.lastMasterClaimTime) < 0.35) return false;
@@ -655,10 +657,11 @@ static bool OGSKickPeerReal(void *peerObj, bool bypassCooldown) {
 // ============================================================
 // MARK: - Speed Control
 // ============================================================
-static void OGSApplyTimescaleNow(float speed) {
+static bool OGSApplyTimescaleNow(float speed) {
     uintptr_t address = OGSResolveRVA(gOffsets.rvaSetTimescale);
-    if (!address) return;
+    if (!OGSIsExecutableGameAddress(address)) return false;
     ((SetTime1Fn)address)(speed, NULL);
+    return true;
 }
 
 static void OGSRequestSpeed(float speed) {
@@ -672,7 +675,9 @@ static void OGSProcessSpeed(void) {
     bool dirty = __atomic_exchange_n(&gOGS.speedDirty, false, __ATOMIC_ACQ_REL);
     float speed = gOGS.gameSpeed;
     if (dirty || fabsf(speed - 1.0f) > 0.01f) {
-        OGSApplyTimescaleNow(speed);
+        // Retry on a future game update if the game image is not yet ready.
+        if (!OGSApplyTimescaleNow(speed))
+            __atomic_store_n(&gOGS.speedDirty, true, __ATOMIC_RELEASE);
     }
 }
 
@@ -1421,13 +1426,13 @@ static double sOGSTransferRequestTime = 0.0;
         UIColor *wpnGreen   = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
 
         [self.menuPanel addSubview:[self makeBtn:CGRectMake(10, 70, 95, 30) title:@"▶ السابق" bg:darkGray action:@selector(prevPlayer:)]];
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(110, 70, 95, 30) title:@"فحص الهوست 👑" bg:hostBlue action:@selector(claimHostNow:)]];
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(110, 70, 95, 30) title:@"سحب الهوست 👑" bg:hostBlue action:@selector(claimHostNow:)]];
         [self.menuPanel addSubview:[self makeBtn:CGRectMake(210, 70, 95, 30) title:@"التالي ◀" bg:darkGray action:@selector(nextPlayer:)]];
 
         [self.menuPanel addSubview:[self makeBtn:CGRectMake(161, 105, 144, 32) title:@"طرد المحدد فقط" bg:kickOrange action:@selector(kickSelected:)]];
         [self.menuPanel addSubview:[self makeBtn:CGRectMake(10, 105, 144, 32) title:@"طرد وحظر (Ban)" bg:banRed action:@selector(banSelected:)]];
 
-        self.hostLockButton = [self makeBtn:CGRectMake(155, 142, 150, 32) title:@"رصد الهوست: متوقف" bg:darkGray action:@selector(toggleAutoHost:)];
+        self.hostLockButton = [self makeBtn:CGRectMake(155, 142, 150, 32) title:@"حماية الهوست: متوقف" bg:darkGray action:@selector(toggleAutoHost:)];
         [self.menuPanel addSubview:self.hostLockButton];
 
         self.antiKickLockButton = [self makeBtn:CGRectMake(10, 142, 140, 32) title:@"قفل البقاء: تلقائي 🛡️" bg:darkGray action:@selector(toggleAntiKickHardLock:)];
@@ -1755,16 +1760,44 @@ static double sOGSTransferRequestTime = 0.0;
 - (void)claimHostNow:(UIButton *)sender {
     (void)sender;
     OGSRoomSnapshot snapshot = OGSCurrentSnapshot();
+    if (!snapshot.inRoom) {
+        self.statusLabel.text = @"ادخل الروم أولاً لسحب الهوست";
+        return;
+    }
+    if (snapshot.isMaster) {
+        self.statusLabel.text = @"أنت الهوست بالفعل 👑";
+        return;
+    }
+
+    // Prefer the existing Unity update callback: it handles queued requests
+    // on the game thread instead of a repeating UIKit timer.
+    __atomic_store_n(&gOGS.forceHostReq, 1, __ATOMIC_RELEASE);
+    double lastGameTick = 0.0;
+    double roomEnterTime = 0.0;
+    os_unfair_lock_lock(&gStateLock);
+    lastGameTick = gOGS.lastUnityFrameTick;
+    roomEnterTime = gOGS.roomEnterTime;
+    os_unfair_lock_unlock(&gStateLock);
+    double now = CFAbsoluteTimeGetCurrent();
+    if (lastGameTick > 0.0 && now - lastGameTick < 0.5) {
+        self.statusLabel.text = @"تم طلب سحب الهوست؛ بانتظار تأكيد اللعبة";
+        return;
+    }
+
+    // Some builds never call Cash/Chat update hooks. Permit a *single*
+    // user-triggered attempt on the main game/UI thread, after room settle.
+    // Never run this on NSTimer, never repeat blindly, never claim success.
+    if (![NSThread isMainThread] || roomEnterTime <= 0.0 ||
+        now - roomEnterTime < 1.5) {
+        __atomic_store_n(&gOGS.forceHostReq, 0, __ATOMIC_RELEASE);
+        self.statusLabel.text = @"انتظر استقرار الروم ثم حاول سحب الهوست";
+        return;
+    }
+    bool submitted = OGSClaimMasterReal(true);
     __atomic_store_n(&gOGS.forceHostReq, 0, __ATOMIC_RELEASE);
-    NSString *msg = !snapshot.inRoom ? @"ادخل روم أولاً" :
-        snapshot.isMaster ? @"اللعبة تؤكد أنك الهوست الحالي 👑" :
-        @"الهوست الحالي لاعب آخر. لا توجد صلاحية مؤكدة لتغييره من جهازك.";
-    self.statusLabel.text = msg;
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"الهوست الفعلي"
-        message:msg preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"إغلاق" style:UIAlertActionStyleDefault handler:nil]];
-    UIViewController *root = [self gameMainWindow].rootViewController;
-    if (root && !root.presentedViewController) [root presentViewController:alert animated:YES completion:nil];
+    self.statusLabel.text = submitted ?
+        @"أُرسل طلب سحب الهوست؛ انتظر تأكيد اللعبة 👑" :
+        @"تعذّر إرسال طلب سحب الهوست؛ افحص إصدار اللعبة";
 }
 
 - (void)giveHostToSelected:(UIButton *)sender {
@@ -1865,11 +1898,11 @@ static double sOGSTransferRequestTime = 0.0;
 }
 
 - (void)toggleAutoHost:(UIButton *)sender {
-    int32_t next = !__atomic_load_n(&gOGSHostMonitorOn, __ATOMIC_ACQUIRE);
+    int32_t next = !__atomic_load_n(&gOGS.autoHostOn, __ATOMIC_ACQUIRE);
     __atomic_store_n(&gOGSHostMonitorOn, next, __ATOMIC_RELEASE);
-    __atomic_store_n(&gOGS.autoHostOn, 0, __ATOMIC_RELEASE);
-    __atomic_store_n(&gOGS.forceHostReq, 0, __ATOMIC_RELEASE);
-    [sender setTitle:(next ? @"رصد الهوست: مفعّل" : @"رصد الهوست: متوقف") forState:UIControlStateNormal];
+    __atomic_store_n(&gOGS.autoHostOn, next, __ATOMIC_RELEASE);
+    __atomic_store_n(&gOGS.forceHostReq, next ? 1 : 0, __ATOMIC_RELEASE);
+    [sender setTitle:(next ? @"حماية الهوست: مفعّل 👑" : @"حماية الهوست: متوقف") forState:UIControlStateNormal];
     sender.backgroundColor = next ? [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0] :
         [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
     [self refreshUI];
@@ -2050,8 +2083,14 @@ static double sOGSTransferRequestTime = 0.0;
 - (void)applySpeed:(float)value {
     OGSRequestSpeed(value);
     float actual = gOGS.gameSpeed;
+    // UIKit touch actions execute on iOS main (Unity main on this build).
+    // Apply immediately; the Unity tick also reapplies/retries the value.
+    bool applied = [NSThread isMainThread] && OGSApplyTimescaleNow(actual);
     [self.speedSetButton setTitle:[NSString stringWithFormat:@"السرعة: %.1fx (اضغط للكتابة)", actual]
                          forState:UIControlStateNormal];
+    self.statusLabel.text = applied ?
+        [NSString stringWithFormat:@"تم تطبيق سرعة %.1fx", actual] :
+        @"السرعة محفوظة؛ التطبيق ينتظر تهيئة محرك اللعبة";
 }
 
 - (void)speedDown:(UIButton *)sender {
