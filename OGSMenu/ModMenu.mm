@@ -257,8 +257,11 @@ static uintptr_t OGSFindGameImage(void) {
         const char *file = last ? last + 1 : name;
         if (strcmp(file, "fps") != 0) continue;
 
-        uintptr_t base = 0x100000000ULL + (uintptr_t)_dyld_get_image_vmaddr_slide(i);
+        const struct mach_header *header = _dyld_get_image_header(i);
+        if (!header) continue;
+        uintptr_t base = (uintptr_t)header;
         __atomic_store_n(&gImageBase, base, __ATOMIC_RELEASE);
+        NSLog(@"[OGS] Found fps image: %s header=%p", name, header);
         return base;
     }
     return 0;
@@ -897,23 +900,23 @@ static void OGSUnityThreadTick(void) {
 // MARK: - Damage, Network, Chat & Lifecycle Hooks
 // ============================================================
 
-// 1. هجوم (رصاصة سحرية / One Hit Kill): نضاعف الضرر المرسل من سلاحنا
-static void hook_ApplyDamage(void* self, float damage, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
-    if (__atomic_load_n(&gOGS.magicBulletOn, __ATOMIC_ACQUIRE)) {
-        damage = 9999.0f; // دمج مميت لأي طلقة
-    }
-    if (orig_ApplyDamage) {
-        orig_ApplyDamage(self, damage, a3, a4, a5, a6);
+// Instrumentation preserves all original arguments, register state, return value,
+// and control flow. The native function runs unmodified except for the ARM64 s0
+// float value when the verified target receives a plausible positive damage value.
+// This still requires the RVA to match the installed game version.
+static void OGSInstrumentOutgoingDamage(void *address, DobbyRegisterContext *ctx) {
+    if (!ctx || !__atomic_load_n(&gOGS.magicBulletOn, __ATOMIC_ACQUIRE)) return;
+    float value = ctx->floating.regs.q0.f.f1;
+    if (isfinite(value) && value > 0.0f && value < 1000.0f) {
+        ctx->floating.regs.q0.f.f1 = 9999.0f;
     }
 }
 
-// 2. دفاع (درع / God Mode): نلغي أي دمج مستقبل عبر الشبكة تماماً
-static void hook_DamageRemote(void* self, float damage, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
-    if (__atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE)) {
-        return; // صد الرصاصة السحرية وإلغاء الدمج بالكامل
-    }
-    if (orig_DamageRemote) {
-        orig_DamageRemote(self, damage, a3, a4, a5, a6);
+static void OGSInstrumentIncomingDamage(void *address, DobbyRegisterContext *ctx) {
+    if (!ctx || !__atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE)) return;
+    float value = ctx->floating.regs.q0.f.f1;
+    if (isfinite(value) && value > 0.0f && value < 1000.0f) {
+        ctx->floating.regs.q0.f.f1 = 0.0f;
     }
 }
 
@@ -1091,17 +1094,15 @@ static bool OGSInstallDamageHookOnDemand(bool godMode) {
         NSLog(@"[OGS] Damage hook skipped: target missing or non-executable (%d)", index);
         return false;
     }
-    void *replacement = godMode ? (void *)&hook_DamageRemote : (void *)&hook_ApplyDamage;
-    void *original = NULL;
-    int result = DobbyHook((void *)target, replacement, &original);
-    if (result != 0 || !original || original == (void *)target) {
-        NSLog(@"[OGS] Damage hook failed: index=%d code=%d original=%p", index, result, original);
+    dobby_instrument_callback_t callback = godMode ? OGSInstrumentIncomingDamage : OGSInstrumentOutgoingDamage;
+    NSLog(@"[OGS] Installing damage instrument: index=%d target=%p", index, (void *)target);
+    int result = DobbyInstrument((void *)target, callback);
+    if (result != 0) {
+        NSLog(@"[OGS] Damage instrument failed: index=%d code=%d", index, result);
         return false;
     }
-    if (godMode) orig_DamageRemote = (DamageFn)original;
-    else orig_ApplyDamage = (DamageFn)original;
     gOGSDamageHookInstalled[index] = true;
-    NSLog(@"[OGS] Damage hook installed: index=%d", index);
+    NSLog(@"[OGS] Damage instrument installed: index=%d", index);
     return true;
 }
 
@@ -1423,8 +1424,15 @@ static void OGSInstallHooks(void) {
     double lastUnity = gOGS.lastUnityFrameTick;
     os_unfair_lock_unlock(&gStateLock);
 
+    // Restore the room-state fallback from the last working snapshot refresh
+    // path. Without it, room data never updates when Cash/Chat update hooks
+    // don't fire. Do not invoke game code until fps and its in-room RVA exist.
     if ((now - lastUnity) > 0.35) {
-        OGSProcessSpeed();
+        OGSInstallHooks();
+        uintptr_t inRoomAddr = OGSResolveRVA(gOffsets.rvaInRoom);
+        if (inRoomAddr && OGSIsExecutableGameAddress(inRoomAddr)) {
+            OGSUpdateRoomSnapshot();
+        }
     }
 
     if (!self.menuPanel || self.menuPanel.hidden) return;
@@ -1461,7 +1469,9 @@ static void OGSInstallHooks(void) {
     memcpy(hjBuf, gOGS.lastHijackerName, sizeof(hjBuf));
     os_unfair_lock_unlock(&gStateLock);
 
-    if (retries > 0) {
+    if (!OGSFindGameImage()) {
+        self.statusLabel.text = @"تعذر العثور على صورة اللعبة fps؛ البيانات والهوست غير متاحين";
+    } else if (retries > 0) {
         self.statusLabel.text = @"جاري إرسال حزمة الطرد للسيرفر...";
     } else if (hjBuf[0] != '\0') {
         NSString *hj = [NSString stringWithUTF8String:hjBuf];
@@ -1531,8 +1541,8 @@ static void OGSInstallHooks(void) {
 - (void)toggleGodMode:(UIButton *)s {
     int32_t current = __atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE);
     int32_t next = current ? 0 : 1;
-    if (next && !OGSInstallDamageHookOnDemand(true)) {
-        self.statusLabel.text = @"تعذر ربط درع الحماية بهذه النسخة؛ جرّب بعد تحميل اللعبة";
+    if (next && (!__atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE) || !OGSInstallDamageHookOnDemand(true))) {
+        self.statusLabel.text = @"ادخل رومًا أولًا؛ وإذا كنت داخله فتحقق من توافق عنوان الضرر";
         return;
     }
     __atomic_store_n(&gOGS.godModeOn, next, __ATOMIC_RELEASE);
@@ -1549,8 +1559,8 @@ static void OGSInstallHooks(void) {
 - (void)toggleMagicBullet:(UIButton *)s {
     int32_t current = __atomic_load_n(&gOGS.magicBulletOn, __ATOMIC_ACQUIRE);
     int32_t next = current ? 0 : 1;
-    if (next && !OGSInstallDamageHookOnDemand(false)) {
-        self.statusLabel.text = @"تعذر ربط الطلقة السحرية بهذه النسخة؛ جرّب بعد تحميل اللعبة";
+    if (next && (!__atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE) || !OGSInstallDamageHookOnDemand(false))) {
+        self.statusLabel.text = @"ادخل رومًا أولًا؛ وإذا كنت داخله فتحقق من توافق عنوان الضرر";
         return;
     }
     __atomic_store_n(&gOGS.magicBulletOn, next, __ATOMIC_RELEASE);
