@@ -1253,6 +1253,10 @@ static void OGSInstallHooks(void) {
 // ============================================================
 // MARK: - ModMenu UI Implementation
 // ============================================================
+// UI-only transfer confirmation state; never treated as authoritative ownership.
+static int32_t sOGSTransferTargetID = 0;
+static double sOGSTransferRequestTime = 0.0;
+
 @implementation OGSModMenu
 + (instancetype)sharedInstance {
     static OGSModMenu *inst = nil;
@@ -1369,7 +1373,7 @@ static void OGSInstallHooks(void) {
         [self.floatingButton addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)]];
         [self.containerView addSubview:self.floatingButton];
 
-        self.menuPanel = [[UIView alloc] initWithFrame:CGRectMake(75, 18, 315, 285)];
+        self.menuPanel = [[UIView alloc] initWithFrame:CGRectMake(75, 18, 315, 325)];
         self.menuPanel.backgroundColor = [UIColor colorWithRed:0.09 green:0.09 blue:0.11 alpha:0.96];
         self.menuPanel.layer.cornerRadius = 14.0;
         self.menuPanel.layer.borderWidth = 2.0f;
@@ -1446,6 +1450,12 @@ static void OGSInstallHooks(void) {
         self.speedSetButton = [self makeBtn:CGRectMake(70, 249, 175, 30) title:@"السرعة: 1.0x (اضغط للكتابة)" bg:hostBlue action:@selector(promptCustomSpeed:)];
         [self.menuPanel addSubview:self.speedSetButton];
         [self.menuPanel addSubview:[self makeBtn:CGRectMake(250, 249, 55, 30) title:@"سرعة +" bg:darkGray action:@selector(speedUp:)]];
+
+        // Owner-authorized handover only: select a player, then confirm.
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(10, 285, 295, 30)
+                                          title:@"إعطاء الهوست للاعب المحدد 👑"
+                                             bg:hostBlue
+                                         action:@selector(giveHostToSelected:)]];
 
         [self.containerView addSubview:self.menuPanel];
         self.containerView.floatingButton = self.floatingButton;
@@ -1634,6 +1644,28 @@ static void OGSInstallHooks(void) {
                                  count,
                                  blocked];
     }
+    // Show a verified state transition, not a misleading "sent = success".
+    if (sOGSTransferTargetID > 0) {
+        bool recipientConfirmed = false;
+        for (uint32_t i = 0; i < snapshot.count; ++i) {
+            if (snapshot.peers[i].actorID == sOGSTransferTargetID && snapshot.peers[i].isHost) {
+                recipientConfirmed = true;
+                break;
+            }
+        }
+        if (snapshot.inRoom && !snapshot.isMaster && recipientConfirmed) {
+            self.statusLabel.text = @"✅ تم تأكيد انتقال الهوست للاعب المحدد";
+            sOGSTransferTargetID = 0;
+        } else if (!snapshot.inRoom) {
+            self.statusLabel.text = @"توقف التحقق: خرجت من الروم";
+            sOGSTransferTargetID = 0;
+        } else if (CFAbsoluteTimeGetCurrent() - sOGSTransferRequestTime >= 6.0) {
+            self.statusLabel.text = @"لم يصل تأكيد نقل الهوست؛ افحص حالة الروم";
+            sOGSTransferTargetID = 0;
+        } else {
+            self.statusLabel.text = @"جار انتظار تأكيد انتقال الهوست من اللعبة...";
+        }
+    }
     [self.unbanButton setTitle:[NSString stringWithFormat:@"فك الحظر (%lu)", (unsigned long)[self bannedCountSafe]] forState:UIControlStateNormal];
 }
 
@@ -1733,6 +1765,103 @@ static void OGSInstallHooks(void) {
     [alert addAction:[UIAlertAction actionWithTitle:@"إغلاق" style:UIAlertActionStyleDefault handler:nil]];
     UIViewController *root = [self gameMainWindow].rootViewController;
     if (root && !root.presentedViewController) [root presentViewController:alert animated:YES completion:nil];
+}
+
+- (void)giveHostToSelected:(UIButton *)sender {
+    (void)sender;
+    OGSRoomSnapshot snapshot = OGSCurrentSnapshot();
+    if (!snapshot.inRoom || !snapshot.isMaster || snapshot.count == 0) {
+        self.statusLabel.text = @"إعطاء الهوست متاح فقط عندما تؤكد اللعبة أنك الهوست";
+        return;
+    }
+    uint32_t selected = __atomic_load_n(&gOGS.selectedPeer, __ATOMIC_ACQUIRE);
+    if (selected >= snapshot.count) {
+        self.statusLabel.text = @"حدد لاعبًا موجودًا في الروم أولًا";
+        return;
+    }
+    OGSPeerSnapshot recipient = snapshot.peers[selected];
+    if (recipient.actorID <= 0 || recipient.isHost) {
+        self.statusLabel.text = @"لا يمكن نقل الهوست لهذا اللاعب";
+        return;
+    }
+    const int32_t recipientID = recipient.actorID;
+    NSString *recipientName = [NSString stringWithUTF8String:recipient.name];
+    if (!recipientName.length) recipientName = [NSString stringWithFormat:@"ID:%d", recipientID];
+    NSString *question = [NSString stringWithFormat:
+        @"هل تريد نقل الهوست إلى %@ (ID:%d)؟\n"
+         "سيتم إرسال طلب واحد فقط عبر واجهة اللعبة؛ ولن يتم تعديل معرف الهوست محليًا أو تجاوز صلاحيات الخادم.",
+        recipientName, recipientID];
+    UIAlertController *confirm = [UIAlertController alertControllerWithTitle:@"تأكيد إعطاء الهوست"
+        message:question preferredStyle:UIAlertControllerStyleAlert];
+    [confirm addAction:[UIAlertAction actionWithTitle:@"إلغاء" style:UIAlertActionStyleCancel handler:nil]];
+    [confirm addAction:[UIAlertAction actionWithTitle:@"نقل الهوست" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        (void)action;
+        // Re-check active room, actual authority, and target ID AFTER the confirmation.
+        OGSRoomSnapshot current = OGSCurrentSnapshot();
+        uintptr_t roomAddr = OGSResolveRVA(gOffsets.rvaInRoom);
+        uintptr_t masterAddr = OGSResolveRVA(gOffsets.rvaIsMaster);
+        uintptr_t actorIdAddr = OGSResolveRVA(gOffsets.rvaPlayerGetID);
+        if (!current.inRoom || !current.isMaster ||
+            !OGSIsExecutableGameAddress(roomAddr) ||
+            !OGSIsExecutableGameAddress(masterAddr) ||
+            !OGSIsExecutableGameAddress(actorIdAddr) ||
+            !((Bool0Fn)roomAddr)(NULL) ||
+            !((Bool0Fn)masterAddr)(NULL)) {
+            self.statusLabel.text = @"أُلغي النقل: لا توجد صلاحية هوست مؤكدة الآن";
+            return;
+        }
+        bool listed = false;
+        for (uint32_t i = 0; i < current.count; ++i) {
+            if (current.peers[i].actorID == recipientID && !current.peers[i].isHost) {
+                listed = true;
+                break;
+            }
+        }
+        if (!listed) {
+            self.statusLabel.text = @"أُلغي النقل: اللاعب المحدد لم يعد موجودًا";
+            return;
+        }
+        void *localPlayer = NULL;
+        int32_t localID = OGSGetLocalPlayerID(&localPlayer);
+        if (localID <= 0 || recipientID == localID || !localPlayer) {
+            self.statusLabel.text = @"أُلغي النقل: بيانات اللاعبين غير صالحة";
+            return;
+        }
+        void *peers[OGS_MAX_PEERS];
+        uint32_t count = OGSReadPlayerArray(gOffsets.rvaGetPeers, peers);
+        void *target = NULL;
+        PlayerGetIDFn readID = (PlayerGetIDFn)actorIdAddr;
+        for (uint32_t i = 0; i < count; ++i) {
+            void *peer = peers[i];
+            void *klass = NULL;
+            if (peer && (uintptr_t)peer >= 0x100000000ULL &&
+                OGSReadPointer((uintptr_t)peer, &klass) && klass &&
+                readID(peer, NULL) == recipientID) {
+                target = peer;
+                break;
+            }
+        }
+        uintptr_t slot = OGSResolveRVA(gOffsets.tblSetMaster);
+        void *setMaster = NULL;
+        if (!target || !slot || !OGSReadPointer(slot, &setMaster) ||
+            !OGSIsExecutableGameAddress((uintptr_t)setMaster) ||
+            !((Bool0Fn)masterAddr)(NULL)) {
+            self.statusLabel.text = @"تعذر إجراء النقل: اللاعب أو واجهة اللعبة غير متاح";
+            return;
+        }
+        bool submitted = ((PeerAction1Fn)setMaster)(target, NULL);
+        if (!submitted) {
+            self.statusLabel.text = @"رفضت اللعبة إرسال طلب النقل";
+            return;
+        }
+        sOGSTransferTargetID = recipientID;
+        sOGSTransferRequestTime = CFAbsoluteTimeGetCurrent();
+        self.statusLabel.text = @"أُرسل طلب نقل الهوست؛ ننتظر تأكيد اللعبة";
+    }]];
+    UIViewController *root = [self gameMainWindow].rootViewController;
+    if (root && !root.presentedViewController) {
+        [root presentViewController:confirm animated:YES completion:nil];
+    }
 }
 
 - (void)toggleAutoHost:(UIButton *)sender {
