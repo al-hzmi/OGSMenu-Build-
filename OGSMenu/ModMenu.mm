@@ -9,7 +9,6 @@
 #include <stdlib.h>
 #include <math.h>
 #include <mach/vm_region.h>
-#include <dobby.h>
 
 #define OGS_MAX_PEERS       64
 #define OGS_MAX_NAME_BYTES  128
