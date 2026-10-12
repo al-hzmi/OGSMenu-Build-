@@ -1371,6 +1371,8 @@ static void OGSInstallHooks(void) {
         self.titleLabel.textColor = [UIColor whiteColor];
         self.titleLabel.textAlignment = NSTextAlignmentCenter;
         self.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
+        self.titleLabel.userInteractionEnabled = YES;
+        [self.titleLabel addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(showHookDiagnostics:)]];
         [self.menuPanel addSubview:self.titleLabel];
 
         self.syncCloudButton = [self makeBtn:CGRectMake(273, 3, 32, 21)
@@ -1623,6 +1625,54 @@ static void OGSInstallHooks(void) {
                                  blocked];
     }
     [self.unbanButton setTitle:[NSString stringWithFormat:@"فك الحظر (%lu)", (unsigned long)[self bannedCountSafe]] forState:UIControlStateNormal];
+}
+
+- (void)showHookDiagnostics:(UITapGestureRecognizer *)gesture {
+    (void)gesture;
+    // Diagnose hook installation without executing any Photon or game methods.
+    uintptr_t cashSlot = OGSResolveRVA(gOffsets.tblCashUpdate);
+    uintptr_t chatSlot = OGSResolveRVA(gOffsets.tblChatUpdate);
+    void *cashFn = NULL, *chatFn = NULL;
+    BOOL cashReadable = cashSlot && OGSReadPointer(cashSlot, &cashFn);
+    BOOL chatReadable = chatSlot && OGSReadPointer(chatSlot, &chatFn);
+    BOOL cashHook = cashReadable && cashFn == (void *)&hook_CashUpdate;
+    BOOL chatHook = chatReadable && chatFn == (void *)&hook_ChatUpdate;
+    BOOL cashWritable = cashSlot && OGSIsWritableMappedSlot(cashSlot);
+    BOOL chatWritable = chatSlot && OGSIsWritableMappedSlot(chatSlot);
+    double lastTick = 0.0;
+    os_unfair_lock_lock(&gStateLock);
+    lastTick = gOGS.lastUnityFrameTick;
+    os_unfair_lock_unlock(&gStateLock);
+    double age = lastTick > 0.0 ? CFAbsoluteTimeGetCurrent() - lastTick : -1.0;
+    OGSRoomSnapshot snap = OGSCurrentSnapshot();
+    int32_t queued = __atomic_load_n(&gOGS.forceHostReq, __ATOMIC_ACQUIRE);
+    NSString *details = [NSString stringWithFormat:
+        @"غرفة: %@ | المالك حسب اللعبة: %@\n"
+         "تحديث اللعبة: %@\n"
+         "آخر تحديث منذ: %@\n"
+         "Cash hook: %@ | خانة قابلة للكتابة: %@\n"
+         "Chat hook: %@ | خانة قابلة للكتابة: %@\n"
+         "طلب في الانتظار: %@\n"
+         "تغير صلاحية المالك لا يثبت إلا من حالة Photon.",
+        snap.inRoom ? @"داخل" : @"خارج",
+        snap.isMaster ? @"أنت" : @"لاعب آخر",
+        age >= 0.0 && age <= 0.5 ? @"نشط" : @"متوقف",
+        age >= 0.0 ? [NSString stringWithFormat:@"%.1f ثانية", age] : @"لا يوجد",
+        cashHook ? @"مركب" : (cashReadable ? @"غير مركب" : @"غير قابل للقراءة"),
+        cashWritable ? @"نعم" : @"لا",
+        chatHook ? @"مركب" : (chatReadable ? @"غير مركب" : @"غير قابل للقراءة"),
+        chatWritable ? @"نعم" : @"لا",
+        queued ? @"نعم" : @"لا"];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"تشخيص تحديث OGS"
+                             message:details preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"نسخ" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        (void)action;
+        [UIPasteboard generalPasteboard].string = details;
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"إغلاق" style:UIAlertActionStyleCancel handler:nil]];
+    UIViewController *root = [self gameMainWindow].rootViewController;
+    if (root && !root.presentedViewController)
+        [root presentViewController:alert animated:YES completion:nil];
 }
 
 - (void)toggleMenu {
