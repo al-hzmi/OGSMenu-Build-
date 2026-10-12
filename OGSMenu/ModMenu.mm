@@ -996,6 +996,12 @@ static void OGSBridgeIncomingDamage(void *self, void *values, int32_t killerID, 
     if (orig_DamageRemote) orig_DamageRemote(self, values, killerID, method);
 }
 
+static volatile uint64_t gOGSCashHookCalls = 0;
+static volatile uint64_t gOGSChatHookCalls = 0;
+static volatile uint64_t gOGSNetworkEvents = 0;
+static volatile uint64_t gOGSMasterSwitchEvents = 0;
+static volatile int32_t gOGSHostMonitorOn = 0;
+
 static void hook_OnEvent(void *self, void *eventData, void *method) {
     __atomic_fetch_add(&gOGSNetworkEvents, 1ULL, __ATOMIC_RELAXED);
     os_unfair_lock_lock(&gStateLock);
@@ -1116,12 +1122,6 @@ static void hook_SendChatRemote(void *self, void *senderStr, void *msgStr, int32
     }
     if (orig_SendChatRemote) orig_SendChatRemote(self, senderStr, msgStr, senderTeam, isTeamChat, method);
 }
-
-static volatile uint64_t gOGSCashHookCalls = 0;
-static volatile uint64_t gOGSChatHookCalls = 0;
-static volatile uint64_t gOGSNetworkEvents = 0;
-static volatile uint64_t gOGSMasterSwitchEvents = 0;
-static volatile int32_t gOGSHostMonitorOn = 0;
 
 static void hook_ChatUpdate(void *self, void *method) {
     __atomic_fetch_add(&gOGSChatHookCalls, 1ULL, __ATOMIC_RELAXED);
