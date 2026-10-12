@@ -816,9 +816,7 @@ static void OGSUpdateRoomSnapshot(void) {
 
             OGSClaimMasterReal(forceReq > 0);
 
-            if (gOGS.autoHostOn && heldStably && masterPlayer && masterPlayer != myPlayer) {
-                OGSKickPeerReal(masterPlayer, true);
-            }
+            // Wait for confirmed ownership rather than acting mid-transition.
         }
     }
 
@@ -849,7 +847,7 @@ static void OGSUpdateRoomSnapshot(void) {
         NSString *pName = [NSString stringWithUTF8String:peerSnap.name];
         NSString *normName = OGSNormalizeKey(pName);
 
-        if (roomSettled && curRetries > 0) {
+        if (roomSettled && master && curRetries > 0) {
             bool matchID = (curKickID > 0 && peerSnap.actorID == curKickID);
             bool matchName = (curKickName[0] != '\0' && normName.UTF8String && strcmp(normName.UTF8String, curKickName) == 0);
             if (matchID || matchName) {
@@ -858,7 +856,7 @@ static void OGSUpdateRoomSnapshot(void) {
             }
         }
 
-        if (roomSettled && [menu shouldAutoKickPeerWithName:normName actorID:peerSnap.actorID]) {
+        if (roomSettled && master && [menu shouldAutoKickPeerWithName:normName actorID:peerSnap.actorID]) {
             OGSKickPeerReal(players[i], false);
         }
     }
@@ -1089,23 +1087,9 @@ static void hook_OnMasterSwitched4(void *self, void *p, void *m) { OGSHandleMast
 static void hook_OnMasterSwitched5(void *self, void *p, void *m) { OGSHandleMasterSwitchIntercept(p); if (orig_OnMasterSwitch5) orig_OnMasterSwitch5(self, p, m); }
 
 static void hook_OnPhotonPlayerDisconnected(void *self, void *player, void *method) {
-    uintptr_t locManager = 0;
-    void *origLeaveStr = NULL;
-    void **leaveStrSlot = NULL;
-
-    if (self && gOGS.kickMsgArmed > 0 && OGSReadMemory((uintptr_t)self + 0x2F8, &locManager, sizeof(uintptr_t)) && locManager > 0x100000000ULL) {
-        if (OGSReadPointer(locManager + 0x238, &origLeaveStr) && origLeaveStr != NULL) {
-            void *kickStr = OGSCreateFreshKickString(origLeaveStr);
-            if (kickStr) {
-                leaveStrSlot = (void **)(locManager + 0x238);
-                *leaveStrSlot = kickStr;
-            }
-        }
-        gOGS.kickMsgArmed = 0;
-    }
-
+    // Forward disconnect without writing to objects that may be destroyed
+    // by the original callback.
     if (orig_OnDisconnect) orig_OnDisconnect(self, player, method);
-    if (leaveStrSlot && origLeaveStr) *leaveStrSlot = origLeaveStr;
 }
 
 static void hook_SendChatRemote(void *self, void *senderStr, void *msgStr, int32_t senderTeam, bool isTeamChat, const void *method) {
@@ -1560,10 +1544,9 @@ static void OGSInstallHooks(void) {
             s_lastHookRetry = now;
             OGSInstallHooks();
         }
-        uintptr_t inRoomAddr = OGSResolveRVA(gOffsets.rvaInRoom);
-        if (inRoomAddr && OGSIsExecutableGameAddress(inRoomAddr)) {
-            OGSUpdateRoomSnapshot();
-        }
+        // Keep this UI timer read-only: calling IL2CPP room APIs here
+        // can access stale Photon objects during a master transition.
+        // Room snapshots are refreshed by the hooked game update tick.
     }
 
     if (!self.menuPanel || self.menuPanel.hidden) return;
