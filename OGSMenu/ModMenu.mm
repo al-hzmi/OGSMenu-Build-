@@ -62,51 +62,57 @@ typedef struct {
     uintptr_t rvaArabicFix;
     uintptr_t rvaFastAllocateString;
 
-    // Unity Engine RVAs (Aimbot & Transform)
+    // Aimbot & Unity RVAs
     uintptr_t rvaCameraGetMain;
     uintptr_t rvaComponentGetTransform;
     uintptr_t rvaTransformGetPosition;
     uintptr_t rvaTransformLookAtVec3;
+
+    // Damage & Magic Bullet RVAs
+    uintptr_t rvaApplyDamage;
+    uintptr_t rvaDamageRemote;
 } OGSOffsetsConfig;
 
 static OGSOffsetsConfig gOffsets = {
-    .tblCashUpdate            = 0x23918B8,
-    .tblChatUpdate            = 0x238FD68,
-    .tblSendChatRemote        = 0x238FD80,
-    .tblOnEvent               = 0x2390048,
-    .tblLeaveRoom             = 0x2390A10,
-    .tblType4995LeaveRoom     = 0x238E518,
-    .tblOnMasterSwitched1     = 0x2392628,
-    .tblOnMasterSwitched2     = 0x2391000,
-    .tblOnMasterSwitched3     = 0x238F228,
-    .tblOnMasterSwitched4     = 0x23903E0,
-    .tblOnMasterSwitched5     = 0x238E730,
-    .tblPeerSync              = 0x2390A98,
-    .tblSetMaster             = 0x2390AA0,
-    .tblOnDisconnect          = 0x2391930,
+    0x23918B8, // tblCashUpdate
+    0x238FD68, // tblChatUpdate
+    0x238FD80, // tblSendChatRemote
+    0x2390048, // tblOnEvent
+    0x2390A10, // tblLeaveRoom
+    0x238E518, // tblType4995LeaveRoom
+    0x2392628, // tblOnMasterSwitched1
+    0x2391000, // tblOnMasterSwitched2
+    0x238F228, // tblOnMasterSwitched3
+    0x23903E0, // tblOnMasterSwitched4
+    0x238E730, // tblOnMasterSwitched5
+    0x2390A98, // tblPeerSync
+    0x2390AA0, // tblSetMaster
+    0x2391930, // tblOnDisconnect
 
-    .rvaSetTimescale          = 0x198AC4C,
-    .rvaInRoom                = 0x013CC38C,
-    .rvaIsMaster              = 0x013CC2BC,
-    .rvaGetMasterPeer         = 0x013CACA4,
-    .rvaGetLocalPlayer        = 0x013CABF0,
-    .rvaGetRoom               = 0x013CAB28,
-    .rvaAllPlayers            = 0x013CAEC4,
-    .rvaGetPeers              = 0x013CAF78,
-    .rvaPlayerGetName         = 0x013D7534,
-    .rvaPlayerGetID           = 0x013CC384,
-    .rvaNetPeerGetMMasterId   = 0x013AB2A4,
-    .rvaNetPeerSetMMasterId   = 0x013AB2AC,
-    .rvaNetPeerSetMasterProp  = 0x013B0C54,
-    .rvaIsLocalClientInside   = 0x013FD758,
-    .rvaArabicFix             = 0x0130F538,
-    .rvaFastAllocateString    = 0x01B33DB8,
+    0x198AC4C, // rvaSetTimescale
+    0x013CC38C, // rvaInRoom
+    0x013CC2BC, // rvaIsMaster
+    0x013CACA4, // rvaGetMasterPeer
+    0x013CABF0, // rvaGetLocalPlayer
+    0x013CAB28, // rvaGetRoom
+    0x013CAEC4, // rvaAllPlayers
+    0x013CAF78, // rvaGetPeers
+    0x013D7534, // rvaPlayerGetName
+    0x013CC384, // rvaPlayerGetID
+    0x013AB2A4, // rvaNetPeerGetMMasterId
+    0x013AB2AC, // rvaNetPeerSetMMasterId
+    0x013B0C54, // rvaNetPeerSetMasterProp
+    0x013FD758, // rvaIsLocalClientInside
+    0x0130F538, // rvaArabicFix
+    0x01B33DB8, // rvaFastAllocateString
 
-    // تفعيل RVAs المحرك الجديدة
-    .rvaCameraGetMain         = 0x19655A4,
-    .rvaComponentGetTransform = 0x1966984,
-    .rvaTransformGetPosition  = 0x198B948,
-    .rvaTransformLookAtVec3   = 0x198CCFC
+    0x19655A4, // rvaCameraGetMain
+    0x1966984, // rvaComponentGetTransform
+    0x198B948, // rvaTransformGetPosition
+    0x198CCFC, // rvaTransformLookAtVec3
+
+    0x13E7360, // rvaApplyDamage
+    0x13E7588  // rvaDamageRemote
 };
 
 // ============================================================
@@ -116,7 +122,7 @@ struct Vector3 {
     float x, y, z;
 };
 
-typedef void*   (*Update0Fn)(void *, void *);
+typedef void    (*Update0Fn)(void *, void *);
 typedef void    (*SetTime1Fn)(float, void *);
 typedef void    (*SendChatRemoteFn)(void *, void *, void *, int32_t, bool, const void *);
 typedef void    (*OnEventFn)(void *, void *, void *);
@@ -133,6 +139,9 @@ typedef void    (*SetMasterIdFn)(void *, int32_t, void *);
 typedef void*   (*ArabicFixFn)(void *, void *);
 typedef void*   (*FastAllocateStringFn)(int32_t length, const void *);
 typedef void    (*OnDisconnectFn)(void *, void *, void *);
+
+// Damage Signatures (Safe ARM64 Hooking)
+typedef void    (*DamageFn)(void* self, float damage, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6);
 
 // Unity Engine Signatures
 typedef void*   (*Camera_GetMain_Fn)();
@@ -153,6 +162,9 @@ static OnMasterSwitchFn orig_OnMasterSwitch3 = NULL;
 static OnMasterSwitchFn orig_OnMasterSwitch4 = NULL;
 static OnMasterSwitchFn orig_OnMasterSwitch5 = NULL;
 
+static DamageFn         orig_ApplyDamage     = NULL;
+static DamageFn         orig_DamageRemote    = NULL;
+
 // ============================================================
 // MARK: - Thread-Safe Runtime State & Locks
 // ============================================================
@@ -169,7 +181,9 @@ typedef struct {
     volatile bool     speedDirty;
     volatile uint64_t readFailures;
     volatile int32_t  autoHostOn;
-    volatile int32_t  aimbotOn; // حالة الايم بوت
+    volatile int32_t  aimbotOn;
+    volatile int32_t  godModeOn;       // منع استلام الضرر
+    volatile int32_t  magicBulletOn;   // مضاعفة الضرر
     volatile int32_t  antiKickHardLock;
     volatile int32_t  chatMode;
     volatile int32_t  kickMsgArmed;
@@ -177,6 +191,7 @@ typedef struct {
     volatile int32_t  kickTargetID;
     volatile int32_t  kickRetries;
     volatile int32_t  insideNetworkEvent;
+    volatile int32_t  userInitiatedLeave;
     volatile uint32_t blockedKicksCount;
     volatile int32_t  cachedLocalActorID;
     void * volatile   capturedNetPeer;
@@ -191,33 +206,36 @@ typedef struct {
 } OGSRuntimeState;
 
 static OGSRuntimeState gOGS = {
-    .inRoom              = false,
-    .isMaster            = false,
-    .heldMasterStably    = false,
-    .selectedPeer        = 0,
-    .gameSpeed           = 1.0f,
-    .speedDirty          = false,
-    .readFailures        = 0,
-    .autoHostOn          = 1,
-    .aimbotOn            = 0, // يبدأ مغلقاً حتى تفعله من القائمة
-    .antiKickHardLock    = 0,
-    .chatMode            = 0,
-    .kickMsgArmed        = 0,
-    .forceHostReq        = 0,
-    .kickTargetID        = -1,
-    .kickRetries         = 0,
-    .insideNetworkEvent  = 0,
-    .blockedKicksCount   = 0,
-    .cachedLocalActorID  = 0,
-    .capturedNetPeer     = NULL,
-    .roomEnterTime       = 0.0,
-    .masterAcquiredTime  = 0.0,
-    .lastMasterClaimTime = 0.0,
-    .lastKickPacketTime  = 0.0,
-    .lastUnityFrameTick  = 0.0,
-    .kickTargetName      = {0},
-    .lastHijackerName    = {0},
-    .customKickPhrase    = " تم طرده من الغرفة "
+    false, // inRoom
+    false, // isMaster
+    false, // heldMasterStably
+    0,     // selectedPeer
+    1.0f,  // gameSpeed
+    false, // speedDirty
+    0,     // readFailures
+    1,     // autoHostOn
+    0,     // aimbotOn
+    0,     // godModeOn
+    0,     // magicBulletOn
+    0,     // antiKickHardLock
+    0,     // chatMode
+    0,     // kickMsgArmed
+    0,     // forceHostReq
+    -1,    // kickTargetID
+    0,     // kickRetries
+    0,     // insideNetworkEvent
+    0,     // userInitiatedLeave
+    0,     // blockedKicksCount
+    0,     // cachedLocalActorID
+    NULL,  // capturedNetPeer
+    0.0,   // roomEnterTime
+    0.0,   // masterAcquiredTime
+    0.0,   // lastMasterClaimTime
+    0.0,   // lastKickPacketTime
+    0.0,   // lastUnityFrameTick
+    {0},   // kickTargetName
+    {0},   // lastHijackerName
+    " تم طرده من الغرفة " // customKickPhrase
 };
 
 // ============================================================
@@ -254,13 +272,7 @@ static uintptr_t OGSResolveRVA(uintptr_t rva) {
 static bool OGSReadMemory(uintptr_t address, void *output, size_t size) {
     if (address < 0x100000000ULL || !output || size == 0) return false;
     vm_size_t copied = 0;
-    kern_return_t kr = vm_read_overwrite(
-        mach_task_self(),
-        (vm_address_t)address,
-        (vm_size_t)size,
-        (vm_address_t)output,
-        &copied
-    );
+    kern_return_t kr = vm_read_overwrite(mach_task_self(), (vm_address_t)address, (vm_size_t)size, (vm_address_t)output, &copied);
     if (kr != KERN_SUCCESS || copied != (vm_size_t)size) {
         __atomic_fetch_add(&gOGS.readFailures, 1, __ATOMIC_RELAXED);
         return false;
@@ -283,20 +295,13 @@ static bool OGSReadPointer(uintptr_t address, void **output) {
 static NSString *OGSReadIl2CppString(void *object) {
     if (!object || (uintptr_t)object < 0x100000000ULL) return nil;
     uintptr_t address = (uintptr_t)object;
-
     int32_t length = 0;
     if (!OGSReadMemory(address + 0x10, &length, sizeof(length))) return nil;
     if (length <= 0 || length > OGS_MAX_STRING_LEN) return nil;
-
     size_t bytes = (size_t)length * sizeof(unichar);
     unichar *buffer = (unichar *)calloc((size_t)length, sizeof(unichar));
     if (!buffer) return nil;
-
-    if (!OGSReadMemory(address + 0x14, buffer, bytes)) {
-        free(buffer);
-        return nil;
-    }
-
+    if (!OGSReadMemory(address + 0x14, buffer, bytes)) { free(buffer); return nil; }
     NSString *result = [[NSString alloc] initWithCharacters:buffer length:(NSUInteger)length];
     free(buffer);
     return result;
@@ -306,14 +311,11 @@ static void *OGSManagedStringFromNSString(NSString *text) {
     if (!text) return NULL;
     NSUInteger nsLen = text.length;
     if (nsLen == 0 || nsLen > INT32_MAX) return NULL;
-
     uintptr_t addr = OGSResolveRVA(gOffsets.rvaFastAllocateString);
     if (!addr) return NULL;
-
     FastAllocateStringFn allocString = (FastAllocateStringFn)addr;
     void *managed = allocString((int32_t)nsLen, NULL);
     if (!managed) return NULL;
-
     unichar *chars = (unichar *)((uintptr_t)managed + 0x14);
     [text getCharacters:chars range:NSMakeRange(0, nsLen)];
     return managed;
@@ -363,7 +365,7 @@ static NSString *OGSNormalizeKey(NSString *value) {
 typedef struct {
     int32_t actorID;
     bool    isHost;
-    void    *playerObject; // مؤشر كائن اللاعب في الذاكرة للـ Aimbot
+    void    *playerObject; 
     char    name[OGS_MAX_NAME_BYTES];
 } OGSPeerSnapshot;
 
@@ -448,22 +450,17 @@ static uint32_t OGSReadPlayerArray(uintptr_t listRVA, void *output[OGS_MAX_PEERS
 }
 
 // ============================================================
-// MARK: - Aimbot Engine Implementation (Using your RVAs)
+// MARK: - Aimbot Engine Implementation
 // ============================================================
-// Declared here because the implementation appears later in this file.
-static int32_t OGSGetLocalPlayerID(void **outPlayerObj);
-
 static void OGSExecuteAimbot(void) {
     if (!__atomic_load_n(&gOGS.aimbotOn, __ATOMIC_ACQUIRE)) return;
     if (!__atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE)) return;
 
-    // 1. جلب الكاميرا الرئيسية عبر Camera::get_main (0x19655A4)
     uintptr_t camMainAddr = OGSResolveRVA(gOffsets.rvaCameraGetMain);
     if (!camMainAddr) return;
     void *mainCamera = ((Camera_GetMain_Fn)camMainAddr)();
     if (!mainCamera || (uintptr_t)mainCamera < 0x100000000ULL) return;
 
-    // 2. جلب كلاس Transform ودوال المواقع
     uintptr_t getTransAddr = OGSResolveRVA(gOffsets.rvaComponentGetTransform);
     uintptr_t getPosAddr   = OGSResolveRVA(gOffsets.rvaTransformGetPosition);
     uintptr_t lookAtAddr   = OGSResolveRVA(gOffsets.rvaTransformLookAtVec3);
@@ -473,47 +470,8 @@ static void OGSExecuteAimbot(void) {
     Transform_GetPosition_Fn getPosition   = (Transform_GetPosition_Fn)getPosAddr;
     Transform_LookAt_Vec3_Fn lookAt        = (Transform_LookAt_Vec3_Fn)lookAtAddr;
 
-    // 3. البحث عن اللاعب المحلي (LocalPlayer) وكاميرته/سلاحه
-    void *myPlayer = NULL;
-    int32_t myID = OGSGetLocalPlayerID(&myPlayer);
-    if (!myPlayer) return;
-
-    void *myTransform = getTransform(myPlayer, NULL);
-    if (!myTransform) return;
-
-    // 4. المرور على الخصوم في الروم واختيار أقرب عدو لتوجيه الكاميرا نحوه
-    OGSRoomSnapshot snapshot = OGSCurrentSnapshot();
-    if (snapshot.count <= 1) return;
-
-    void *targetTransform = NULL;
-    float closestDist = 999999.0f;
-
-    Vector3 myPos = getPosition(myTransform, NULL);
-
-    for (uint32_t i = 0; i < snapshot.count; i++) {
-        OGSPeerSnapshot peer = snapshot.peers[i];
-        if (peer.actorID == myID || peer.actorID <= 0 || !peer.playerObject) continue;
-
-        void *peerTrans = getTransform(peer.playerObject, NULL);
-        if (!peerTrans) continue;
-
-        Vector3 peerPos = getPosition(peerTrans, NULL);
-        // حساب المسافة الإقليدية ثلاثية الأبعاد
-        float dist = sqrtf(powf(peerPos.x - myPos.x, 2) + powf(peerPos.y - myPos.y, 2) + powf(peerPos.z - myPos.z, 2));
-
-        if (dist < closestDist && dist > 1.0f && dist < 150.0f) {
-            closestDist = dist;
-            targetTransform = peerTrans;
-        }
-    }
-
-    // 5. تفعيل التصويب التلقائي (Snap/LookAt) نحو إحداثيات رأس العدو فور وجود هدف قريب
-    if (targetTransform) {
-        Vector3 targetPos = getPosition(targetTransform, NULL);
-        // رفع الهدف قليلاً للأعلى ليصوب على الرأس (Headshot Offset)
-        targetPos.y += 0.35f; 
-        lookAt(myTransform, targetPos, NULL);
-    }
+    // TODO: استبدل دالة OGSGetLocalPlayerID مستقبلاً بدالة دقيقة لجلب الـ PlayerNetwork الخاص بك
+    // حالياً Aimbot معلق حتى نستخرج الـ LocalPlayer Network Object بدقة في التحديث القادم
 }
 
 // ============================================================
@@ -620,6 +578,17 @@ static bool OGSClaimMasterReal(bool bypassCooldown) {
     void *fnPtr = NULL;
     if (OGSReadPointer(slotAddr, &fnPtr) && fnPtr) {
         sent = ((PeerAction1Fn)fnPtr)(myPlayer, NULL);
+    }
+
+    if (netPeer) {
+        void *currentRoom = NULL;
+        if (OGSReadPointer((uintptr_t)netPeer + 0x158, &currentRoom) && currentRoom) {
+            uintptr_t setPropMasterAddr = OGSResolveRVA(gOffsets.rvaNetPeerSetMasterProp);
+            if (setPropMasterAddr) {
+                ((NetPeerSetMaster1Fn)setPropMasterAddr)(netPeer, myID, NULL);
+                sent = true;
+            }
+        }
     }
 
     if (tempZeroed && !sent && netPeer && setMMasterAddr) {
@@ -729,7 +698,8 @@ static void OGSProcessSpeed(void) {
 @property (strong, nonatomic) UIButton *unbanButton;
 @property (strong, nonatomic) UIButton *lockButton;
 @property (strong, nonatomic) UIButton *hostLockButton;
-@property (strong, nonatomic) UIButton *aimbotButton; // زر الايم بوت الجديد
+@property (strong, nonatomic) UIButton *godModeButton;     // درع الحماية
+@property (strong, nonatomic) UIButton *magicBulletButton; // رصاصة سحرية
 @property (strong, nonatomic) UIButton *antiKickLockButton;
 @property (strong, nonatomic) UIButton *muteChatButton;
 @property (strong, nonatomic) UIButton *speedSetButton;
@@ -911,9 +881,6 @@ static void OGSUnityThreadTick(void) {
     os_unfair_lock_unlock(&gStateLock);
 
     OGSProcessSpeed();
-    
-    // تشغيل الـ Aimbot في كل فريم لضمان سلاسة التصويب
-    OGSExecuteAimbot();
 
     int32_t forceReq = __atomic_load_n(&gOGS.forceHostReq, __ATOMIC_ACQUIRE);
     static double s_lastSnapTime = 0.0;
@@ -925,8 +892,29 @@ static void OGSUnityThreadTick(void) {
 }
 
 // ============================================================
-// MARK: - Network, Chat & Lifecycle Hooks
+// MARK: - Damage, Network, Chat & Lifecycle Hooks
 // ============================================================
+
+// 1. هجوم (رصاصة سحرية / One Hit Kill): نضاعف الضرر المرسل من سلاحنا
+static void hook_ApplyDamage(void* self, float damage, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    if (__atomic_load_n(&gOGS.magicBulletOn, __ATOMIC_ACQUIRE)) {
+        damage = 9999.0f; // دمج مميت لأي طلقة
+    }
+    if (orig_ApplyDamage) {
+        orig_ApplyDamage(self, damage, a3, a4, a5, a6);
+    }
+}
+
+// 2. دفاع (درع / God Mode): نلغي أي دمج مستقبل عبر الشبكة تماماً
+static void hook_DamageRemote(void* self, float damage, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6) {
+    if (__atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE)) {
+        return; // صد الرصاصة السحرية وإلغاء الدمج بالكامل
+    }
+    if (orig_DamageRemote) {
+        orig_DamageRemote(self, damage, a3, a4, a5, a6);
+    }
+}
+
 static void hook_OnEvent(void *self, void *eventData, void *method) {
     os_unfair_lock_lock(&gStateLock);
     double enterTime = gOGS.roomEnterTime;
@@ -1073,6 +1061,10 @@ static void hook_CashUpdate(void *self, void *method) {
 static void OGSInstallHooks(void) {
     uintptr_t base = OGSFindGameImage();
     if (!base) return;
+
+    if (gOffsets.rvaApplyDamage) { void **sl = (void **)(base + gOffsets.rvaApplyDamage); if (*sl != (void *)&hook_ApplyDamage) { orig_ApplyDamage = (DamageFn)*sl; *sl = (void *)&hook_ApplyDamage; } }
+    if (gOffsets.rvaDamageRemote) { void **sl = (void **)(base + gOffsets.rvaDamageRemote); if (*sl != (void *)&hook_DamageRemote) { orig_DamageRemote = (DamageFn)*sl; *sl = (void *)&hook_DamageRemote; } }
+
     if (gOffsets.tblCashUpdate)        { void **sl = (void **)(base + gOffsets.tblCashUpdate);        if (*sl != (void *)&hook_CashUpdate)                 { orig_CashUpdate      = (Update0Fn)*sl;        *sl = (void *)&hook_CashUpdate; } }
     if (gOffsets.tblChatUpdate)        { void **sl = (void **)(base + gOffsets.tblChatUpdate);        if (*sl != (void *)&hook_ChatUpdate)                 { orig_ChatUpdate      = (Update0Fn)*sl;        *sl = (void *)&hook_ChatUpdate; } }
     if (gOffsets.tblSendChatRemote)    { void **sl = (void **)(base + gOffsets.tblSendChatRemote);    if (*sl != (void *)&hook_SendChatRemote)             { orig_SendChatRemote  = (SendChatRemoteFn)*sl; *sl = (void *)&hook_SendChatRemote; } }
@@ -1214,7 +1206,7 @@ static void OGSInstallHooks(void) {
         self.menuPanel.hidden = YES;
 
         self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 5, 260, 18)];
-        self.titleLabel.text = @"OGS v14.0: هوست + ايم بوت 🎯👑";
+        self.titleLabel.text = @"OGS v14.5: هجوم ودفاع خارق 💥🛡️";
         self.titleLabel.textColor = [UIColor whiteColor];
         self.titleLabel.textAlignment = NSTextAlignmentCenter;
         self.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
@@ -1261,25 +1253,26 @@ static void OGSInstallHooks(void) {
         self.hostLockButton = [self makeBtn:CGRectMake(155, 142, 150, 32) title:@"حماية الهوست: مفعّل 👑" bg:wpnGreen action:@selector(toggleAutoHost:)];
         [self.menuPanel addSubview:self.hostLockButton];
 
-        self.aimbotButton = [self makeBtn:CGRectMake(10, 142, 140, 32) title:@"الايم بوت: متوقف 🎯" bg:darkGray action:@selector(toggleAimbot:)];
-        [self.menuPanel addSubview:self.aimbotButton];
-
-        self.antiKickLockButton = [self makeBtn:CGRectMake(155, 179, 150, 32) title:@"قفل البقاء: تلقائي 🛡️" bg:darkGray action:@selector(toggleAntiKickHardLock:)];
+        self.antiKickLockButton = [self makeBtn:CGRectMake(10, 142, 140, 32) title:@"قفل البقاء: تلقائي 🛡️" bg:darkGray action:@selector(toggleAntiKickHardLock:)];
         [self.menuPanel addSubview:self.antiKickLockButton];
 
-        self.lockButton = [self makeBtn:CGRectMake(10, 179, 140, 30) title:@"قفل الروم: مفتوح" bg:darkGray action:@selector(toggleRoomLock:)];
-        [self.menuPanel addSubview:self.lockButton];
+        // الأزرار الجديدة
+        self.godModeButton = [self makeBtn:CGRectMake(155, 179, 150, 30) title:@"درع الحماية: متوقف 🛡️" bg:darkGray action:@selector(toggleGodMode:)];
+        [self.menuPanel addSubview:self.godModeButton];
 
-        self.muteChatButton = [self makeBtn:CGRectMake(105, 216, 95, 30) title:@"الشات: مفتوح" bg:darkGray action:@selector(cycleChatMode:)];
+        self.magicBulletButton = [self makeBtn:CGRectMake(10, 179, 140, 30) title:@"طلقة سحرية: متوقف 🔫" bg:darkGray action:@selector(toggleMagicBullet:)];
+        [self.menuPanel addSubview:self.magicBulletButton];
+
+        self.muteChatButton = [self makeBtn:CGRectMake(105, 214, 95, 30) title:@"الشات: مفتوح" bg:darkGray action:@selector(cycleChatMode:)];
         [self.menuPanel addSubview:self.muteChatButton];
 
-        self.unbanButton = [self makeBtn:CGRectMake(10, 216, 90, 30) title:@"فك الحظر (0)" bg:darkGray action:@selector(clearBanList:)];
+        self.unbanButton = [self makeBtn:CGRectMake(10, 214, 90, 30) title:@"فك الحظر (0)" bg:darkGray action:@selector(clearBanList:)];
         [self.menuPanel addSubview:self.unbanButton];
 
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(10, 251, 55, 30) title:@"سرعة -" bg:darkGray action:@selector(speedDown:)]];
-        self.speedSetButton = [self makeBtn:CGRectMake(70, 251, 175, 30) title:@"السرعة: 1.0x (اضغط للكتابة)" bg:hostBlue action:@selector(promptCustomSpeed:)];
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(10, 249, 55, 30) title:@"سرعة -" bg:darkGray action:@selector(speedDown:)]];
+        self.speedSetButton = [self makeBtn:CGRectMake(70, 249, 175, 30) title:@"السرعة: 1.0x (اضغط للكتابة)" bg:hostBlue action:@selector(promptCustomSpeed:)];
         [self.menuPanel addSubview:self.speedSetButton];
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(250, 251, 55, 30) title:@"سرعة +" bg:darkGray action:@selector(speedUp:)]];
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(250, 249, 55, 30) title:@"سرعة +" bg:darkGray action:@selector(speedUp:)]];
 
         [self.containerView addSubview:self.menuPanel];
         self.containerView.floatingButton = self.floatingButton;
@@ -1385,7 +1378,6 @@ static void OGSInstallHooks(void) {
 
     if ((now - lastUnity) > 0.35) {
         OGSProcessSpeed();
-        OGSUpdateRoomSnapshot();
     }
 
     if (!self.menuPanel || self.menuPanel.hidden) return;
@@ -1489,18 +1481,31 @@ static void OGSInstallHooks(void) {
     [self refreshUI];
 }
 
-- (void)toggleAimbot:(UIButton *)s {
-    int32_t current = __atomic_load_n(&gOGS.aimbotOn, __ATOMIC_ACQUIRE);
+- (void)toggleGodMode:(UIButton *)s {
+    int32_t current = __atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE);
     int32_t next = current ? 0 : 1;
-    __atomic_store_n(&gOGS.aimbotOn, next, __ATOMIC_RELEASE);
+    __atomic_store_n(&gOGS.godModeOn, next, __ATOMIC_RELEASE);
     if (next) {
-        [s setTitle:@"الايم بوت: مفعّل 🎯" forState:UIControlStateNormal];
+        [s setTitle:@"درع الحماية: مفعّل 🛡️" forState:UIControlStateNormal];
         s.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
-        self.statusLabel.text = @"الايم بوت نشط (يستهدف أقرب عدو تلقائياً)";
+        self.statusLabel.text = @"أنت الآن محمي ضد الرصاص السحري ودمج الجدران!";
     } else {
-        [s setTitle:@"الايم بوت: متوقف 🎯" forState:UIControlStateNormal];
+        [s setTitle:@"درع الحماية: متوقف 🛡️" forState:UIControlStateNormal];
         s.backgroundColor = [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
-        self.statusLabel.text = @"تم إيقاف الايم بوت";
+    }
+}
+
+- (void)toggleMagicBullet:(UIButton *)s {
+    int32_t current = __atomic_load_n(&gOGS.magicBulletOn, __ATOMIC_ACQUIRE);
+    int32_t next = current ? 0 : 1;
+    __atomic_store_n(&gOGS.magicBulletOn, next, __ATOMIC_RELEASE);
+    if (next) {
+        [s setTitle:@"طلقة سحرية: مفعّل 🔫" forState:UIControlStateNormal];
+        s.backgroundColor = [UIColor colorWithRed:0.80 green:0.35 blue:0.10 alpha:1.0];
+        self.statusLabel.text = @"أي طلقة منك ستقتل الخصم فوراً (One Hit Kill)!";
+    } else {
+        [s setTitle:@"طلقة سحرية: متوقف 🔫" forState:UIControlStateNormal];
+        s.backgroundColor = [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
     }
 }
 
@@ -1509,9 +1514,11 @@ static void OGSInstallHooks(void) {
     if (gOGS.antiKickHardLock) {
         [s setTitle:@"قفل البقاء: صارم 🔒" forState:UIControlStateNormal];
         s.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
+        self.statusLabel.text = @"قفل البقاء الصارم مفعّل (أوقفه قبل الخروج)";
     } else {
         [s setTitle:@"قفل البقاء: تلقائي 🛡️" forState:UIControlStateNormal];
         s.backgroundColor = [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
+        self.statusLabel.text = @"الحماية التلقائية ضد الطرد الشبكي نشطة";
     }
 }
 
