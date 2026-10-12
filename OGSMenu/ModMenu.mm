@@ -585,7 +585,7 @@ static bool OGSClaimMasterReal(bool bypassCooldown) {
         if (OGSReadPointer((uintptr_t)netPeer + 0x158, &currentRoom) && currentRoom) {
             uintptr_t setPropMasterAddr = OGSResolveRVA(gOffsets.rvaNetPeerSetMasterProp);
             if (setPropMasterAddr) {
-                ((NetPeerSetMaster1Fn)setPropMasterAddr)(netPeer, myID, NULL);
+                ((SetMasterIdFn)setPropMasterAddr)(netPeer, myID, NULL);
                 sent = true;
             }
         }
