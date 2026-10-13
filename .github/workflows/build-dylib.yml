@@ -21,13 +21,25 @@ jobs:
           printf '%s %s\n' "$GITHUB_RUN_ID" "$GITHUB_SHA" > .ogs-latest-build-run
           git add .ogs-latest-build-run
           git diff --cached --quiet || (git commit -m "chore: record build run [skip ci]" && git push origin HEAD:main)
+      - name: Prepare Dobby iOS ARM64 dependency
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p vendor/dobby
+          curl --fail --location --retry 3 \
+            "https://github.com/jmpews/Dobby/releases/download/latest/dobby-iphoneos-all.tar.gz" \
+            -o /tmp/dobby-iphoneos-all.tar.gz
+          tar -xzf /tmp/dobby-iphoneos-all.tar.gz -C vendor/dobby
+          test -f vendor/dobby/build/iphoneos/dobby.h
+          test -f vendor/dobby/build/iphoneos/arm64/libdobby.a
+          xcrun lipo -info vendor/dobby/build/iphoneos/arm64/libdobby.a
       - name: Compile iOS arm64 dylib
         shell: bash
         run: |
           set -euo pipefail
           SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
           mkdir -p dist
-          xcrun --sdk iphoneos clang++ -target arm64-apple-ios14.0 -isysroot "$SDK" -std=c++17 -fobjc-arc -fblocks -dynamiclib -framework UIKit -framework Foundation -framework QuartzCore -framework CoreGraphics -Wl,-install_name,@rpath/OGSMenu.dylib OGSMenu/ModMenu.mm -lc++ -o dist/OGSMenu.dylib
+          xcrun --sdk iphoneos clang++ -target arm64-apple-ios14.0 -isysroot "$SDK" -std=c++17 -fobjc-arc -fblocks -dynamiclib -Ivendor/dobby/build/iphoneos -framework UIKit -framework Foundation -framework QuartzCore -framework CoreGraphics -Wl,-install_name,@rpath/OGSMenu.dylib OGSMenu/ModMenu.mm vendor/dobby/build/iphoneos/arm64/libdobby.a -lc++ -o dist/OGSMenu.dylib
           file dist/OGSMenu.dylib
           xcrun vtool -show-build dist/OGSMenu.dylib
       - uses: actions/upload-artifact@v4
