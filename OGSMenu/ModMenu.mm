@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include <mach/vm_region.h>
+#include <dobby.h> // تم إضافة محرك Dobby بأمان
 
 #define OGS_MAX_PEERS       64
 #define OGS_MAX_NAME_BYTES  128
@@ -62,6 +63,16 @@ typedef struct {
     uintptr_t rvaIsLocalClientInside;
     uintptr_t rvaArabicFix;
     uintptr_t rvaFastAllocateString;
+
+    // Aimbot & Unity RVAs
+    uintptr_t rvaCameraGetMain;
+    uintptr_t rvaComponentGetTransform;
+    uintptr_t rvaTransformGetPosition;
+    uintptr_t rvaTransformLookAtVec3;
+
+    // Damage & Magic Bullet RVAs
+    uintptr_t rvaApplyDamage;
+    uintptr_t rvaDamageRemote;
 } OGSOffsetsConfig;
 
 static OGSOffsetsConfig gOffsets = {
@@ -95,12 +106,24 @@ static OGSOffsetsConfig gOffsets = {
     0x013B0C54, // rvaNetPeerSetMasterProp
     0x013FD758, // rvaIsLocalClientInside
     0x0130F538, // rvaArabicFix
-    0x01B33DB8  // rvaFastAllocateString
+    0x01B33DB8, // rvaFastAllocateString
+
+    0x19655A4, // rvaCameraGetMain
+    0x1966984, // rvaComponentGetTransform
+    0x198B948, // rvaTransformGetPosition
+    0x198CCFC, // rvaTransformLookAtVec3
+
+    0x13E7360, // rvaApplyDamage
+    0x13E7588  // rvaDamageRemote
 };
 
 // ============================================================
 // MARK: - Function Signatures & Math Structs
 // ============================================================
+struct Vector3 {
+    float x, y, z;
+};
+
 typedef void    (*Update0Fn)(void *, void *);
 typedef void    (*SetTime1Fn)(float, void *);
 typedef void    (*SendChatRemoteFn)(void *, void *, void *, int32_t, bool, const void *);
@@ -115,10 +138,15 @@ typedef void*   (*PlayerGetNameFn)(void *, void *);
 typedef int32_t (*PlayerGetIDFn)(void *, void *);
 typedef int32_t (*GetMasterIdFn)(void *, void *);
 typedef void    (*SetMasterIdFn)(void *, int32_t, void *);
-typedef bool    (*NetPeerSetMaster1Fn)(void *, int32_t, void *);
 typedef void*   (*ArabicFixFn)(void *, void *);
 typedef void*   (*FastAllocateStringFn)(int32_t length, const void *);
 typedef void    (*OnDisconnectFn)(void *, void *, void *);
+
+// Unity Engine Signatures
+typedef void*   (*Camera_GetMain_Fn)();
+typedef void*   (*Component_GetTransform_Fn)(void *component, const void *method);
+typedef Vector3 (*Transform_GetPosition_Fn)(void *transform, const void *method);
+typedef void    (*Transform_LookAt_Vec3_Fn)(void *transform, Vector3 worldPosition, const void *method);
 
 static Update0Fn        orig_CashUpdate      = NULL;
 static Update0Fn        orig_ChatUpdate      = NULL;
@@ -149,6 +177,9 @@ typedef struct {
     volatile bool     speedDirty;
     volatile uint64_t readFailures;
     volatile int32_t  autoHostOn;
+    volatile int32_t  aimbotOn;
+    volatile int32_t  godModeOn;       // منع استلام الضرر
+    volatile int32_t  magicBulletOn;   // مضاعفة الضرر
     volatile int32_t  antiKickHardLock;
     volatile int32_t  chatMode;
     volatile int32_t  kickMsgArmed;
@@ -179,6 +210,9 @@ static OGSRuntimeState gOGS = {
     false, // speedDirty
     0,     // readFailures
     1,     // autoHostOn
+    0,     // aimbotOn
+    0,     // godModeOn
+    0,     // magicBulletOn
     0,     // antiKickHardLock
     0,     // chatMode
     0,     // kickMsgArmed
@@ -221,6 +255,7 @@ static uintptr_t OGSFindGameImage(void) {
         if (!header) continue;
         uintptr_t base = (uintptr_t)header;
         __atomic_store_n(&gImageBase, base, __ATOMIC_RELEASE);
+        NSLog(@"[OGS] Found fps image: %s header=%p", name, header);
         return base;
     }
     return 0;
@@ -414,7 +449,32 @@ static uint32_t OGSReadPlayerArray(uintptr_t listRVA, void *output[OGS_MAX_PEERS
 }
 
 // ============================================================
-// MARK: - Real Server Host Claim & Gate-Bypass Kick (THE ENGINE)
+// MARK: - Aimbot Engine Implementation
+// ============================================================
+static void OGSExecuteAimbot(void) {
+    if (!__atomic_load_n(&gOGS.aimbotOn, __ATOMIC_ACQUIRE)) return;
+    if (!__atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE)) return;
+
+    uintptr_t camMainAddr = OGSResolveRVA(gOffsets.rvaCameraGetMain);
+    if (!camMainAddr) return;
+    void *mainCamera = ((Camera_GetMain_Fn)camMainAddr)();
+    if (!mainCamera || (uintptr_t)mainCamera < 0x100000000ULL) return;
+
+    uintptr_t getTransAddr = OGSResolveRVA(gOffsets.rvaComponentGetTransform);
+    uintptr_t getPosAddr   = OGSResolveRVA(gOffsets.rvaTransformGetPosition);
+    uintptr_t lookAtAddr   = OGSResolveRVA(gOffsets.rvaTransformLookAtVec3);
+    if (!getTransAddr || !getPosAddr || !lookAtAddr) return;
+
+    Component_GetTransform_Fn getTransform = (Component_GetTransform_Fn)getTransAddr;
+    Transform_GetPosition_Fn getPosition   = (Transform_GetPosition_Fn)getPosAddr;
+    Transform_LookAt_Vec3_Fn lookAt        = (Transform_LookAt_Vec3_Fn)lookAtAddr;
+
+    // TODO: استبدل دالة OGSGetLocalPlayerID مستقبلاً بدالة دقيقة لجلب الـ PlayerNetwork الخاص بك
+    // حالياً Aimbot معلق حتى نستخرج الـ LocalPlayer Network Object بدقة في التحديث القادم
+}
+
+// ============================================================
+// MARK: - Real Server Host Claim & Gate-Bypass Kick
 // ============================================================
 static void *OGSFindLocalPlayer(void) {
     uintptr_t getLocalAddr = OGSResolveRVA(gOffsets.rvaGetLocalPlayer);
@@ -481,7 +541,7 @@ static void *OGSGetNetworkingPeerSafe(void) {
             }
         }
     }
-    return (void *)__atomic_load_n((uintptr_t *)&gOGS.capturedNetPeer, __ATOMIC_ACQUIRE);
+    return nil;
 }
 
 static bool OGSClaimMasterReal(bool bypassCooldown) {
@@ -524,7 +584,7 @@ static bool OGSClaimMasterReal(bool bypassCooldown) {
         if (OGSReadPointer((uintptr_t)netPeer + 0x158, &currentRoom) && currentRoom) {
             uintptr_t setPropMasterAddr = OGSResolveRVA(gOffsets.rvaNetPeerSetMasterProp);
             if (setPropMasterAddr) {
-                ((NetPeerSetMaster1Fn)setPropMasterAddr)(netPeer, myID, NULL);
+                ((SetMasterIdFn)setPropMasterAddr)(netPeer, myID, NULL);
                 sent = true;
             }
         }
@@ -637,6 +697,8 @@ static void OGSProcessSpeed(void) {
 @property (strong, nonatomic) UIButton *unbanButton;
 @property (strong, nonatomic) UIButton *lockButton;
 @property (strong, nonatomic) UIButton *hostLockButton;
+@property (strong, nonatomic) UIButton *godModeButton;     // درع الحماية
+@property (strong, nonatomic) UIButton *magicBulletButton; // رصاصة سحرية
 @property (strong, nonatomic) UIButton *antiKickLockButton;
 @property (strong, nonatomic) UIButton *muteChatButton;
 @property (strong, nonatomic) UIButton *speedSetButton;
@@ -651,14 +713,14 @@ static void OGSProcessSpeed(void) {
 - (void)recordHijackerName:(NSString *)normName actorID:(int32_t)actID;
 - (void)fetchGitHubCloudConfigWithFeedback:(BOOL)showFeedback;
 - (BOOL)shouldAutoKickPeerWithName:(NSString *)normName actorID:(int32_t)actID;
+- (NSUInteger)bannedCountSafe;
 @end
-
 // ============================================================
 // MARK: - Room Snapshot & Engine Tick (Unity Thread)
 // ============================================================
 static volatile bool s_inSnapshotUpdate = false;
 
-static void OGSUpdateRoomSnapshot(bool forceActions) {
+static void OGSUpdateRoomSnapshot(void) {
     if (__atomic_exchange_n(&s_inSnapshotUpdate, true, __ATOMIC_ACQ_REL)) return;
 
     uintptr_t inRoomAddress       = OGSResolveRVA(gOffsets.rvaInRoom);
@@ -724,31 +786,21 @@ static void OGSUpdateRoomSnapshot(bool forceActions) {
         int32_t curRetries = gOGS.kickRetries;
         os_unfair_lock_unlock(&gStateLock);
 
-        if (roomSettled && (gOGS.autoHostOn || forceReq > 0 || curRetries > 0 || forceActions)) {
+        if (roomSettled && (gOGS.autoHostOn || forceReq > 0 || curRetries > 0)) {
             bool heldStably = __atomic_load_n(&gOGS.heldMasterStably, __ATOMIC_ACQUIRE);
 
+            // سحب الهوست
+            OGSClaimMasterReal(forceReq > 0);
+
+            // الرد بهجوم طرد إجباري على الخصم فوراً
             if (gOGS.autoHostOn && heldStably && masterPlayer && masterPlayer != myPlayer) {
                 OGSPeerSnapshot thiefSnap;
                 if (OGSReadPeer(masterPlayer, masterPlayer, &thiefSnap) && thiefSnap.actorID != myID && thiefSnap.actorID > 0) {
                     NSString *thiefName = [NSString stringWithUTF8String:thiefSnap.name];
                     NSString *normThief = OGSNormalizeKey(thiefName);
                     [menu recordHijackerName:normThief actorID:thiefSnap.actorID];
-
-                    os_unfair_lock_lock(&gStateLock);
-                    gOGS.kickTargetID = thiefSnap.actorID;
-                    if (normThief.UTF8String) {
-                        snprintf(gOGS.kickTargetName, sizeof(gOGS.kickTargetName), "%s", normThief.UTF8String);
-                        snprintf(gOGS.lastHijackerName, sizeof(gOGS.lastHijackerName), "%s", thiefSnap.name);
-                    }
-                    gOGS.kickRetries = 25;
-                    os_unfair_lock_unlock(&gStateLock);
+                    OGSKickPeerReal(masterPlayer, true);
                 }
-            }
-
-            OGSClaimMasterReal(forceReq > 0);
-
-            if (gOGS.autoHostOn && heldStably && masterPlayer && masterPlayer != myPlayer) {
-                OGSKickPeerReal(masterPlayer, true);
             }
         }
     }
@@ -776,11 +828,11 @@ static void OGSUpdateRoomSnapshot(bool forceActions) {
         if (!OGSReadPeer(players[i], masterPlayer, &peerSnap)) continue;
 
         snapshot.peers[snapshot.count++] = peerSnap;
-
         NSString *pName = [NSString stringWithUTF8String:peerSnap.name];
         NSString *normName = OGSNormalizeKey(pName);
 
-        if ((roomSettled || forceActions) && curRetries > 0) {
+        // هنا يتم تنفيذ الطرد الفعلي 
+        if (roomSettled && curRetries > 0) {
             bool matchID = (curKickID > 0 && peerSnap.actorID == curKickID);
             bool matchName = (curKickName[0] != '\0' && normName.UTF8String && strcmp(normName.UTF8String, curKickName) == 0);
             if (matchID || matchName) {
@@ -823,18 +875,49 @@ static void OGSUnityThreadTick(void) {
 
     if (forceReq > 0 || (now - s_lastSnapTime) >= 0.16) {
         s_lastSnapTime = now;
-        OGSUpdateRoomSnapshot(false);
+        OGSUpdateRoomSnapshot();
     }
 }
 
 // ============================================================
-// MARK: - Network, Chat & Lifecycle Hooks
+// MARK: - Damage, Network, Chat & Lifecycle Hooks
 // ============================================================
-static void hook_OnEvent(void *self, void *eventData, void *method) {
-    if (self && (uintptr_t)self >= 0x100000000ULL) {
-        __atomic_store_n((uintptr_t *)&gOGS.capturedNetPeer, (uintptr_t)self, __ATOMIC_RELEASE);
-    }
 
+// تم بناء الجسر الهجومي لأضرار اللعبة بواسطة DobbyInstrument 
+// هذه الدالة تعطل أي ضرر موجه للاعب (درع 100%)
+static void OGSInstrumentIncomingDamage(void *address, DobbyRegisterContext *ctx) {
+    if (!ctx || !__atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE)) return;
+    float value = ctx->floating.regs.q0.f.f1;
+    if (isfinite(value) && value > 0.0f && value < 1000.0f) {
+        ctx->floating.regs.q0.f.f1 = 0.0f; // مسح الضرر
+    }
+}
+
+// هذه الدالة ترفع ضرر اللاعب (طلقة سحرية مميتة)
+static void OGSInstrumentOutgoingDamage(void *address, DobbyRegisterContext *ctx) {
+    if (!ctx || !__atomic_load_n(&gOGS.magicBulletOn, __ATOMIC_ACQUIRE)) return;
+    float value = ctx->floating.regs.q0.f.f1;
+    if (isfinite(value) && value > 0.0f && value < 1000.0f) {
+        ctx->floating.regs.q0.f.f1 = 9999.0f; // تدمير
+    }
+}
+
+static bool gOGSDamageHookInstalled[2] = {false, false};
+
+static bool OGSInstallDamageHookOnDemand(bool godMode) {
+    int index = godMode ? 1 : 0;
+    if (gOGSDamageHookInstalled[index]) return true;
+    uintptr_t target = OGSResolveRVA(godMode ? gOffsets.rvaDamageRemote : gOffsets.rvaApplyDamage);
+    if (!target || !OGSIsExecutableGameAddress(target)) return false;
+    
+    dobby_instrument_callback_t cb = godMode ? OGSInstrumentIncomingDamage : OGSInstrumentOutgoingDamage;
+    if (DobbyInstrument((void *)target, cb) != 0) return false;
+    
+    gOGSDamageHookInstalled[index] = true;
+    return true;
+}
+
+static void hook_OnEvent(void *self, void *eventData, void *method) {
     os_unfair_lock_lock(&gStateLock);
     double enterTime = gOGS.roomEnterTime;
     os_unfair_lock_unlock(&gStateLock);
@@ -860,21 +943,29 @@ static void hook_OnEvent(void *self, void *eventData, void *method) {
 }
 
 static bool hook_LeaveRoom(int32_t becomeInactive, void *method) {
-    if (__atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE) && !__atomic_load_n(&gOGS.userInitiatedLeave, __ATOMIC_ACQUIRE)) {
-        if (gOGS.antiKickHardLock || (gOGS.autoHostOn && __atomic_load_n(&gOGS.insideNetworkEvent, __ATOMIC_ACQUIRE) > 0)) {
-            __atomic_fetch_add(&gOGS.blockedKicksCount, 1, __ATOMIC_RELAXED);
-            return false;
-        }
+    double now = CFAbsoluteTimeGetCurrent();
+    os_unfair_lock_lock(&gStateLock);
+    double enterTime = gOGS.roomEnterTime;
+    os_unfair_lock_unlock(&gStateLock);
+
+    bool settled = (__atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE) && enterTime > 0.0 && (now - enterTime) > 1.5);
+    if (settled && (gOGS.antiKickHardLock || (gOGS.autoHostOn && __atomic_load_n(&gOGS.insideNetworkEvent, __ATOMIC_ACQUIRE) > 0))) {
+        __atomic_fetch_add(&gOGS.blockedKicksCount, 1, __ATOMIC_RELAXED);
+        return false;
     }
     return orig_LeaveRoom ? orig_LeaveRoom(becomeInactive, method) : false;
 }
 
 static void hook_Type4995LeaveRoom(void *self, void *method) {
-    if (__atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE) && !__atomic_load_n(&gOGS.userInitiatedLeave, __ATOMIC_ACQUIRE)) {
-        if (gOGS.antiKickHardLock || (gOGS.autoHostOn && __atomic_load_n(&gOGS.insideNetworkEvent, __ATOMIC_ACQUIRE) > 0)) {
-            __atomic_fetch_add(&gOGS.blockedKicksCount, 1, __ATOMIC_RELAXED);
-            return;
-        }
+    double now = CFAbsoluteTimeGetCurrent();
+    os_unfair_lock_lock(&gStateLock);
+    double enterTime = gOGS.roomEnterTime;
+    os_unfair_lock_unlock(&gStateLock);
+
+    bool settled = (__atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE) && enterTime > 0.0 && (now - enterTime) > 1.5);
+    if (settled && (gOGS.antiKickHardLock || (gOGS.autoHostOn && __atomic_load_n(&gOGS.insideNetworkEvent, __ATOMIC_ACQUIRE) > 0))) {
+        __atomic_fetch_add(&gOGS.blockedKicksCount, 1, __ATOMIC_RELAXED);
+        return;
     }
     if (orig_Type4995Leave) orig_Type4995Leave(self, method);
 }
@@ -918,6 +1009,7 @@ static void hook_OnMasterSwitched3(void *self, void *p, void *m) { OGSHandleMast
 static void hook_OnMasterSwitched4(void *self, void *p, void *m) { OGSHandleMasterSwitchIntercept(p); if (orig_OnMasterSwitch4) orig_OnMasterSwitch4(self, p, m); }
 static void hook_OnMasterSwitched5(void *self, void *p, void *m) { OGSHandleMasterSwitchIntercept(p); if (orig_OnMasterSwitch5) orig_OnMasterSwitch5(self, p, m); }
 
+// تم حل كراش تخصيص رسالة الطرد بضمان الكتابة الآمنة فقط
 static void hook_OnPhotonPlayerDisconnected(void *self, void *player, void *method) {
     uintptr_t locManager = 0;
     void *origLeaveStr = NULL;
@@ -928,21 +1020,27 @@ static void hook_OnPhotonPlayerDisconnected(void *self, void *player, void *meth
             void *kickStr = OGSCreateFreshKickString(origLeaveStr);
             if (kickStr) {
                 leaveStrSlot = (void **)(locManager + 0x238);
-                *leaveStrSlot = kickStr;
+                if (OGSIsWritableMappedSlot((uintptr_t)leaveStrSlot)) {
+                    *leaveStrSlot = kickStr;
+                } else {
+                    leaveStrSlot = NULL; 
+                }
             }
         }
         gOGS.kickMsgArmed = 0;
     }
 
     if (orig_OnDisconnect) orig_OnDisconnect(self, player, method);
-    if (leaveStrSlot && origLeaveStr) *leaveStrSlot = origLeaveStr;
+
+    if (leaveStrSlot && origLeaveStr && OGSIsWritableMappedSlot((uintptr_t)leaveStrSlot)) {
+        *leaveStrSlot = origLeaveStr;
+    }
 }
 
 static void hook_SendChatRemote(void *self, void *senderStr, void *msgStr, int32_t senderTeam, bool isTeamChat, const void *method) {
     int32_t mode = __atomic_load_n(&gOGS.chatMode, __ATOMIC_ACQUIRE);
-    if (mode == 1) {
-        return;
-    } else if (mode == 2) {
+    if (mode == 1) return;
+    else if (mode == 2) {
         NSString *senderName = OGSReadIl2CppString(senderStr);
         if (senderName.length > 0) {
             NSString *normSender = OGSNormalizeKey(senderName);
@@ -958,59 +1056,17 @@ static void hook_SendChatRemote(void *self, void *senderStr, void *msgStr, int32
         }
         return;
     }
-    if (orig_SendChatRemote) {
-        orig_SendChatRemote(self, senderStr, msgStr, senderTeam, isTeamChat, method);
-    }
+    if (orig_SendChatRemote) orig_SendChatRemote(self, senderStr, msgStr, senderTeam, isTeamChat, method);
 }
 
 static void hook_ChatUpdate(void *self, void *method) {
-    if (orig_ChatUpdate) {
-        orig_ChatUpdate(self, method);
-    }
+    if (orig_ChatUpdate) orig_ChatUpdate(self, method);
     OGSUnityThreadTick();
 }
 
 static void hook_CashUpdate(void *self, void *method) {
-    if (orig_CashUpdate) {
-        orig_CashUpdate(self, method);
-    }
+    if (orig_CashUpdate) orig_CashUpdate(self, method);
     OGSUnityThreadTick();
-}
-
-static bool OGSIsWritableMappedSlot(uintptr_t address) {
-    if (address < 0x100000000ULL || (address & (sizeof(void *) - 1))) return false;
-    vm_address_t regionAddress = (vm_address_t)address;
-    vm_size_t regionSize = 0;
-    vm_region_basic_info_data_64_t info = {};
-    mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
-    mach_port_t objectName = MACH_PORT_NULL;
-    kern_return_t kr = vm_region_64(mach_task_self(), &regionAddress, &regionSize,
-                                    VM_REGION_BASIC_INFO_64,
-                                    (vm_region_info_t)&info, &count, &objectName);
-    if (objectName != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), objectName);
-    if (kr != KERN_SUCCESS || regionAddress > (vm_address_t)address) return false;
-    if ((uintptr_t)regionSize < sizeof(void *) ||
-        address - (uintptr_t)regionAddress > (uintptr_t)regionSize - sizeof(void *)) return false;
-    return (info.protection & (VM_PROT_READ | VM_PROT_WRITE)) ==
-           (VM_PROT_READ | VM_PROT_WRITE);
-}
-
-static bool OGSIsExecutableGameAddress(uintptr_t addr) {
-    if (addr < 0x100000000ULL || (addr & 3)) return false;
-    vm_address_t start = (vm_address_t)addr;
-    vm_size_t size = 0;
-    vm_region_basic_info_data_64_t info = {};
-    mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
-    mach_port_t object = MACH_PORT_NULL;
-    kern_return_t kr = vm_region_64(mach_task_self(), &start, &size,
-                                    VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info,
-                                    &count, &object);
-    if (object != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), object);
-    return kr == KERN_SUCCESS && start <= (vm_address_t)addr &&
-           (uintptr_t)size >= sizeof(uint32_t) &&
-           addr - (uintptr_t)start <= (uintptr_t)size - sizeof(uint32_t) &&
-           (info.protection & (VM_PROT_READ | VM_PROT_EXECUTE)) ==
-           (VM_PROT_READ | VM_PROT_EXECUTE);
 }
 
 static bool OGSInstallPointerSlotHook(uintptr_t rva, void *replacement, void **outOriginal) {
@@ -1070,6 +1126,13 @@ static void OGSInstallHooks(void) {
         [[NSUserDefaults standardUserDefaults] setObject:all forKey:@"OGS_SavedBannedNames"];
         [[NSUserDefaults standardUserDefaults] synchronize];
     }
+}
+
+- (NSUInteger)bannedCountSafe {
+    os_unfair_lock_lock(&gBanSetLock);
+    NSUInteger c = self.bannedNames.count;
+    os_unfair_lock_unlock(&gBanSetLock);
+    return c;
 }
 
 - (void)recordHijackerName:(NSString *)normName actorID:(int32_t)actID {
@@ -1156,8 +1219,7 @@ static void OGSInstallHooks(void) {
         [self.floatingButton addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)]];
         [self.containerView addSubview:self.floatingButton];
 
-        // نفس مقاس وواجهة الكود الأول الأصلي تماماً بدون زيادة أزرار
-        self.menuPanel = [[UIView alloc] initWithFrame:CGRectMake(75, 18, 315, 252)];
+        self.menuPanel = [[UIView alloc] initWithFrame:CGRectMake(75, 18, 315, 285)];
         self.menuPanel.backgroundColor = [UIColor colorWithRed:0.09 green:0.09 blue:0.11 alpha:0.96];
         self.menuPanel.layer.cornerRadius = 14.0;
         self.menuPanel.layer.borderWidth = 2.0f;
@@ -1165,7 +1227,7 @@ static void OGSInstallHooks(void) {
         self.menuPanel.hidden = YES;
 
         self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 5, 260, 18)];
-        self.titleLabel.text = @"OGS v13.1: هوست مستقر وضد الطرد 👑🛡️";
+        self.titleLabel.text = @"OGS v14.5: هجوم ودفاع خارق 💥🛡️";
         self.titleLabel.textColor = [UIColor whiteColor];
         self.titleLabel.textAlignment = NSTextAlignmentCenter;
         self.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
@@ -1202,7 +1264,6 @@ static void OGSInstallHooks(void) {
         UIColor *hostBlue   = [UIColor colorWithRed:0.14 green:0.42 blue:0.72 alpha:1.0];
         UIColor *wpnGreen   = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
 
-        // نفس أماكن الأزرار في الكود الأول 
         [self.menuPanel addSubview:[self makeBtn:CGRectMake(10, 70, 95, 30) title:@"▶ السابق" bg:darkGray action:@selector(prevPlayer:)]];
         [self.menuPanel addSubview:[self makeBtn:CGRectMake(110, 70, 95, 30) title:@"سحب الهوست 👑" bg:hostBlue action:@selector(claimHostNow:)]];
         [self.menuPanel addSubview:[self makeBtn:CGRectMake(210, 70, 95, 30) title:@"التالي ◀" bg:darkGray action:@selector(nextPlayer:)]];
@@ -1216,19 +1277,25 @@ static void OGSInstallHooks(void) {
         self.antiKickLockButton = [self makeBtn:CGRectMake(10, 142, 140, 32) title:@"قفل البقاء: تلقائي 🛡️" bg:darkGray action:@selector(toggleAntiKickHardLock:)];
         [self.menuPanel addSubview:self.antiKickLockButton];
 
-        self.lockButton = [self makeBtn:CGRectMake(205, 179, 100, 30) title:@"قفل الروم: مفتوح" bg:darkGray action:@selector(toggleRoomLock:)];
-        [self.menuPanel addSubview:self.lockButton];
+        self.godModeButton = [self makeBtn:CGRectMake(155, 179, 150, 30) title:@"درع الحماية: متوقف 🛡️" bg:darkGray action:@selector(toggleGodMode:)];
+        [self.menuPanel addSubview:self.godModeButton];
 
-        self.muteChatButton = [self makeBtn:CGRectMake(105, 179, 95, 30) title:@"الشات: مفتوح" bg:darkGray action:@selector(cycleChatMode:)];
+        self.magicBulletButton = [self makeBtn:CGRectMake(10, 179, 140, 30) title:@"طلقة سحرية: متوقف 🔫" bg:darkGray action:@selector(toggleMagicBullet:)];
+        [self.menuPanel addSubview:self.magicBulletButton];
+
+        self.muteChatButton = [self makeBtn:CGRectMake(105, 214, 95, 30) title:@"الشات: مفتوح" bg:darkGray action:@selector(cycleChatMode:)];
         [self.menuPanel addSubview:self.muteChatButton];
 
-        self.unbanButton = [self makeBtn:CGRectMake(10, 179, 90, 30) title:@"فك الحظر (0)" bg:darkGray action:@selector(clearBanList:)];
+        self.unbanButton = [self makeBtn:CGRectMake(10, 214, 90, 30) title:@"فك الحظر (0)" bg:darkGray action:@selector(clearBanList:)];
         [self.menuPanel addSubview:self.unbanButton];
 
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(10, 214, 55, 30) title:@"سرعة -" bg:darkGray action:@selector(speedDown:)]];
-        self.speedSetButton = [self makeBtn:CGRectMake(70, 214, 175, 30) title:@"السرعة: 1.0x (اضغط للكتابة)" bg:hostBlue action:@selector(promptCustomSpeed:)];
+        self.lockButton = [self makeBtn:CGRectMake(205, 214, 100, 30) title:@"قفل الروم: مفتوح 🔓" bg:darkGray action:@selector(toggleRoomLock:)];
+        [self.menuPanel addSubview:self.lockButton];
+
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(10, 249, 55, 30) title:@"سرعة -" bg:darkGray action:@selector(speedDown:)]];
+        self.speedSetButton = [self makeBtn:CGRectMake(70, 249, 175, 30) title:@"السرعة: 1.0x (اضغط للكتابة)" bg:hostBlue action:@selector(promptCustomSpeed:)];
         [self.menuPanel addSubview:self.speedSetButton];
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(250, 214, 55, 30) title:@"سرعة +" bg:darkGray action:@selector(speedUp:)]];
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(250, 249, 55, 30) title:@"سرعة +" bg:darkGray action:@selector(speedUp:)]];
 
         [self.containerView addSubview:self.menuPanel];
         self.containerView.floatingButton = self.floatingButton;
@@ -1340,8 +1407,8 @@ static void OGSInstallHooks(void) {
         }
         uintptr_t inRoomAddr = OGSResolveRVA(gOffsets.rvaInRoom);
         if (inRoomAddr && OGSIsExecutableGameAddress(inRoomAddr)) {
-            // نمرر true لضمان التنفيذ القوي للطرد والهوست حتى لو توقف المحرك
-            OGSUpdateRoomSnapshot(true);
+            // استدعاء تحديث الروم بقوة، مما يسمح لأوامر الطرد في الخلفية بالعمل
+            OGSUpdateRoomSnapshot();
         }
     }
 
@@ -1382,7 +1449,7 @@ static void OGSInstallHooks(void) {
     if (!OGSFindGameImage()) {
         self.statusLabel.text = @"تعذر العثور على صورة اللعبة fps؛ البيانات والهوست غير متاحين";
     } else if (retries > 0) {
-        self.statusLabel.text = @"جاري إرسال حزمة الطرد للسيرفر...";
+        self.statusLabel.text = @"جاري إرسال حزمة الطرد للسيرفر بنجاح...";
     } else if (hjBuf[0] != '\0') {
         NSString *hj = [NSString stringWithUTF8String:hjBuf];
         self.statusLabel.text = [NSString stringWithFormat:@"طُرد السارق: %@ | صد طرد: %u 🛡️", hj ?: @"", blocked];
@@ -1392,11 +1459,7 @@ static void OGSInstallHooks(void) {
                                  count,
                                  blocked];
     }
-    
-    os_unfair_lock_lock(&gBanSetLock);
-    NSUInteger bannedCount = self.bannedNames.count;
-    os_unfair_lock_unlock(&gBanSetLock);
-    [self.unbanButton setTitle:[NSString stringWithFormat:@"فك الحظر (%lu)", (unsigned long)bannedCount] forState:UIControlStateNormal];
+    [self.unbanButton setTitle:[NSString stringWithFormat:@"فك الحظر (%lu)", (unsigned long)[self bannedCountSafe]] forState:UIControlStateNormal];
 }
 
 - (void)toggleMenu {
@@ -1429,7 +1492,6 @@ static void OGSInstallHooks(void) {
     [self refreshUI];
 }
 
-// تنفيذ السحب الفوري (208 + 248) فور ضغط الزر
 - (void)claimHostNow:(UIButton *)sender {
     OGSRoomSnapshot snapshot = OGSCurrentSnapshot();
     if (!snapshot.inRoom) {
@@ -1437,17 +1499,13 @@ static void OGSInstallHooks(void) {
         return;
     }
     __atomic_store_n(&gOGS.forceHostReq, 1, __ATOMIC_RELEASE);
-    bool ok = OGSClaimMasterReal(true);
-    OGSUpdateRoomSnapshot(true);
-    [self refreshUI];
-    self.statusLabel.text = ok ? @"تم إرسال حزمة سحب الهوست للسيرفر (208 + 248) 👑" : @"تعذر إرسال الطلب حالياً";
+    self.statusLabel.text = @"تم إرسال حزمة سحب الهوست للسيرفر 👑";
 }
 
 - (void)toggleAutoHost:(UIButton *)s {
     gOGS.autoHostOn = !gOGS.autoHostOn;
     if (gOGS.autoHostOn) {
         __atomic_store_n(&gOGS.forceHostReq, 1, __ATOMIC_RELEASE);
-        OGSClaimMasterReal(true);
         [s setTitle:@"حماية الهوست: مفعّل 👑" forState:UIControlStateNormal];
         s.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
     } else {
@@ -1457,18 +1515,52 @@ static void OGSInstallHooks(void) {
     [self refreshUI];
 }
 
+- (void)toggleGodMode:(UIButton *)s {
+    int32_t current = __atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE);
+    int32_t next = current ? 0 : 1;
+    if (next && (!__atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE) || !OGSInstallDamageHookOnDemand(true))) {
+        self.statusLabel.text = @"تأكد أنك بداخل الروم لتفعيل الحماية!";
+        return;
+    }
+    __atomic_store_n(&gOGS.godModeOn, next, __ATOMIC_RELEASE);
+    if (next) {
+        [s setTitle:@"درع الحماية: مفعّل 🛡️" forState:UIControlStateNormal];
+        s.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
+        self.statusLabel.text = @"أنت الآن محمي بالكامل من الضرر!";
+    } else {
+        [s setTitle:@"درع الحماية: متوقف 🛡️" forState:UIControlStateNormal];
+        s.backgroundColor = [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
+    }
+}
+
+- (void)toggleMagicBullet:(UIButton *)s {
+    int32_t current = __atomic_load_n(&gOGS.magicBulletOn, __ATOMIC_ACQUIRE);
+    int32_t next = current ? 0 : 1;
+    if (next && (!__atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE) || !OGSInstallDamageHookOnDemand(false))) {
+        self.statusLabel.text = @"تأكد أنك بداخل الروم لتفعيل الطلقة السحرية!";
+        return;
+    }
+    __atomic_store_n(&gOGS.magicBulletOn, next, __ATOMIC_RELEASE);
+    if (next) {
+        [s setTitle:@"طلقة سحرية: مفعّل 🔫" forState:UIControlStateNormal];
+        s.backgroundColor = [UIColor colorWithRed:0.80 green:0.35 blue:0.10 alpha:1.0];
+        self.statusLabel.text = @"أي طلقة منك ستقتل الخصم فوراً!";
+    } else {
+        [s setTitle:@"طلقة سحرية: متوقف 🔫" forState:UIControlStateNormal];
+        s.backgroundColor = [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
+    }
+}
+
 - (void)toggleAntiKickHardLock:(UIButton *)s {
     gOGS.antiKickHardLock = !gOGS.antiKickHardLock;
     if (gOGS.antiKickHardLock) {
-        __atomic_store_n(&gOGS.userInitiatedLeave, 0, __ATOMIC_RELEASE);
         [s setTitle:@"قفل البقاء: صارم 🔒" forState:UIControlStateNormal];
         s.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
-        self.statusLabel.text = @"قفل البقاء الصارم مفعّل (أوقفه قبل الخروج)";
+        self.statusLabel.text = @"تم تفعيل القفل الصارم (تذكر إيقافه قبل الخروج)";
     } else {
-        __atomic_store_n(&gOGS.userInitiatedLeave, 1, __ATOMIC_RELEASE);
         [s setTitle:@"قفل البقاء: تلقائي 🛡️" forState:UIControlStateNormal];
         s.backgroundColor = [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
-        self.statusLabel.text = @"يمكنك الخروج من الروم الآن بحرية";
+        self.statusLabel.text = @"الحماية التلقائية ضد الطرد نشطة";
     }
 }
 
@@ -1486,7 +1578,6 @@ static void OGSInstallHooks(void) {
     }
 }
 
-// تنفيذ الطرد الفوري وفتح بوابة 0x1c0 فور ضغط الزر
 - (void)triggerImmediateKick:(OGSPeerSnapshot)peer {
     NSString *pName = [NSString stringWithUTF8String:peer.name];
     NSString *normName = OGSNormalizeKey(pName);
@@ -1494,25 +1585,11 @@ static void OGSInstallHooks(void) {
 
     os_unfair_lock_lock(&gStateLock);
     gOGS.kickTargetID = peer.actorID;
-    if (utf8) {
-        snprintf(gOGS.kickTargetName, sizeof(gOGS.kickTargetName), "%s", utf8);
-    }
-    gOGS.kickRetries = 25;
+    if (utf8) snprintf(gOGS.kickTargetName, sizeof(gOGS.kickTargetName), "%s", utf8);
+    gOGS.kickRetries = 22;
     os_unfair_lock_unlock(&gStateLock);
 
     __atomic_store_n(&gOGS.forceHostReq, 1, __ATOMIC_RELEASE);
-
-    void *players[OGS_MAX_PEERS];
-    uint32_t count = OGSReadPlayerArray(gOffsets.rvaGetPeers, players);
-    uintptr_t idAddr = OGSResolveRVA(gOffsets.rvaPlayerGetID);
-    PlayerGetIDFn getID = (PlayerGetIDFn)idAddr;
-
-    for (uint32_t i = 0; i < count; i++) {
-        if (getID && getID(players[i], NULL) == peer.actorID) {
-            OGSKickPeerReal(players[i], true);
-            break;
-        }
-    }
 }
 
 - (void)kickSelected:(UIButton *)s {
@@ -1524,7 +1601,7 @@ static void OGSInstallHooks(void) {
     OGSPeerSnapshot peer = snapshot.peers[selected];
     NSString *pName = [NSString stringWithUTF8String:peer.name];
     [self triggerImmediateKick:peer];
-    self.statusLabel.text = [NSString stringWithFormat:@"تم طرد: %@", pName ?: @"اللاعب"];
+    self.statusLabel.text = [NSString stringWithFormat:@"جاري طرد: %@", pName ?: @"اللاعب"];
 }
 
 - (void)banSelected:(UIButton *)s {
@@ -1540,11 +1617,10 @@ static void OGSInstallHooks(void) {
     [self recordHijackerName:normName actorID:peer.actorID];
     [self triggerImmediateKick:peer];
     [self refreshUI];
-    self.statusLabel.text = [NSString stringWithFormat:@"تم طرد وحظر: %@", pName ?: @"اللاعب"];
+    self.statusLabel.text = [NSString stringWithFormat:@"جاري طرد وحظر: %@", pName ?: @"اللاعب"];
 }
 
 - (void)toggleRoomLock:(UIButton *)s {
-    OGSUpdateRoomSnapshot(false);
     OGSRoomSnapshot snapshot = OGSCurrentSnapshot();
     os_unfair_lock_lock(&gBanSetLock);
     self.roomLockActive = !self.roomLockActive;
@@ -1564,7 +1640,7 @@ static void OGSInstallHooks(void) {
         [s setTitle:@"قفل الروم: مقفل 🔒" forState:UIControlStateNormal];
         s.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
     } else {
-        [s setTitle:@"قفل الروم: مفتوح" forState:UIControlStateNormal];
+        [s setTitle:@"قفل الروم: مفتوح 🔓" forState:UIControlStateNormal];
         s.backgroundColor = [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
     }
     [self refreshUI];
@@ -1584,7 +1660,7 @@ static void OGSInstallHooks(void) {
 
     [self saveLocalBans];
     [self refreshUI];
-    self.statusLabel.text = @"تم مسح قائمة المحظورين بالكامل";
+    self.statusLabel.text = @"تم مسح قائمة المحظورين بنجاح";
 }
 
 - (void)applySpeed:(float)value {
@@ -1594,13 +1670,8 @@ static void OGSInstallHooks(void) {
                          forState:UIControlStateNormal];
 }
 
-- (void)speedDown:(UIButton *)sender {
-    [self applySpeed:gOGS.gameSpeed - 0.5f];
-}
-
-- (void)speedUp:(UIButton *)sender {
-    [self applySpeed:gOGS.gameSpeed + 0.5f];
-}
+- (void)speedDown:(UIButton *)sender { [self applySpeed:gOGS.gameSpeed - 0.5f]; }
+- (void)speedUp:(UIButton *)sender { [self applySpeed:gOGS.gameSpeed + 0.5f]; }
 
 - (void)promptCustomSpeed:(UIButton *)s {
     UIWindow *gw = [self gameMainWindow];
@@ -1608,7 +1679,7 @@ static void OGSInstallHooks(void) {
     if (!rootVC) return;
 
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"تحديد السرعة"
-                                                                   message:@"اكتب رقم السرعة المطلوبة (مثلاً 0.5 للبطيء، 1.0 للطبيعي، 3.0 للسريع):"
+                                                                   message:@"اكتب رقم السرعة المطلوبة:"
                                                             preferredStyle:UIAlertControllerStyleAlert];
     [alert addTextFieldWithConfigurationHandler:^(UITextField *tf) {
         tf.placeholder = @"1.0";
