@@ -553,7 +553,8 @@ static void *OGSGetNetworkingPeerSafe(void) {
 
 static bool OGSClaimMasterReal(bool bypassCooldown) {
     uintptr_t inRoomAddr = OGSResolveRVA(gOffsets.rvaInRoom);
-    if (!inRoomAddr || !((Bool0Fn)inRoomAddr)(NULL)) return false;
+    if (!inRoomAddr || !OGSIsExecutableGameAddress(inRoomAddr) ||
+        !((Bool0Fn)inRoomAddr)(NULL)) return false;
 
     double now = CFAbsoluteTimeGetCurrent();
     if (!bypassCooldown && (now - gOGS.lastMasterClaimTime) < 0.35) return false;
@@ -562,45 +563,31 @@ static bool OGSClaimMasterReal(bool bypassCooldown) {
     void *myPlayer = NULL;
     int32_t myID = OGSGetLocalPlayerID(&myPlayer);
     if (!myPlayer || myID <= 0) return false;
-
     gOGS.lastMasterClaimTime = now;
 
-    void *netPeer = OGSGetNetworkingPeerSafe();
-    uintptr_t getMMasterAddr = OGSResolveRVA(gOffsets.rvaNetPeerGetMMasterId);
-    uintptr_t setMMasterAddr = OGSResolveRVA(gOffsets.rvaNetPeerSetMMasterId);
-    int32_t savedMaster = 0;
-    bool tempZeroed = false;
-
-    if (netPeer && getMMasterAddr && setMMasterAddr) {
-        savedMaster = ((GetMasterIdFn)getMMasterAddr)(netPeer, NULL);
-        if (savedMaster == myID) {
-            ((SetMasterIdFn)setMMasterAddr)(netPeer, 0, NULL);
-            tempZeroed = true;
-        }
-    }
-
+    // IMPORTANT: 0x13AB2AC is an instruction *inside* 0x13AB2A4,
+    // not a function entry. Calling it corrupts ARM64 stack framing.
+    // Keep the existing game/Photon SetMasterClient request paths but
+    // NEVER invoke the misidentified direct-memory setter.
     bool sent = false;
     uintptr_t slotAddr = OGSResolveRVA(gOffsets.tblSetMaster);
-    void *fnPtr = NULL;
-    if (OGSReadPointer(slotAddr, &fnPtr) && fnPtr) {
-        sent = ((PeerAction1Fn)fnPtr)(myPlayer, NULL);
+    void *setMasterFn = NULL;
+    if (slotAddr && OGSReadPointer(slotAddr, &setMasterFn) &&
+        OGSIsExecutableGameAddress((uintptr_t)setMasterFn)) {
+        sent = ((PeerAction1Fn)setMasterFn)(myPlayer, NULL);
     }
 
+    void *netPeer = OGSGetNetworkingPeerSafe();
     if (netPeer) {
         void *currentRoom = NULL;
-        if (OGSReadPointer((uintptr_t)netPeer + 0x158, &currentRoom) && currentRoom) {
+        if (OGSReadPointer((uintptr_t)netPeer + 0x158, &currentRoom)) {
             uintptr_t setPropMasterAddr = OGSResolveRVA(gOffsets.rvaNetPeerSetMasterProp);
-            if (setPropMasterAddr) {
+            if (setPropMasterAddr && OGSIsExecutableGameAddress(setPropMasterAddr)) {
                 ((SetMasterIdFn)setPropMasterAddr)(netPeer, myID, NULL);
                 sent = true;
             }
         }
     }
-
-    if (tempZeroed && !sent && netPeer && setMMasterAddr) {
-        ((SetMasterIdFn)setMMasterAddr)(netPeer, savedMaster, NULL);
-    }
-
     return sent;
 }
 
@@ -619,35 +606,22 @@ static bool OGSKickPeerReal(void *peerObj, bool bypassCooldown) {
     int32_t myID = OGSGetLocalPlayerID(&myPlayer);
     if (!myPlayer || myID <= 0 || peerObj == myPlayer) return false;
 
+    // Never spoof Photon MasterClient state through an invalid in-function
+    // address. If host authority is pending, request it separately; keep
+    // moderation queued until the game reports that we are MasterClient.
     uintptr_t isMasterAddr = OGSResolveRVA(gOffsets.rvaIsMaster);
-    if (isMasterAddr && !((Bool0Fn)isMasterAddr)(NULL)) {
+    if (!isMasterAddr || !OGSIsExecutableGameAddress(isMasterAddr)) return false;
+    if (!((Bool0Fn)isMasterAddr)(NULL)) {
         OGSClaimMasterReal(false);
-    }
-
-    void *netPeer = OGSGetNetworkingPeerSafe();
-    uintptr_t getMasterIdAddr = OGSResolveRVA(gOffsets.rvaNetPeerGetMMasterId);
-    uintptr_t setMasterIdAddr = OGSResolveRVA(gOffsets.rvaNetPeerSetMMasterId);
-
-    int32_t origMasterID = 0;
-    bool patched = false;
-
-    if (netPeer && myID > 0 && getMasterIdAddr && setMasterIdAddr) {
-        origMasterID = ((GetMasterIdFn)getMasterIdAddr)(netPeer, NULL);
-        if (origMasterID != myID) {
-            ((SetMasterIdFn)setMasterIdAddr)(netPeer, myID, NULL);
-            patched = true;
-        }
+        return false;
     }
 
     bool result = false;
     uintptr_t slotAddr = OGSResolveRVA(gOffsets.tblPeerSync);
     void *fnPtr = NULL;
-    if (OGSReadPointer(slotAddr, &fnPtr) && fnPtr) {
+    if (slotAddr && OGSReadPointer(slotAddr, &fnPtr) &&
+        OGSIsExecutableGameAddress((uintptr_t)fnPtr)) {
         result = ((PeerAction1Fn)fnPtr)(peerObj, NULL);
-    }
-
-    if (patched && netPeer && setMasterIdAddr && origMasterID > 0) {
-        ((SetMasterIdFn)setMasterIdAddr)(netPeer, origMasterID, NULL);
     }
 
     return result;
@@ -1154,11 +1128,31 @@ static void OGSHandleMasterSwitchIntercept(void *newMasterPlayer) {
     }
 }
 
-static void hook_OnMasterSwitched1(void *self, void *p, void *m) { OGSHandleMasterSwitchIntercept(p); if (orig_OnMasterSwitch1) orig_OnMasterSwitch1(self, p, m); }
-static void hook_OnMasterSwitched2(void *self, void *p, void *m) { OGSHandleMasterSwitchIntercept(p); if (orig_OnMasterSwitch2) orig_OnMasterSwitch2(self, p, m); }
-static void hook_OnMasterSwitched3(void *self, void *p, void *m) { OGSHandleMasterSwitchIntercept(p); if (orig_OnMasterSwitch3) orig_OnMasterSwitch3(self, p, m); }
-static void hook_OnMasterSwitched4(void *self, void *p, void *m) { OGSHandleMasterSwitchIntercept(p); if (orig_OnMasterSwitch4) orig_OnMasterSwitch4(self, p, m); }
-static void hook_OnMasterSwitched5(void *self, void *p, void *m) { OGSHandleMasterSwitchIntercept(p); if (orig_OnMasterSwitch5) orig_OnMasterSwitch5(self, p, m); }
+static volatile bool gOGSHostRecoveryQueued = false;
+static volatile uint32_t gOGSMasterSwitchEvents = 0;
+// Photon callbacks may run on a receive thread; never call network operations
+// reentrantly while its master-switch event is still being dispatched.
+static void OGSQueueMasterRecoveryAfterCallback(void) {
+    __atomic_fetch_add(&gOGSMasterSwitchEvents, 1u, __ATOMIC_RELAXED);
+    if (!__atomic_load_n(&gOGS.autoHostOn, __ATOMIC_ACQUIRE)) return;
+    __atomic_store_n(&gOGS.forceHostReq, 1, __ATOMIC_RELEASE);
+    if (__atomic_exchange_n(&gOGSHostRecoveryQueued, true, __ATOMIC_ACQ_REL)) return;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(650 * NSEC_PER_MSEC)),
+                   dispatch_get_main_queue(), ^{
+        __atomic_store_n(&gOGSHostRecoveryQueued, false, __ATOMIC_RELEASE);
+        if (!__atomic_load_n(&gOGS.autoHostOn, __ATOMIC_ACQUIRE)) return;
+        uintptr_t inRoomAddr = OGSResolveRVA(gOffsets.rvaInRoom);
+        if (inRoomAddr && OGSIsExecutableGameAddress(inRoomAddr) &&
+            ((Bool0Fn)inRoomAddr)(NULL)) {
+            OGSClaimMasterReal(false);
+        }
+    });
+}
+static void hook_OnMasterSwitched1(void *self, void *p, void *m) { OGSHandleMasterSwitchIntercept(p); if (orig_OnMasterSwitch1) orig_OnMasterSwitch1(self, p, m); OGSQueueMasterRecoveryAfterCallback(); }
+static void hook_OnMasterSwitched2(void *self, void *p, void *m) { OGSHandleMasterSwitchIntercept(p); if (orig_OnMasterSwitch2) orig_OnMasterSwitch2(self, p, m); OGSQueueMasterRecoveryAfterCallback(); }
+static void hook_OnMasterSwitched3(void *self, void *p, void *m) { OGSHandleMasterSwitchIntercept(p); if (orig_OnMasterSwitch3) orig_OnMasterSwitch3(self, p, m); OGSQueueMasterRecoveryAfterCallback(); }
+static void hook_OnMasterSwitched4(void *self, void *p, void *m) { OGSHandleMasterSwitchIntercept(p); if (orig_OnMasterSwitch4) orig_OnMasterSwitch4(self, p, m); OGSQueueMasterRecoveryAfterCallback(); }
+static void hook_OnMasterSwitched5(void *self, void *p, void *m) { OGSHandleMasterSwitchIntercept(p); if (orig_OnMasterSwitch5) orig_OnMasterSwitch5(self, p, m); OGSQueueMasterRecoveryAfterCallback(); }
 
 // تم حل كراش تخصيص رسالة الطرد بضمان الكتابة الآمنة فقط
 static void hook_OnPhotonPlayerDisconnected(void *self, void *player, void *method) {
@@ -1588,7 +1582,7 @@ static void OGSInstallHooks(void) {
          "Engine tick: %@\nGod bridge installed: %@ | armed: %@\n"
          "God calls: %u | local blocks: %u | unverified: %u\n"
          "Magic bridge installed: %@ | calls: %u | mutations: %u\n"
-         "Room state: %@ | MasterClient: %@",
+         "Room state: %@ | MasterClient: %@ | Switch callbacks: %u",
         cashReadable && cashValue == (void *)&hook_CashUpdate ? @"ON" : @"OFF",
         (unsigned long long)__atomic_load_n(&gOGSCashHookCalls, __ATOMIC_RELAXED),
         chatReadable && chatValue == (void *)&hook_ChatUpdate ? @"ON" : @"OFF",
@@ -1602,8 +1596,13 @@ static void OGSInstallHooks(void) {
         gOGSDamageHookInstalled[0] ? @"YES" : @"NO",
         __atomic_load_n(&gMagicCallbacks, __ATOMIC_RELAXED),
         __atomic_load_n(&gMagicMutations, __ATOMIC_RELAXED),
-        __atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE) ? @"IN" : @"OUT",
-        __atomic_load_n(&gOGS.isMaster, __ATOMIC_ACQUIRE) ? @"LOCAL" : @"REMOTE"];
+        lastTick > 0.0 && (now - lastTick) < 0.7 ?
+            (__atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE) ? @"IN" : @"OUT") :
+            @"UNKNOWN (no game tick)",
+        lastTick > 0.0 && (now - lastTick) < 0.7 ?
+            (__atomic_load_n(&gOGS.isMaster, __ATOMIC_ACQUIRE) ? @"LOCAL" : @"REMOTE") :
+            @"UNKNOWN (no game tick)",
+        __atomic_load_n(&gOGSMasterSwitchEvents, __ATOMIC_RELAXED)];
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"OGS Runtime Diagnostics"
         message:report preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"نسخ" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
@@ -1698,13 +1697,20 @@ static void OGSInstallHooks(void) {
 }
 
 - (void)claimHostNow:(UIButton *)sender {
-    OGSRoomSnapshot snapshot = OGSCurrentSnapshot();
-    if (!snapshot.inRoom) {
-        self.statusLabel.text = @"ادخل داخل روم أولاً لسحب الهوست!";
+    (void)sender;
+    // Room snapshots stay stale when Cash/Chat pointer hooks receive no calls.
+    // Check the actual game room getter for a manual user action.
+    uintptr_t inRoomAddr = OGSResolveRVA(gOffsets.rvaInRoom);
+    if (!inRoomAddr || !OGSIsExecutableGameAddress(inRoomAddr) ||
+        !((Bool0Fn)inRoomAddr)(NULL)) {
+        self.statusLabel.text = @"اللعبة لا تؤكد دخول الروم الآن";
         return;
     }
     __atomic_store_n(&gOGS.forceHostReq, 1, __ATOMIC_RELEASE);
-    self.statusLabel.text = @"تم إرسال حزمة سحب الهوست للسيرفر 👑";
+    bool requested = OGSClaimMasterReal(true);
+    self.statusLabel.text = requested ?
+        @"تم تنفيذ طلب سحب الهوست؛ ننتظر تأكيد اللعبة 👑" :
+        @"تعذر تنفيذ الطلب؛ تأكد من اتصال Photon";
 }
 
 - (void)toggleAutoHost:(UIButton *)s {
