@@ -799,14 +799,14 @@ static void OGSUpdateRoomSnapshot(void) {
             // سحب الهوست
             OGSClaimMasterReal(forceReq > 0);
 
-            // الرد بهجوم طرد إجباري على الخصم فوراً
+            // Stage the peer for room moderation, but never kick while the
+            // server reports another MasterClient. Wait for confirmed ownership.
             if (gOGS.autoHostOn && heldStably && masterPlayer && masterPlayer != myPlayer) {
                 OGSPeerSnapshot thiefSnap;
                 if (OGSReadPeer(masterPlayer, masterPlayer, &thiefSnap) && thiefSnap.actorID != myID && thiefSnap.actorID > 0) {
                     NSString *thiefName = [NSString stringWithUTF8String:thiefSnap.name];
                     NSString *normThief = OGSNormalizeKey(thiefName);
                     [menu recordHijackerName:normThief actorID:thiefSnap.actorID];
-                    OGSKickPeerReal(masterPlayer, true);
                 }
             }
         }
@@ -839,7 +839,7 @@ static void OGSUpdateRoomSnapshot(void) {
         NSString *normName = OGSNormalizeKey(pName);
 
         // هنا يتم تنفيذ الطرد الفعلي 
-        if (roomSettled && curRetries > 0) {
+        if (roomSettled && master && curRetries > 0) {
             bool matchID = (curKickID > 0 && peerSnap.actorID == curKickID);
             bool matchName = (curKickName[0] != '\0' && normName.UTF8String && strcmp(normName.UTF8String, curKickName) == 0);
             if (matchID || matchName) {
@@ -848,12 +848,12 @@ static void OGSUpdateRoomSnapshot(void) {
             }
         }
 
-        if (roomSettled && [menu shouldAutoKickPeerWithName:normName actorID:peerSnap.actorID]) {
+        if (roomSettled && master && [menu shouldAutoKickPeerWithName:normName actorID:peerSnap.actorID]) {
             OGSKickPeerReal(players[i], false);
         }
     }
 
-    if (curRetries > 0) {
+    if (roomSettled && master && curRetries > 0) {
         os_unfair_lock_lock(&gStateLock);
         if (!targetStillInRoom) {
             gOGS.kickRetries = 0;
@@ -1210,12 +1210,16 @@ static void hook_SendChatRemote(void *self, void *senderStr, void *msgStr, int32
     if (orig_SendChatRemote) orig_SendChatRemote(self, senderStr, msgStr, senderTeam, isTeamChat, method);
 }
 
+static volatile uint64_t gOGSChatHookCalls = 0;
+static volatile uint64_t gOGSCashHookCalls = 0;
 static void hook_ChatUpdate(void *self, void *method) {
+    __atomic_fetch_add(&gOGSChatHookCalls, 1ULL, __ATOMIC_RELAXED);
     if (orig_ChatUpdate) orig_ChatUpdate(self, method);
     OGSUnityThreadTick();
 }
 
 static void hook_CashUpdate(void *self, void *method) {
+    __atomic_fetch_add(&gOGSCashHookCalls, 1ULL, __ATOMIC_RELAXED);
     if (orig_CashUpdate) orig_CashUpdate(self, method);
     OGSUnityThreadTick();
 }
@@ -1382,6 +1386,8 @@ static void OGSInstallHooks(void) {
         self.titleLabel.textColor = [UIColor whiteColor];
         self.titleLabel.textAlignment = NSTextAlignmentCenter;
         self.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
+        self.titleLabel.userInteractionEnabled = YES;
+        [self.titleLabel addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(showHookDiagnostics:)]];
         [self.menuPanel addSubview:self.titleLabel];
 
         self.syncCloudButton = [self makeBtn:CGRectMake(273, 3, 32, 21)
@@ -1556,15 +1562,58 @@ static void OGSInstallHooks(void) {
             s_lastHookRetry = now;
             OGSInstallHooks();
         }
-        uintptr_t inRoomAddr = OGSResolveRVA(gOffsets.rvaInRoom);
-        if (inRoomAddr && OGSIsExecutableGameAddress(inRoomAddr)) {
-            // استدعاء تحديث الروم بقوة، مما يسمح لأوامر الطرد في الخلفية بالعمل
-            OGSUpdateRoomSnapshot();
-        }
+        // Never invoke Photon/IL2CPP network operations from a UIKit timer.
+        // Retry installing pointer-slot hooks above; authoritative room updates
+        // and network actions must occur on the game's own hooked update path.
     }
 
     if (!self.menuPanel || self.menuPanel.hidden) return;
     [self refreshUI];
+}
+
+- (void)showHookDiagnostics:(UITapGestureRecognizer *)gesture {
+    (void)gesture;
+    uintptr_t cashSlot = OGSResolveRVA(gOffsets.tblCashUpdate);
+    uintptr_t chatSlot = OGSResolveRVA(gOffsets.tblChatUpdate);
+    void *cashValue = NULL, *chatValue = NULL;
+    bool cashReadable = cashSlot && OGSReadPointer(cashSlot, &cashValue);
+    bool chatReadable = chatSlot && OGSReadPointer(chatSlot, &chatValue);
+    double now = CFAbsoluteTimeGetCurrent();
+    double lastTick = 0.0;
+    os_unfair_lock_lock(&gStateLock);
+    lastTick = gOGS.lastUnityFrameTick;
+    os_unfair_lock_unlock(&gStateLock);
+    NSString *report = [NSString stringWithFormat:
+        @"Cash Hook: %@ | calls: %llu\nChat Hook: %@ | calls: %llu\n"
+         "Engine tick: %@\nGod bridge installed: %@ | armed: %@\n"
+         "God calls: %u | local blocks: %u | unverified: %u\n"
+         "Magic bridge installed: %@ | calls: %u | mutations: %u\n"
+         "Room state: %@ | MasterClient: %@",
+        cashReadable && cashValue == (void *)&hook_CashUpdate ? @"ON" : @"OFF",
+        (unsigned long long)__atomic_load_n(&gOGSCashHookCalls, __ATOMIC_RELAXED),
+        chatReadable && chatValue == (void *)&hook_ChatUpdate ? @"ON" : @"OFF",
+        (unsigned long long)__atomic_load_n(&gOGSChatHookCalls, __ATOMIC_RELAXED),
+        lastTick > 0.0 && (now - lastTick) < 0.7 ? @"ACTIVE" : @"STOPPED",
+        gOGSDamageHookInstalled[1] ? @"YES" : @"NO",
+        __atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE) ? @"YES" : @"NO",
+        __atomic_load_n(&gGodCallbacks, __ATOMIC_RELAXED),
+        __atomic_load_n(&gGodLocalBypasses, __ATOMIC_RELAXED),
+        __atomic_load_n(&gGodUnverifiedPasses, __ATOMIC_RELAXED),
+        gOGSDamageHookInstalled[0] ? @"YES" : @"NO",
+        __atomic_load_n(&gMagicCallbacks, __ATOMIC_RELAXED),
+        __atomic_load_n(&gMagicMutations, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE) ? @"IN" : @"OUT",
+        __atomic_load_n(&gOGS.isMaster, __ATOMIC_ACQUIRE) ? @"LOCAL" : @"REMOTE"];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"OGS Runtime Diagnostics"
+        message:report preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"نسخ" style:UIAlertActionStyleDefault handler:^(UIAlertAction *a) {
+        (void)a;
+        [UIPasteboard generalPasteboard].string = report;
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"إغلاق" style:UIAlertActionStyleCancel handler:nil]];
+    UIViewController *root = [self gameMainWindow].rootViewController;
+    if (root && !root.presentedViewController)
+        [root presentViewController:alert animated:YES completion:nil];
 }
 
 - (void)refreshUI {
@@ -1599,6 +1648,11 @@ static void OGSInstallHooks(void) {
 
     if (!OGSFindGameImage()) {
         self.statusLabel.text = @"تعذر العثور على صورة اللعبة fps؛ البيانات والهوست غير متاحين";
+    } else if (__atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE)) {
+        self.statusLabel.text = [NSString stringWithFormat:@"الدرع مسلّح | ورود %u | منع محلي %u | مجهول %u",
+            __atomic_load_n(&gGodCallbacks, __ATOMIC_RELAXED),
+            __atomic_load_n(&gGodLocalBypasses, __ATOMIC_RELAXED),
+            __atomic_load_n(&gGodUnverifiedPasses, __ATOMIC_RELAXED)];
     } else if (retries > 0) {
         self.statusLabel.text = @"جاري إرسال حزمة الطرد للسيرفر بنجاح...";
     } else if (hjBuf[0] != '\0') {
@@ -1680,7 +1734,7 @@ static void OGSInstallHooks(void) {
     if (next) {
         [s setTitle:@"درع الحماية: مفعّل 🛡️" forState:UIControlStateNormal];
         s.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
-        self.statusLabel.text = @"أنت الآن محمي بالكامل من الضرر!";
+        self.statusLabel.text = @"الدرع مسلّح؛ تحقق من عداد منع الضرر عند تلقي إصابة";
     } else {
         [s setTitle:@"درع الحماية: متوقف 🛡️" forState:UIControlStateNormal];
         s.backgroundColor = [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
@@ -1822,6 +1876,18 @@ static void OGSInstallHooks(void) {
     float actual = gOGS.gameSpeed;
     [self.speedSetButton setTitle:[NSString stringWithFormat:@"السرعة: %.1fx (اضغط للكتابة)", actual]
                          forState:UIControlStateNormal];
+
+    // Unity iOS processes its player loop on the application main thread.
+    // Apply an explicitly requested timescale change here as well, since
+    // Cash/Chat update hooks may not tick in all matches or menus.
+    uintptr_t timeSetter = OGSResolveRVA(gOffsets.rvaSetTimescale);
+    if ([NSThread isMainThread] && timeSetter && OGSIsExecutableGameAddress(timeSetter)) {
+        OGSApplyTimescaleNow(actual);
+        __atomic_store_n(&gOGS.speedDirty, false, __ATOMIC_RELEASE);
+        self.statusLabel.text = [NSString stringWithFormat:@"تم إرسال طلب السرعة %.1fx إلى محرك اللعبة", actual];
+    } else {
+        self.statusLabel.text = @"السرعة محفوظة؛ ننتظر جاهزية محرك اللعبة";
+    }
 }
 
 - (void)speedDown:(UIButton *)sender { [self applySpeed:gOGS.gameSpeed - 0.5f]; }
