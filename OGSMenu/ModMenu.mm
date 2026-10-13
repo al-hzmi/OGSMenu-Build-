@@ -1755,8 +1755,8 @@ static void OGSInstallHooks(void) {
 - (void)toggleAutoHost:(UIButton *)sender {
     int32_t next = !__atomic_load_n(&gOGSHostMonitorOn, __ATOMIC_ACQUIRE);
     __atomic_store_n(&gOGSHostMonitorOn, next, __ATOMIC_RELEASE);
-    __atomic_store_n(&gOGS.autoHostOn, 0, __ATOMIC_RELEASE);
-    __atomic_store_n(&gOGS.forceHostReq, 0, __ATOMIC_RELEASE);
+    // Monitoring and protection are independent controls. Do not reset
+    // pending requests or protection when toggling the original monitor.
     [sender setTitle:(next ? @"رصد الهوست: مفعّل" : @"رصد الهوست: متوقف") forState:UIControlStateNormal];
     sender.backgroundColor = next ? [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0] :
         [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
