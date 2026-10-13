@@ -142,6 +142,10 @@ typedef void*   (*ArabicFixFn)(void *, void *);
 typedef void*   (*FastAllocateStringFn)(int32_t length, const void *);
 typedef void    (*OnDisconnectFn)(void *, void *, void *);
 
+// fps 3.4.0 damage functions receive managed Int32[3] arrays.
+typedef void (*ApplyDamageFn)(void *, void *, const void *);
+typedef void (*DamageRemoteFn)(void *, void *, int32_t, const void *);
+
 // Unity Engine Signatures
 typedef void*   (*Camera_GetMain_Fn)();
 typedef void*   (*Component_GetTransform_Fn)(void *component, const void *method);
@@ -160,6 +164,9 @@ static OnMasterSwitchFn orig_OnMasterSwitch2 = NULL;
 static OnMasterSwitchFn orig_OnMasterSwitch3 = NULL;
 static OnMasterSwitchFn orig_OnMasterSwitch4 = NULL;
 static OnMasterSwitchFn orig_OnMasterSwitch5 = NULL;
+
+static ApplyDamageFn  orig_ApplyDamage  = NULL;
+static DamageRemoteFn orig_DamageRemote = NULL;
 
 // ============================================================
 // MARK: - Thread-Safe Runtime State & Locks
@@ -883,25 +890,104 @@ static void OGSUnityThreadTick(void) {
 // MARK: - Damage, Network, Chat & Lifecycle Hooks
 // ============================================================
 
-// تم بناء الجسر الهجومي لأضرار اللعبة بواسطة DobbyInstrument 
-// هذه الدالة تعطل أي ضرر موجه للاعب (درع 100%)
-static void OGSInstrumentIncomingDamage(void *address, DobbyRegisterContext *ctx) {
-    if (!ctx || !__atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE)) return;
-    float value = ctx->floating.regs.q0.f.f1;
-    if (isfinite(value) && value > 0.0f && value < 1000.0f) {
-        ctx->floating.regs.q0.f.f1 = 0.0f; // مسح الضرر
-    }
+// Executable trampolines are installed OFFLINE into the unsigned IPA, before
+// the device signs it. Runtime changes only writable callback pointers.
+static bool OGSIsWritableMappedSlot(uintptr_t address);
+static const uintptr_t OGS_MAGIC_STUB = 0x3000;
+static const uintptr_t OGS_GOD_STUB = 0x3040;
+static const uintptr_t OGS_MAGIC_SLOT = 0x2813EF0;
+static const uintptr_t OGS_GOD_SLOT = 0x2813EF8;
+static const uintptr_t OGS_MAGIC_ORIGINAL = 0x3014;
+static const uintptr_t OGS_GOD_ORIGINAL = 0x3054;
+
+// Safe, runtime-only diagnostics for the pre-sign bridge.
+// Counts let us distinguish a working bridge from an unused game call path.
+static volatile uint32_t gMagicCallbacks = 0;
+static volatile uint32_t gMagicArrayReads = 0;
+static volatile uint32_t gMagicMutations = 0;
+static volatile int32_t gMagicLastOriginalDamage = 0;
+static volatile uintptr_t gMagicLastArrayCount = 0;
+static volatile uint32_t gGodCallbacks = 0;
+static volatile uint32_t gGodLocalBypasses = 0;
+static volatile uint32_t gGodOtherPlayerPasses = 0;
+static volatile uint32_t gGodUnverifiedPasses = 0;
+
+// Verified in the original fps 3.4.0 ARM64 executable:
+// PlayerNetwork.GetPhotonView RVA 0x13A9964 (self -> PhotonView),
+// PhotonView.ownerId at +0x20,
+// PhotonNetwork.get_player RVA 0x13CABF0 (PhotonPlayer),
+// PhotonPlayer.ID at +0x10.
+// The old comparison between PlayerNetwork* and PhotonPlayer* can never
+// identify the same object reliably. Check owner actor IDs instead.
+static bool OGSIsDamageToLocalPlayer(void *playerNetwork, bool *verified) {
+    if (verified) *verified = false;
+    if (!playerNetwork || (uintptr_t)playerNetwork < 0x100000000ULL) return false;
+    void *klass = NULL;
+    if (!OGSReadPointer((uintptr_t)playerNetwork, &klass)) return false;
+
+    uintptr_t localGetter = OGSResolveRVA(gOffsets.rvaGetLocalPlayer);
+    uintptr_t viewGetter = OGSResolveRVA(0x13A9964);
+    if (!localGetter || !viewGetter) return false;
+
+    void *localPhotonPlayer = ((Object0Fn)localGetter)(NULL);
+    if (!localPhotonPlayer) return false;
+    int32_t localActorID = 0;
+    if (!OGSReadMemory((uintptr_t)localPhotonPlayer + 0x10, &localActorID, sizeof(localActorID)) ||
+        localActorID <= 0) return false;
+
+    // Use the same cached/getter PhotonView that DamageRemote itself uses.
+    void *photonView = ((void *(*)(void *, const void *))viewGetter)(playerNetwork, NULL);
+    if (!photonView) return false;
+    int32_t ownerActorID = 0;
+    if (!OGSReadMemory((uintptr_t)photonView + 0x20, &ownerActorID, sizeof(ownerActorID)) ||
+        ownerActorID <= 0) return false;
+    if (verified) *verified = true;
+    return localActorID == ownerActorID;
 }
 
-// هذه الدالة ترفع ضرر اللاعب (طلقة سحرية مميتة)
-static void OGSInstrumentOutgoingDamage(void *address, DobbyRegisterContext *ctx) {
-    if (!ctx || !__atomic_load_n(&gOGS.magicBulletOn, __ATOMIC_ACQUIRE)) return;
-    float value = ctx->floating.regs.q0.f.f1;
-    if (isfinite(value) && value > 0.0f && value < 1000.0f) {
-        ctx->floating.regs.q0.f.f1 = 9999.0f; // تدمير
+// RVA 0x137CF70 constructs an Int32[3] with damage at +0x20.
+// DamageRemote calls Abs(int32) on negative incoming damage values.
+static void OGSBridgeOutgoingDamage(void *self, void *values, const void *method) {
+    __atomic_fetch_add(&gMagicCallbacks, 1u, __ATOMIC_RELAXED);
+    if (values && __atomic_load_n(&gOGS.magicBulletOn, __ATOMIC_ACQUIRE)) {
+        uintptr_t a = (uintptr_t)values;
+        uintptr_t n = 0;
+        int32_t damage = 0;
+        bool hasCount = OGSReadMemory(a + 0x18, &n, sizeof(n));
+        if (hasCount) __atomic_store_n(&gMagicLastArrayCount, n, __ATOMIC_RELAXED);
+        if (hasCount && n == 3 &&
+            OGSReadMemory(a + 0x20, &damage, sizeof(damage))) {
+            __atomic_fetch_add(&gMagicArrayReads, 1u, __ATOMIC_RELAXED);
+            __atomic_store_n(&gMagicLastOriginalDamage, damage, __ATOMIC_RELAXED);
+            if (damage < 0 && damage > -10000 &&
+                OGSIsWritableMappedSlot(a + 0x20)) {
+                __atomic_store_n((int32_t *)(a + 0x20), -50000, __ATOMIC_RELEASE);
+                __atomic_fetch_add(&gMagicMutations, 1u, __ATOMIC_RELAXED);
+            }
+        }
     }
+    if (orig_ApplyDamage) orig_ApplyDamage(self, values, method);
 }
 
+static void OGSBridgeIncomingDamage(void *self, void *values, int32_t killerID, const void *method) {
+    __atomic_fetch_add(&gGodCallbacks, 1u, __ATOMIC_RELAXED);
+    if (self && __atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE)) {
+        bool verified = false;
+        bool isLocalOwner = OGSIsDamageToLocalPlayer(self, &verified);
+        if (verified && isLocalOwner) {
+            __atomic_fetch_add(&gGodLocalBypasses, 1u, __ATOMIC_RELAXED);
+            // Do not run local DamageRemote when protection is armed.
+            // Other players and unknown owners continue through normal code.
+            return;
+        }
+        if (verified) __atomic_fetch_add(&gGodOtherPlayerPasses, 1u, __ATOMIC_RELAXED);
+        else __atomic_fetch_add(&gGodUnverifiedPasses, 1u, __ATOMIC_RELAXED);
+    }
+    if (orig_DamageRemote) orig_DamageRemote(self, values, killerID, method);
+}
+
+// PRE-SIGN bridge only. No DobbyHook, DobbyInstrument or vm_protect.
+static bool gOGSDamageHookInstalled[2] = {false, false};
 static bool OGSIsExecutableGameAddress(uintptr_t addr) {
     if (addr < 0x100000000ULL || (addr & 3)) return false;
     vm_address_t start = (vm_address_t)addr;
@@ -919,8 +1005,51 @@ static bool OGSIsExecutableGameAddress(uintptr_t addr) {
            (info.protection & (VM_PROT_READ | VM_PROT_EXECUTE)) ==
            (VM_PROT_READ | VM_PROT_EXECUTE);
 }
+static bool OGSInstallDamageHookOnDemand(bool godMode) {
+    int index = godMode ? 1 : 0;
+    if (gOGSDamageHookInstalled[index]) return true;
+    uintptr_t base = OGSFindGameImage();
+    if (!base) return false;
+    uintptr_t entryRVA = godMode ? gOffsets.rvaDamageRemote : gOffsets.rvaApplyDamage;
+    uintptr_t stubRVA = godMode ? OGS_GOD_STUB : OGS_MAGIC_STUB;
+    uintptr_t slotRVA = godMode ? OGS_GOD_SLOT : OGS_MAGIC_SLOT;
+    uintptr_t originalRVA = godMode ? OGS_GOD_ORIGINAL : OGS_MAGIC_ORIGINAL;
+    uintptr_t entry = base + entryRVA, stub = base + stubRVA;
+    uintptr_t slot = base + slotRVA, trampoline = base + originalRVA;
+    if (!OGSIsExecutableGameAddress(entry) ||
+        !OGSIsExecutableGameAddress(stub) ||
+        !OGSIsWritableMappedSlot(slot)) return false;
+    int64_t distance = (int64_t)stubRVA - (int64_t)entryRVA;
+    if ((distance & 3) || distance <= -(1LL << 27) || distance >= (1LL << 27)) return false;
+    uint32_t expectBranch = 0x14000000u | (uint32_t)((distance / 4) & 0x03ffffffu);
+    uint32_t branch = 0, adrp = 0, ldr = 0, br = 0, prolog = 0;
+    if (!OGSReadMemory(entry, &branch, 4) ||
+        !OGSReadMemory(stub, &adrp, 4) ||
+        !OGSReadMemory(stub + 8, &ldr, 4) ||
+        !OGSReadMemory(stub + 16, &br, 4) ||
+        !OGSReadMemory(trampoline, &prolog, 4) ||
+        branch != expectBranch || adrp != 0x90014090u ||
+        ldr != 0xF9400210u || br != 0xD61F0200u ||
+        prolog != (godMode ? 0xD10183FFu : 0xD10103FFu)) {
+        NSLog(@"[OGS] IPA not prepared with verified fps 3.4.0 bridge (%d)", index);
+        return false;
+    }
+    uintptr_t old = 0;
+    if (!OGSReadMemory(slot, &old, sizeof(old))) return false;
+    uintptr_t callback = godMode ? (uintptr_t)&OGSBridgeIncomingDamage :
+                                    (uintptr_t)&OGSBridgeOutgoingDamage;
+    if (old && old != callback) return false;
+    if (godMode) orig_DamageRemote = (DamageRemoteFn)trampoline;
+    else orig_ApplyDamage = (ApplyDamageFn)trampoline;
+    __atomic_store_n((uintptr_t *)slot, callback, __ATOMIC_RELEASE);
+    gOGSDamageHookInstalled[index] = true;
+    NSLog(@"[OGS] Offline-prepared bridge registered safely: %d", index);
+    return true;
+}
 
-
+// Writes to pointer tables are permitted only if the slot is actually writable
+// and the existing pointer resolves into mapped executable code. Wrong offsets
+// must never be dereferenced or force-written.
 static bool OGSIsWritableMappedSlot(uintptr_t address) {
     if (address < 0x100000000ULL || (address & (sizeof(void *) - 1))) return false;
     vm_address_t regionAddress = (vm_address_t)address;
@@ -937,22 +1066,6 @@ static bool OGSIsWritableMappedSlot(uintptr_t address) {
         address - (uintptr_t)regionAddress > (uintptr_t)regionSize - sizeof(void *)) return false;
     return (info.protection & (VM_PROT_READ | VM_PROT_WRITE)) ==
            (VM_PROT_READ | VM_PROT_WRITE);
-}
-
-
-static bool gOGSDamageHookInstalled[2] = {false, false};
-
-static bool OGSInstallDamageHookOnDemand(bool godMode) {
-    int index = godMode ? 1 : 0;
-    if (gOGSDamageHookInstalled[index]) return true;
-    uintptr_t target = OGSResolveRVA(godMode ? gOffsets.rvaDamageRemote : gOffsets.rvaApplyDamage);
-    if (!target || !OGSIsExecutableGameAddress(target)) return false;
-    
-    dobby_instrument_callback_t cb = godMode ? OGSInstrumentIncomingDamage : OGSInstrumentOutgoingDamage;
-    if (DobbyInstrument((void *)target, cb) != 0) return false;
-    
-    gOGSDamageHookInstalled[index] = true;
-    return true;
 }
 
 static void hook_OnEvent(void *self, void *eventData, void *method) {
@@ -1556,8 +1669,11 @@ static void OGSInstallHooks(void) {
 - (void)toggleGodMode:(UIButton *)s {
     int32_t current = __atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE);
     int32_t next = current ? 0 : 1;
-    if (next && (!__atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE) || !OGSInstallDamageHookOnDemand(true))) {
-        self.statusLabel.text = @"تأكد أنك بداخل الروم لتفعيل الحماية!";
+    // The shield is armed locally, independent of Photon master-client status
+    // and independent of the UI room snapshot. Runtime touches only a
+    // writable callback pointer in the pre-signed fps bridge.
+    if (next && !OGSInstallDamageHookOnDemand(true)) {
+        self.statusLabel.text = @"جسر الدرع غير مهيأ في ملف fps؛ فعّل النسخة المتوافقة";
         return;
     }
     __atomic_store_n(&gOGS.godModeOn, next, __ATOMIC_RELEASE);
