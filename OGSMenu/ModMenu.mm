@@ -902,6 +902,44 @@ static void OGSInstrumentOutgoingDamage(void *address, DobbyRegisterContext *ctx
     }
 }
 
+static bool OGSIsExecutableGameAddress(uintptr_t addr) {
+    if (addr < 0x100000000ULL || (addr & 3)) return false;
+    vm_address_t start = (vm_address_t)addr;
+    vm_size_t size = 0;
+    vm_region_basic_info_data_64_t info = {};
+    mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t object = MACH_PORT_NULL;
+    kern_return_t kr = vm_region_64(mach_task_self(), &start, &size,
+                                    VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info,
+                                    &count, &object);
+    if (object != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), object);
+    return kr == KERN_SUCCESS && start <= (vm_address_t)addr &&
+           (uintptr_t)size >= sizeof(uint32_t) &&
+           addr-(uintptr_t)start <= (uintptr_t)size-sizeof(uint32_t) &&
+           (info.protection & (VM_PROT_READ | VM_PROT_EXECUTE)) ==
+           (VM_PROT_READ | VM_PROT_EXECUTE);
+}
+
+
+static bool OGSIsWritableMappedSlot(uintptr_t address) {
+    if (address < 0x100000000ULL || (address & (sizeof(void *) - 1))) return false;
+    vm_address_t regionAddress = (vm_address_t)address;
+    vm_size_t regionSize = 0;
+    vm_region_basic_info_data_64_t info = {};
+    mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t objectName = MACH_PORT_NULL;
+    kern_return_t kr = vm_region_64(mach_task_self(), &regionAddress, &regionSize,
+                                    VM_REGION_BASIC_INFO_64,
+                                    (vm_region_info_t)&info, &count, &objectName);
+    if (objectName != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), objectName);
+    if (kr != KERN_SUCCESS || regionAddress > (vm_address_t)address) return false;
+    if ((uintptr_t)regionSize < sizeof(void *) ||
+        address - (uintptr_t)regionAddress > (uintptr_t)regionSize - sizeof(void *)) return false;
+    return (info.protection & (VM_PROT_READ | VM_PROT_WRITE)) ==
+           (VM_PROT_READ | VM_PROT_WRITE);
+}
+
+
 static bool gOGSDamageHookInstalled[2] = {false, false};
 
 static bool OGSInstallDamageHookOnDemand(bool godMode) {
