@@ -483,6 +483,9 @@ static void OGSExecuteAimbot(void) {
 // ============================================================
 // MARK: - Real Server Host Claim & Gate-Bypass Kick
 // ============================================================
+// Forward declaration: used by the host/kick validation path below.
+static bool OGSIsExecutableGameAddress(uintptr_t addr);
+
 static void *OGSFindLocalPlayer(void) {
     uintptr_t getLocalAddr = OGSResolveRVA(gOffsets.rvaGetLocalPlayer);
     if (getLocalAddr) {
