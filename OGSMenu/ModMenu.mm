@@ -137,6 +137,7 @@ typedef void*   (*PlayerGetNameFn)(void *, void *);
 typedef int32_t (*PlayerGetIDFn)(void *, void *);
 typedef int32_t (*GetMasterIdFn)(void *, void *);
 typedef void    (*SetMasterIdFn)(void *, int32_t, void *);
+typedef bool    (*NetPeerSetMaster1Fn)(void *, int32_t, void *);
 typedef void*   (*ArabicFixFn)(void *, void *);
 typedef void*   (*FastAllocateStringFn)(int32_t length, const void *);
 typedef void    (*OnDisconnectFn)(void *, void *, void *);
@@ -164,7 +165,7 @@ static OnMasterSwitchFn orig_OnMasterSwitch3 = NULL;
 static OnMasterSwitchFn orig_OnMasterSwitch4 = NULL;
 static OnMasterSwitchFn orig_OnMasterSwitch5 = NULL;
 
-static ApplyDamageFn  orig_ApplyDamage = NULL;
+static ApplyDamageFn  orig_ApplyDamage  = NULL;
 static DamageRemoteFn orig_DamageRemote = NULL;
 
 // ============================================================
@@ -215,7 +216,7 @@ static OGSRuntimeState gOGS = {
     1.0f,  // gameSpeed
     false, // speedDirty
     0,     // readFailures
-    0,     // autoHostOn
+    1,     // autoHostOn
     0,     // aimbotOn
     0,     // godModeOn
     0,     // magicBulletOn
@@ -244,8 +245,6 @@ static OGSRuntimeState gOGS = {
 // MARK: - Safe Memory Layer & Image Resolver
 // ============================================================
 static volatile uintptr_t gImageBase = 0;
-// Ensure every direct engine call targets executable mapped game code.
-static bool OGSIsExecutableGameAddress(uintptr_t addr);
 
 static uintptr_t OGSFindGameImage(void) {
     uintptr_t cached = __atomic_load_n(&gImageBase, __ATOMIC_ACQUIRE);
@@ -372,7 +371,7 @@ static NSString *OGSNormalizeKey(NSString *value) {
 typedef struct {
     int32_t actorID;
     bool    isHost;
-    void    *playerObject; 
+    void    *playerObject;
     char    name[OGS_MAX_NAME_BYTES];
 } OGSPeerSnapshot;
 
@@ -476,13 +475,11 @@ static void OGSExecuteAimbot(void) {
     Component_GetTransform_Fn getTransform = (Component_GetTransform_Fn)getTransAddr;
     Transform_GetPosition_Fn getPosition   = (Transform_GetPosition_Fn)getPosAddr;
     Transform_LookAt_Vec3_Fn lookAt        = (Transform_LookAt_Vec3_Fn)lookAtAddr;
-
-    // TODO: استبدل دالة OGSGetLocalPlayerID مستقبلاً بدالة دقيقة لجلب الـ PlayerNetwork الخاص بك
-    // حالياً Aimbot معلق حتى نستخرج الـ LocalPlayer Network Object بدقة في التحديث القادم
+    (void)getTransform; (void)getPosition; (void)lookAt;
 }
 
 // ============================================================
-// MARK: - Real Server Host Claim & Gate-Bypass Kick
+// MARK: - Real Server Host Claim & Gate-Bypass Kick (FIXED)
 // ============================================================
 static void *OGSFindLocalPlayer(void) {
     uintptr_t getLocalAddr = OGSResolveRVA(gOffsets.rvaGetLocalPlayer);
@@ -549,16 +546,18 @@ static void *OGSGetNetworkingPeerSafe(void) {
             }
         }
     }
-    return nil;
+    // مهم جداً: إرجاع المؤشر الملتقط من hook_OnEvent لضمان فتح البوابة +0x1c0 دائماً
+    return (void *)__atomic_load_n((uintptr_t *)&gOGS.capturedNetPeer, __ATOMIC_ACQUIRE);
 }
 
 static bool OGSClaimMasterReal(bool bypassCooldown) {
     uintptr_t inRoomAddr = OGSResolveRVA(gOffsets.rvaInRoom);
-    if (!OGSIsExecutableGameAddress(inRoomAddr) || !((Bool0Fn)inRoomAddr)(NULL)) return false;
+    if (!inRoomAddr || !((Bool0Fn)inRoomAddr)(NULL)) return false;
 
     double now = CFAbsoluteTimeGetCurrent();
-    if (!bypassCooldown && (now - gOGS.lastMasterClaimTime) < 0.35) return false;
-    if (bypassCooldown && (now - gOGS.lastMasterClaimTime) < 0.15) return false;
+    if (!bypassCooldown && (now - gOGS.lastMasterClaimTime) < 0.40) {
+        return false;
+    }
 
     void *myPlayer = NULL;
     int32_t myID = OGSGetLocalPlayerID(&myPlayer);
@@ -566,40 +565,36 @@ static bool OGSClaimMasterReal(bool bypassCooldown) {
 
     gOGS.lastMasterClaimTime = now;
 
+    // إذا كان +0x1c0 يحمل رقمنا محلياً بينما السيرفر لم يعطنا الهوست، نصفره مؤقتاً لتمرير شرط (CMP W0, W19)
     void *netPeer = OGSGetNetworkingPeerSafe();
     uintptr_t getMMasterAddr = OGSResolveRVA(gOffsets.rvaNetPeerGetMMasterId);
     uintptr_t setMMasterAddr = OGSResolveRVA(gOffsets.rvaNetPeerSetMMasterId);
-    int32_t savedMaster = 0;
-    bool tempZeroed = false;
-
     if (netPeer && getMMasterAddr && setMMasterAddr) {
-        savedMaster = ((GetMasterIdFn)getMMasterAddr)(netPeer, NULL);
-        if (savedMaster == myID) {
+        int32_t curLocalMaster = ((GetMasterIdFn)getMMasterAddr)(netPeer, NULL);
+        if (curLocalMaster == myID) {
             ((SetMasterIdFn)setMMasterAddr)(netPeer, 0, NULL);
-            tempZeroed = true;
         }
     }
 
     bool sent = false;
+
+    // 1. إرسال طلب PhotonNetwork::SetMasterClient الرسمي (208)
     uintptr_t slotAddr = OGSResolveRVA(gOffsets.tblSetMaster);
     void *fnPtr = NULL;
     if (OGSReadPointer(slotAddr, &fnPtr) && fnPtr) {
         sent = ((PeerAction1Fn)fnPtr)(myPlayer, NULL);
     }
 
-    if (netPeer) {
+    // 2. إرسال خاصية الغرفة 248 (0x13b0c54) عند الطلب المباشر لتثبيت الهوست في السيرفر
+    if (bypassCooldown && netPeer) {
         void *currentRoom = NULL;
         if (OGSReadPointer((uintptr_t)netPeer + 0x158, &currentRoom) && currentRoom) {
             uintptr_t setPropMasterAddr = OGSResolveRVA(gOffsets.rvaNetPeerSetMasterProp);
             if (setPropMasterAddr) {
-                ((SetMasterIdFn)setPropMasterAddr)(netPeer, myID, NULL);
+                ((NetPeerSetMaster1Fn)setPropMasterAddr)(netPeer, myID, NULL);
                 sent = true;
             }
         }
-    }
-
-    if (tempZeroed && !sent && netPeer && setMMasterAddr) {
-        ((SetMasterIdFn)setMMasterAddr)(netPeer, savedMaster, NULL);
     }
 
     return sent;
@@ -620,11 +615,13 @@ static bool OGSKickPeerReal(void *peerObj, bool bypassCooldown) {
     int32_t myID = OGSGetLocalPlayerID(&myPlayer);
     if (!myPlayer || myID <= 0 || peerObj == myPlayer) return false;
 
+    // إذا لم نكن الماستر الفعلي، نطلب سحب الهوست فوراً (مع bypassCooldown = true لإرسال 208 + 248)
     uintptr_t isMasterAddr = OGSResolveRVA(gOffsets.rvaIsMaster);
     if (isMasterAddr && !((Bool0Fn)isMasterAddr)(NULL)) {
-        OGSClaimMasterReal(false);
+        OGSClaimMasterReal(true);
     }
 
+    // فتح البوابة المحلية +0x1c0 للحظة إرسال CloseConnection فقط
     void *netPeer = OGSGetNetworkingPeerSafe();
     uintptr_t getMasterIdAddr = OGSResolveRVA(gOffsets.rvaNetPeerGetMMasterId);
     uintptr_t setMasterIdAddr = OGSResolveRVA(gOffsets.rvaNetPeerSetMMasterId);
@@ -647,6 +644,7 @@ static bool OGSKickPeerReal(void *peerObj, bool bypassCooldown) {
         result = ((PeerAction1Fn)fnPtr)(peerObj, NULL);
     }
 
+    // إرجاع القيمة الأصلية دائماً حتى لا ينخدع الكود بهوست محلي مزيف
     if (patched && netPeer && setMasterIdAddr && origMasterID > 0) {
         ((SetMasterIdFn)setMasterIdAddr)(netPeer, origMasterID, NULL);
     }
@@ -657,11 +655,10 @@ static bool OGSKickPeerReal(void *peerObj, bool bypassCooldown) {
 // ============================================================
 // MARK: - Speed Control
 // ============================================================
-static bool OGSApplyTimescaleNow(float speed) {
+static void OGSApplyTimescaleNow(float speed) {
     uintptr_t address = OGSResolveRVA(gOffsets.rvaSetTimescale);
-    if (!OGSIsExecutableGameAddress(address)) return false;
+    if (!address) return;
     ((SetTime1Fn)address)(speed, NULL);
-    return true;
 }
 
 static void OGSRequestSpeed(float speed) {
@@ -669,15 +666,14 @@ static void OGSRequestSpeed(float speed) {
     speed = fmaxf(0.1f, fminf(speed, 20.0f));
     gOGS.gameSpeed = speed;
     __atomic_store_n(&gOGS.speedDirty, true, __ATOMIC_RELEASE);
+    OGSApplyTimescaleNow(speed);
 }
 
 static void OGSProcessSpeed(void) {
     bool dirty = __atomic_exchange_n(&gOGS.speedDirty, false, __ATOMIC_ACQ_REL);
     float speed = gOGS.gameSpeed;
     if (dirty || fabsf(speed - 1.0f) > 0.01f) {
-        // Retry on a future game update if the game image is not yet ready.
-        if (!OGSApplyTimescaleNow(speed))
-            __atomic_store_n(&gOGS.speedDirty, true, __ATOMIC_RELEASE);
+        OGSApplyTimescaleNow(speed);
     }
 }
 
@@ -728,11 +724,11 @@ static void OGSProcessSpeed(void) {
 @end
 
 // ============================================================
-// MARK: - Room Snapshot & Engine Tick (Unity Thread)
+// MARK: - Room Snapshot & Engine Tick
 // ============================================================
 static volatile bool s_inSnapshotUpdate = false;
 
-static void OGSUpdateRoomSnapshot(bool passive = false) {
+static void OGSUpdateRoomSnapshot(void) {
     if (__atomic_exchange_n(&s_inSnapshotUpdate, true, __ATOMIC_ACQ_REL)) return;
 
     uintptr_t inRoomAddress       = OGSResolveRVA(gOffsets.rvaInRoom);
@@ -782,9 +778,7 @@ static void OGSUpdateRoomSnapshot(bool passive = false) {
     OGSModMenu *menu = [OGSModMenu sharedInstance];
 
     bool roomSettled = ((now - enterTime) >= 1.1 && myPlayer != NULL && myID > 0);
-    // The timer fallback only reads a snapshot; it never dispatches
-    // ownership or kick operations from UIKit's timer callback.
-    int32_t forceReq = passive ? 0 : __atomic_exchange_n(&gOGS.forceHostReq, 0, __ATOMIC_ACQ_REL);
+    int32_t forceReq = __atomic_exchange_n(&gOGS.forceHostReq, 0, __ATOMIC_ACQ_REL);
 
     if (master) {
         os_unfair_lock_lock(&gStateLock);
@@ -800,7 +794,7 @@ static void OGSUpdateRoomSnapshot(bool passive = false) {
         int32_t curRetries = gOGS.kickRetries;
         os_unfair_lock_unlock(&gStateLock);
 
-        if (!passive && roomSettled && (gOGS.autoHostOn || forceReq > 0 || curRetries > 0)) {
+        if (roomSettled && (gOGS.autoHostOn || forceReq > 0 || curRetries > 0)) {
             bool heldStably = __atomic_load_n(&gOGS.heldMasterStably, __ATOMIC_ACQUIRE);
 
             if (gOGS.autoHostOn && heldStably && masterPlayer && masterPlayer != myPlayer) {
@@ -823,7 +817,9 @@ static void OGSUpdateRoomSnapshot(bool passive = false) {
 
             OGSClaimMasterReal(forceReq > 0);
 
-            // Wait for confirmed ownership rather than acting mid-transition.
+            if (gOGS.autoHostOn && heldStably && masterPlayer && masterPlayer != myPlayer) {
+                OGSKickPeerReal(masterPlayer, true);
+            }
         }
     }
 
@@ -854,7 +850,7 @@ static void OGSUpdateRoomSnapshot(bool passive = false) {
         NSString *pName = [NSString stringWithUTF8String:peerSnap.name];
         NSString *normName = OGSNormalizeKey(pName);
 
-        if (!passive && roomSettled && master && curRetries > 0) {
+        if (roomSettled && curRetries > 0) {
             bool matchID = (curKickID > 0 && peerSnap.actorID == curKickID);
             bool matchName = (curKickName[0] != '\0' && normName.UTF8String && strcmp(normName.UTF8String, curKickName) == 0);
             if (matchID || matchName) {
@@ -863,12 +859,12 @@ static void OGSUpdateRoomSnapshot(bool passive = false) {
             }
         }
 
-        if (!passive && roomSettled && master && [menu shouldAutoKickPeerWithName:normName actorID:peerSnap.actorID]) {
+        if (roomSettled && [menu shouldAutoKickPeerWithName:normName actorID:peerSnap.actorID]) {
             OGSKickPeerReal(players[i], false);
         }
     }
 
-    if (!passive && curRetries > 0) {
+    if (curRetries > 0) {
         os_unfair_lock_lock(&gStateLock);
         if (!targetStillInRoom) {
             gOGS.kickRetries = 0;
@@ -888,14 +884,16 @@ static void OGSUnityThreadTick(void) {
     double now = CFAbsoluteTimeGetCurrent();
     os_unfair_lock_lock(&gStateLock);
     gOGS.lastUnityFrameTick = now;
+    int32_t retries = gOGS.kickRetries;
     os_unfair_lock_unlock(&gStateLock);
 
     OGSProcessSpeed();
+    OGSExecuteAimbot();
 
     int32_t forceReq = __atomic_load_n(&gOGS.forceHostReq, __ATOMIC_ACQUIRE);
     static double s_lastSnapTime = 0.0;
 
-    if (forceReq > 0 || (now - s_lastSnapTime) >= 0.16) {
+    if (forceReq > 0 || retries > 0 || (now - s_lastSnapTime) >= 0.16) {
         s_lastSnapTime = now;
         OGSUpdateRoomSnapshot();
     }
@@ -908,32 +906,23 @@ static void OGSUnityThreadTick(void) {
 // Executable trampolines are installed OFFLINE into the unsigned IPA, before
 // the device signs it. Runtime changes only writable callback pointers.
 static bool OGSIsWritableMappedSlot(uintptr_t address);
-static const uintptr_t OGS_MAGIC_STUB = 0x3000;
-static const uintptr_t OGS_GOD_STUB = 0x3040;
-static const uintptr_t OGS_MAGIC_SLOT = 0x2813EF0;
-static const uintptr_t OGS_GOD_SLOT = 0x2813EF8;
+static const uintptr_t OGS_MAGIC_STUB     = 0x3000;
+static const uintptr_t OGS_GOD_STUB       = 0x3040;
+static const uintptr_t OGS_MAGIC_SLOT     = 0x2813EF0;
+static const uintptr_t OGS_GOD_SLOT       = 0x2813EF8;
 static const uintptr_t OGS_MAGIC_ORIGINAL = 0x3014;
-static const uintptr_t OGS_GOD_ORIGINAL = 0x3054;
+static const uintptr_t OGS_GOD_ORIGINAL   = 0x3054;
 
-// Safe, runtime-only diagnostics for the pre-sign bridge.
-// Counts let us distinguish a working bridge from an unused game call path.
-static volatile uint32_t gMagicCallbacks = 0;
-static volatile uint32_t gMagicArrayReads = 0;
-static volatile uint32_t gMagicMutations = 0;
-static volatile int32_t gMagicLastOriginalDamage = 0;
-static volatile uintptr_t gMagicLastArrayCount = 0;
-static volatile uint32_t gGodCallbacks = 0;
-static volatile uint32_t gGodLocalBypasses = 0;
-static volatile uint32_t gGodOtherPlayerPasses = 0;
-static volatile uint32_t gGodUnverifiedPasses = 0;
+static volatile uint32_t  gMagicCallbacks          = 0;
+static volatile uint32_t  gMagicArrayReads         = 0;
+static volatile uint32_t  gMagicMutations          = 0;
+static volatile int32_t   gMagicLastOriginalDamage = 0;
+static volatile uintptr_t gMagicLastArrayCount     = 0;
+static volatile uint32_t  gGodCallbacks            = 0;
+static volatile uint32_t  gGodLocalBypasses        = 0;
+static volatile uint32_t  gGodOtherPlayerPasses    = 0;
+static volatile uint32_t  gGodUnverifiedPasses     = 0;
 
-// Verified in the original fps 3.4.0 ARM64 executable:
-// PlayerNetwork.GetPhotonView RVA 0x13A9964 (self -> PhotonView),
-// PhotonView.ownerId at +0x20,
-// PhotonNetwork.get_player RVA 0x13CABF0 (PhotonPlayer),
-// PhotonPlayer.ID at +0x10.
-// The old comparison between PlayerNetwork* and PhotonPlayer* can never
-// identify the same object reliably. Check owner actor IDs instead.
 static bool OGSIsDamageToLocalPlayer(void *playerNetwork, bool *verified) {
     if (verified) *verified = false;
     if (!playerNetwork || (uintptr_t)playerNetwork < 0x100000000ULL) return false;
@@ -941,7 +930,7 @@ static bool OGSIsDamageToLocalPlayer(void *playerNetwork, bool *verified) {
     if (!OGSReadPointer((uintptr_t)playerNetwork, &klass)) return false;
 
     uintptr_t localGetter = OGSResolveRVA(gOffsets.rvaGetLocalPlayer);
-    uintptr_t viewGetter = OGSResolveRVA(0x13A9964);
+    uintptr_t viewGetter  = OGSResolveRVA(0x13A9964);
     if (!localGetter || !viewGetter) return false;
 
     void *localPhotonPlayer = ((Object0Fn)localGetter)(NULL);
@@ -950,7 +939,6 @@ static bool OGSIsDamageToLocalPlayer(void *playerNetwork, bool *verified) {
     if (!OGSReadMemory((uintptr_t)localPhotonPlayer + 0x10, &localActorID, sizeof(localActorID)) ||
         localActorID <= 0) return false;
 
-    // Use the same cached/getter PhotonView that DamageRemote itself uses.
     void *photonView = ((void *(*)(void *, const void *))viewGetter)(playerNetwork, NULL);
     if (!photonView) return false;
     int32_t ownerActorID = 0;
@@ -960,8 +948,6 @@ static bool OGSIsDamageToLocalPlayer(void *playerNetwork, bool *verified) {
     return localActorID == ownerActorID;
 }
 
-// RVA 0x137CF70 constructs an Int32[3] with damage at +0x20.
-// DamageRemote calls Abs(int32) on negative incoming damage values.
 static void OGSBridgeOutgoingDamage(void *self, void *values, const void *method) {
     __atomic_fetch_add(&gMagicCallbacks, 1u, __ATOMIC_RELAXED);
     if (values && __atomic_load_n(&gOGS.magicBulletOn, __ATOMIC_ACQUIRE)) {
@@ -991,8 +977,6 @@ static void OGSBridgeIncomingDamage(void *self, void *values, int32_t killerID, 
         bool isLocalOwner = OGSIsDamageToLocalPlayer(self, &verified);
         if (verified && isLocalOwner) {
             __atomic_fetch_add(&gGodLocalBypasses, 1u, __ATOMIC_RELAXED);
-            // Do not run local DamageRemote when protection is armed.
-            // Other players and unknown owners continue through normal code.
             return;
         }
         if (verified) __atomic_fetch_add(&gGodOtherPlayerPasses, 1u, __ATOMIC_RELAXED);
@@ -1001,14 +985,12 @@ static void OGSBridgeIncomingDamage(void *self, void *values, int32_t killerID, 
     if (orig_DamageRemote) orig_DamageRemote(self, values, killerID, method);
 }
 
-static volatile uint64_t gOGSCashHookCalls = 0;
-static volatile uint64_t gOGSChatHookCalls = 0;
-static volatile uint64_t gOGSNetworkEvents = 0;
-static volatile uint64_t gOGSMasterSwitchEvents = 0;
-static volatile int32_t gOGSHostMonitorOn = 0;
-
 static void hook_OnEvent(void *self, void *eventData, void *method) {
-    __atomic_fetch_add(&gOGSNetworkEvents, 1ULL, __ATOMIC_RELAXED);
+    // التقاط مؤشر NetworkingPeer الحي لضمان عمل فتح البوابة +0x1c0 في الطرد وسحب الهوست
+    if (self && (uintptr_t)self >= 0x100000000ULL) {
+        __atomic_store_n((uintptr_t *)&gOGS.capturedNetPeer, (uintptr_t)self, __ATOMIC_RELEASE);
+    }
+
     os_unfair_lock_lock(&gStateLock);
     double enterTime = gOGS.roomEnterTime;
     os_unfair_lock_unlock(&gStateLock);
@@ -1062,7 +1044,6 @@ static void hook_Type4995LeaveRoom(void *self, void *method) {
 }
 
 static void OGSHandleMasterSwitchIntercept(void *newMasterPlayer) {
-    __atomic_fetch_add(&gOGSMasterSwitchEvents, 1ULL, __ATOMIC_RELAXED);
     double now = CFAbsoluteTimeGetCurrent();
     os_unfair_lock_lock(&gStateLock);
     double enterTime = gOGS.roomEnterTime;
@@ -1090,6 +1071,9 @@ static void OGSHandleMasterSwitchIntercept(void *newMasterPlayer) {
             }
             gOGS.kickRetries = 25;
             os_unfair_lock_unlock(&gStateLock);
+
+            OGSClaimMasterReal(true);
+            OGSKickPeerReal(newMasterPlayer, true);
         }
         __atomic_store_n(&gOGS.forceHostReq, 1, __ATOMIC_RELEASE);
     }
@@ -1102,9 +1086,23 @@ static void hook_OnMasterSwitched4(void *self, void *p, void *m) { OGSHandleMast
 static void hook_OnMasterSwitched5(void *self, void *p, void *m) { OGSHandleMasterSwitchIntercept(p); if (orig_OnMasterSwitch5) orig_OnMasterSwitch5(self, p, m); }
 
 static void hook_OnPhotonPlayerDisconnected(void *self, void *player, void *method) {
-    // Forward disconnect without writing to objects that may be destroyed
-    // by the original callback.
+    uintptr_t locManager = 0;
+    void *origLeaveStr = NULL;
+    void **leaveStrSlot = NULL;
+
+    if (self && gOGS.kickMsgArmed > 0 && OGSReadMemory((uintptr_t)self + 0x2F8, &locManager, sizeof(uintptr_t)) && locManager > 0x100000000ULL) {
+        if (OGSReadPointer(locManager + 0x238, &origLeaveStr) && origLeaveStr != NULL) {
+            void *kickStr = OGSCreateFreshKickString(origLeaveStr);
+            if (kickStr) {
+                leaveStrSlot = (void **)(locManager + 0x238);
+                *leaveStrSlot = kickStr;
+            }
+        }
+        gOGS.kickMsgArmed = 0;
+    }
+
     if (orig_OnDisconnect) orig_OnDisconnect(self, player, method);
+    if (leaveStrSlot && origLeaveStr) *leaveStrSlot = origLeaveStr;
 }
 
 static void hook_SendChatRemote(void *self, void *senderStr, void *msgStr, int32_t senderTeam, bool isTeamChat, const void *method) {
@@ -1121,6 +1119,7 @@ static void hook_SendChatRemote(void *self, void *senderStr, void *msgStr, int32
                 gOGS.kickTargetID = -1;
                 gOGS.kickRetries = 20;
                 os_unfair_lock_unlock(&gStateLock);
+                __atomic_store_n(&gOGS.forceHostReq, 1, __ATOMIC_RELEASE);
             }
         }
         return;
@@ -1129,19 +1128,18 @@ static void hook_SendChatRemote(void *self, void *senderStr, void *msgStr, int32
 }
 
 static void hook_ChatUpdate(void *self, void *method) {
-    __atomic_fetch_add(&gOGSChatHookCalls, 1ULL, __ATOMIC_RELAXED);
     if (orig_ChatUpdate) orig_ChatUpdate(self, method);
     OGSUnityThreadTick();
 }
 
 static void hook_CashUpdate(void *self, void *method) {
-    __atomic_fetch_add(&gOGSCashHookCalls, 1ULL, __ATOMIC_RELAXED);
     if (orig_CashUpdate) orig_CashUpdate(self, method);
     OGSUnityThreadTick();
 }
 
 // PRE-SIGN bridge only. No DobbyHook, DobbyInstrument or vm_protect.
 static bool gOGSDamageHookInstalled[2] = {false, false};
+
 static bool OGSIsExecutableGameAddress(uintptr_t addr) {
     if (addr < 0x100000000ULL || (addr & 3)) return false;
     vm_address_t start = (vm_address_t)addr;
@@ -1155,10 +1153,11 @@ static bool OGSIsExecutableGameAddress(uintptr_t addr) {
     if (object != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), object);
     return kr == KERN_SUCCESS && start <= (vm_address_t)addr &&
            (uintptr_t)size >= sizeof(uint32_t) &&
-           addr-(uintptr_t)start <= (uintptr_t)size-sizeof(uint32_t) &&
+           addr - (uintptr_t)start <= (uintptr_t)size - sizeof(uint32_t) &&
            (info.protection & (VM_PROT_READ | VM_PROT_EXECUTE)) ==
            (VM_PROT_READ | VM_PROT_EXECUTE);
 }
+
 static bool OGSInstallDamageHookOnDemand(bool godMode) {
     int index = godMode ? 1 : 0;
     if (gOGSDamageHookInstalled[index]) return true;
@@ -1191,7 +1190,7 @@ static bool OGSInstallDamageHookOnDemand(bool godMode) {
     uintptr_t old = 0;
     if (!OGSReadMemory(slot, &old, sizeof(old))) return false;
     uintptr_t callback = godMode ? (uintptr_t)&OGSBridgeIncomingDamage :
-                                    (uintptr_t)&OGSBridgeOutgoingDamage;
+                                   (uintptr_t)&OGSBridgeOutgoingDamage;
     if (old && old != callback) return false;
     if (godMode) orig_DamageRemote = (DamageRemoteFn)trampoline;
     else orig_ApplyDamage = (ApplyDamageFn)trampoline;
@@ -1201,9 +1200,6 @@ static bool OGSInstallDamageHookOnDemand(bool godMode) {
     return true;
 }
 
-// Writes to pointer tables are permitted only if the slot is actually writable
-// and the existing pointer resolves into mapped executable code. Wrong offsets
-// must never be dereferenced or force-written.
 static bool OGSIsWritableMappedSlot(uintptr_t address) {
     if (address < 0x100000000ULL || (address & (sizeof(void *) - 1))) return false;
     vm_address_t regionAddress = (vm_address_t)address;
@@ -1239,8 +1235,6 @@ static bool OGSInstallPointerSlotHook(uintptr_t rva, void *replacement, void **o
 
 static void OGSInstallHooks(void) {
     if (!OGSFindGameImage()) return;
-    // Lifecycle hooks retain their existing behavior, but table slot
-    // validation prevents faults from invalid or read-only RVAs.
     OGSInstallPointerSlotHook(gOffsets.tblCashUpdate, (void *)&hook_CashUpdate, (void **)&orig_CashUpdate);
     OGSInstallPointerSlotHook(gOffsets.tblChatUpdate, (void *)&hook_ChatUpdate, (void **)&orig_ChatUpdate);
     OGSInstallPointerSlotHook(gOffsets.tblSendChatRemote, (void *)&hook_SendChatRemote, (void **)&orig_SendChatRemote);
@@ -1258,15 +1252,6 @@ static void OGSInstallHooks(void) {
 // ============================================================
 // MARK: - ModMenu UI Implementation
 // ============================================================
-// UI-only transfer confirmation state; never treated as authoritative ownership.
-static int32_t sOGSTransferTargetID = 0;
-static double sOGSTransferRequestTime = 0.0;
-
-// A queued kick is not proof that the remote player was disconnected.
-// These variables only track the UI confirmation from room snapshots.
-static int32_t sOGSKickPendingTargetID = 0;
-static double sOGSKickRequestTime = 0.0;
-
 @implementation OGSModMenu
 + (instancetype)sharedInstance {
     static OGSModMenu *inst = nil;
@@ -1383,7 +1368,7 @@ static double sOGSKickRequestTime = 0.0;
         [self.floatingButton addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)]];
         [self.containerView addSubview:self.floatingButton];
 
-        self.menuPanel = [[UIView alloc] initWithFrame:CGRectMake(75, 18, 315, 325)];
+        self.menuPanel = [[UIView alloc] initWithFrame:CGRectMake(75, 18, 315, 285)];
         self.menuPanel.backgroundColor = [UIColor colorWithRed:0.09 green:0.09 blue:0.11 alpha:0.96];
         self.menuPanel.layer.cornerRadius = 14.0;
         self.menuPanel.layer.borderWidth = 2.0f;
@@ -1395,8 +1380,6 @@ static double sOGSKickRequestTime = 0.0;
         self.titleLabel.textColor = [UIColor whiteColor];
         self.titleLabel.textAlignment = NSTextAlignmentCenter;
         self.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
-        self.titleLabel.userInteractionEnabled = YES;
-        [self.titleLabel addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(showHookDiagnostics:)]];
         [self.menuPanel addSubview:self.titleLabel];
 
         self.syncCloudButton = [self makeBtn:CGRectMake(273, 3, 32, 21)
@@ -1437,18 +1420,20 @@ static double sOGSKickRequestTime = 0.0;
         [self.menuPanel addSubview:[self makeBtn:CGRectMake(161, 105, 144, 32) title:@"طرد المحدد فقط" bg:kickOrange action:@selector(kickSelected:)]];
         [self.menuPanel addSubview:[self makeBtn:CGRectMake(10, 105, 144, 32) title:@"طرد وحظر (Ban)" bg:banRed action:@selector(banSelected:)]];
 
-        self.hostLockButton = [self makeBtn:CGRectMake(155, 142, 150, 32) title:@"حماية الهوست: متوقف" bg:darkGray action:@selector(toggleAutoHost:)];
+        self.hostLockButton = [self makeBtn:CGRectMake(155, 142, 150, 32) title:@"حماية الهوست: مفعّل 👑" bg:wpnGreen action:@selector(toggleAutoHost:)];
         [self.menuPanel addSubview:self.hostLockButton];
 
         self.antiKickLockButton = [self makeBtn:CGRectMake(10, 142, 140, 32) title:@"قفل البقاء: تلقائي 🛡️" bg:darkGray action:@selector(toggleAntiKickHardLock:)];
         [self.menuPanel addSubview:self.antiKickLockButton];
 
-        // الأزرار الجديدة
         self.godModeButton = [self makeBtn:CGRectMake(155, 179, 150, 30) title:@"درع الحماية: متوقف 🛡️" bg:darkGray action:@selector(toggleGodMode:)];
         [self.menuPanel addSubview:self.godModeButton];
 
         self.magicBulletButton = [self makeBtn:CGRectMake(10, 179, 140, 30) title:@"طلقة سحرية: متوقف 🔫" bg:darkGray action:@selector(toggleMagicBullet:)];
         [self.menuPanel addSubview:self.magicBulletButton];
+
+        self.lockButton = [self makeBtn:CGRectMake(205, 214, 100, 30) title:@"قفل الروم: مفتوح" bg:darkGray action:@selector(toggleRoomLock:)];
+        [self.menuPanel addSubview:self.lockButton];
 
         self.muteChatButton = [self makeBtn:CGRectMake(105, 214, 95, 30) title:@"الشات: مفتوح" bg:darkGray action:@selector(cycleChatMode:)];
         [self.menuPanel addSubview:self.muteChatButton];
@@ -1460,12 +1445,6 @@ static double sOGSKickRequestTime = 0.0;
         self.speedSetButton = [self makeBtn:CGRectMake(70, 249, 175, 30) title:@"السرعة: 1.0x (اضغط للكتابة)" bg:hostBlue action:@selector(promptCustomSpeed:)];
         [self.menuPanel addSubview:self.speedSetButton];
         [self.menuPanel addSubview:[self makeBtn:CGRectMake(250, 249, 55, 30) title:@"سرعة +" bg:darkGray action:@selector(speedUp:)]];
-
-        // Owner-authorized handover only: select a player, then confirm.
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(10, 285, 295, 30)
-                                          title:@"إعطاء الهوست للاعب المحدد 👑"
-                                             bg:hostBlue
-                                         action:@selector(giveHostToSelected:)]];
 
         [self.containerView addSubview:self.menuPanel];
         self.containerView.floatingButton = self.floatingButton;
@@ -1569,21 +1548,16 @@ static double sOGSKickRequestTime = 0.0;
     double lastUnity = gOGS.lastUnityFrameTick;
     os_unfair_lock_unlock(&gStateLock);
 
-    // Restore the room-state fallback from the last working snapshot refresh
-    // path. Without it, room data never updates when Cash/Chat update hooks
-    // don't fire. Do not invoke game code until fps and its in-room RVA exist.
     if ((now - lastUnity) > 0.35) {
         static double s_lastHookRetry = 0.0;
         if ((now - s_lastHookRetry) >= 2.0) {
             s_lastHookRetry = now;
             OGSInstallHooks();
         }
-        // The cash/chat hooks are not guaranteed to tick during every match.
-        // Refresh only the read-only player snapshot on the timer fallback.
-        // Never send host-change or kick requests from this callback.
+        OGSProcessSpeed();
         uintptr_t inRoomAddr = OGSResolveRVA(gOffsets.rvaInRoom);
         if (inRoomAddr && OGSIsExecutableGameAddress(inRoomAddr)) {
-            OGSUpdateRoomSnapshot(true);
+            OGSUpdateRoomSnapshot();
         }
     }
 
@@ -1594,16 +1568,6 @@ static double sOGSKickRequestTime = 0.0;
 - (void)refreshUI {
     OGSRoomSnapshot snapshot = OGSCurrentSnapshot();
     uint32_t count = snapshot.count;
-    // Read-only diagnostics: distinguish a queued UI request from an active
-    // game-thread hook and an actually observed MasterClient.
-    double lastUpdate = 0.0;
-    os_unfair_lock_lock(&gStateLock);
-    lastUpdate = gOGS.lastUnityFrameTick;
-    os_unfair_lock_unlock(&gStateLock);
-    BOOL hookActive = lastUpdate > 0.0 && (CFAbsoluteTimeGetCurrent() - lastUpdate) <= 0.5;
-    int32_t pending = __atomic_load_n(&gOGS.forceHostReq, __ATOMIC_ACQUIRE);
-    NSString *masterStatus = !snapshot.inRoom ? @"خارج" : (snapshot.isMaster ? @"أنت" : @"غيرك");
-    self.titleLabel.text = [NSString stringWithFormat:@"OGS | هوست:%@ | تحديث:%@ | طلب:%@", masterStatus, hookActive ? @"نشط" : @"متوقف", pending ? @"معلق" : @"لا"];
     uint32_t selected = __atomic_load_n(&gOGS.selectedPeer, __ATOMIC_ACQUIRE);
 
     if (count == 0) {
@@ -1633,6 +1597,8 @@ static double sOGSKickRequestTime = 0.0;
 
     if (!OGSFindGameImage()) {
         self.statusLabel.text = @"تعذر العثور على صورة اللعبة fps؛ البيانات والهوست غير متاحين";
+    } else if (retries > 0) {
+        self.statusLabel.text = @"جاري إرسال حزمة الطرد للسيرفر...";
     } else if (__atomic_load_n(&gOGS.magicBulletOn, __ATOMIC_ACQUIRE)) {
         uint32_t calls = __atomic_load_n(&gMagicCallbacks, __ATOMIC_RELAXED);
         uint32_t reads = __atomic_load_n(&gMagicArrayReads, __ATOMIC_RELAXED);
@@ -1643,121 +1609,23 @@ static double sOGSKickRequestTime = 0.0;
         uint32_t blocks = __atomic_load_n(&gGodLocalBypasses, __ATOMIC_RELAXED);
         uint32_t unknown = __atomic_load_n(&gGodUnverifiedPasses, __ATOMIC_RELAXED);
         self.statusLabel.text = [NSString stringWithFormat:@"الدرع: ورود %u | منع %u | مجهول %u", calls, blocks, unknown];
-    } else if (retries > 0) {
-        self.statusLabel.text = @"طلب طرد قيد المعالجة؛ لم يتم تأكيد خروج اللاعب";
     } else if (hjBuf[0] != '\0') {
         NSString *hj = [NSString stringWithUTF8String:hjBuf];
-        self.statusLabel.text = [NSString stringWithFormat:@"آخر لاعب مرصود: %@ | صد طرد: %u 🛡️", hj ?: @"", blocked];
+        self.statusLabel.text = [NSString stringWithFormat:@"طُرد السارق: %@ | صد طرد: %u 🛡️", hj ?: @"", blocked];
     } else {
         self.statusLabel.text = [NSString stringWithFormat:@"%@ | بالروم: %u | صد طرد: %u 🛡️",
                                  snapshot.inRoom ? (snapshot.isMaster ? @"الهوست الفعلي: أنت 👑" : @"متصل (بانتظار الهوست)") : @"غير متصل",
                                  count,
                                  blocked];
     }
-    // Show a verified state transition, not a misleading "sent = success".
-    if (sOGSTransferTargetID > 0) {
-        bool recipientConfirmed = false;
-        for (uint32_t i = 0; i < snapshot.count; ++i) {
-            if (snapshot.peers[i].actorID == sOGSTransferTargetID && snapshot.peers[i].isHost) {
-                recipientConfirmed = true;
-                break;
-            }
-        }
-        if (snapshot.inRoom && !snapshot.isMaster && recipientConfirmed) {
-            self.statusLabel.text = @"✅ تم تأكيد انتقال الهوست للاعب المحدد";
-            sOGSTransferTargetID = 0;
-        } else if (!snapshot.inRoom) {
-            self.statusLabel.text = @"توقف التحقق: خرجت من الروم";
-            sOGSTransferTargetID = 0;
-        } else if (CFAbsoluteTimeGetCurrent() - sOGSTransferRequestTime >= 6.0) {
-            self.statusLabel.text = @"لم يصل تأكيد نقل الهوست؛ افحص حالة الروم";
-            sOGSTransferTargetID = 0;
-        } else {
-            self.statusLabel.text = @"جار انتظار تأكيد انتقال الهوست من اللعبة...";
-        }
-    }
-    // Room membership, not sending a request, is the only observation
-    // available here. Departure could also be voluntary.
-    if (sOGSKickPendingTargetID > 0) {
-        int32_t targetID = sOGSKickPendingTargetID;
-        BOOL stillPresent = NO;
-        for (uint32_t i = 0; i < snapshot.count; i++) {
-            if (snapshot.peers[i].actorID == targetID) { stillPresent = YES; break; }
-        }
-        double age = CFAbsoluteTimeGetCurrent() - sOGSKickRequestTime;
-        if (!snapshot.inRoom) {
-            self.statusLabel.text = @"خرجت من الروم؛ ألغي التحقق من الطرد";
-            sOGSKickPendingTargetID = 0;
-        } else if (!stillPresent && age >= 0.3) {
-            self.statusLabel.text = @"اللاعب لم يعد بالروم؛ سبب المغادرة غير مؤكد";
-            sOGSKickPendingTargetID = 0;
-        } else if (age >= 6.0) {
-            self.statusLabel.text = @"لم يتم تأكيد خروج اللاعب؛ تحقق من صلاحية الهوست";
-            sOGSKickPendingTargetID = 0;
-        } else {
-            self.statusLabel.text = @"طلب الطرد قيد الانتظار؛ نتحقق من حالة اللاعب...";
-        }
-    }
     [self.unbanButton setTitle:[NSString stringWithFormat:@"فك الحظر (%lu)", (unsigned long)[self bannedCountSafe]] forState:UIControlStateNormal];
-}
-
-- (void)showHookDiagnostics:(UITapGestureRecognizer *)gesture {
-    (void)gesture;
-    // Diagnose hook installation without executing any Photon or game methods.
-    uintptr_t cashSlot = OGSResolveRVA(gOffsets.tblCashUpdate);
-    uintptr_t chatSlot = OGSResolveRVA(gOffsets.tblChatUpdate);
-    void *cashFn = NULL, *chatFn = NULL;
-    BOOL cashReadable = cashSlot && OGSReadPointer(cashSlot, &cashFn);
-    BOOL chatReadable = chatSlot && OGSReadPointer(chatSlot, &chatFn);
-    BOOL cashHook = cashReadable && cashFn == (void *)&hook_CashUpdate;
-    BOOL chatHook = chatReadable && chatFn == (void *)&hook_ChatUpdate;
-    BOOL cashWritable = cashSlot && OGSIsWritableMappedSlot(cashSlot);
-    BOOL chatWritable = chatSlot && OGSIsWritableMappedSlot(chatSlot);
-    double lastTick = 0.0;
-    os_unfair_lock_lock(&gStateLock);
-    lastTick = gOGS.lastUnityFrameTick;
-    os_unfair_lock_unlock(&gStateLock);
-    double age = lastTick > 0.0 ? CFAbsoluteTimeGetCurrent() - lastTick : -1.0;
-    OGSRoomSnapshot snap = OGSCurrentSnapshot();
-    int32_t queued = __atomic_load_n(&gOGS.forceHostReq, __ATOMIC_ACQUIRE);
-    NSString *details = [NSString stringWithFormat:
-        @"غرفة: %@ | المالك حسب اللعبة: %@\n"
-         "تحديث اللعبة: %@\n"
-         "آخر تحديث منذ: %@\n"
-         "Cash hook: %@ | خانة قابلة للكتابة: %@\n"
-         "Chat hook: %@ | خانة قابلة للكتابة: %@\n"
-         "طلب في الانتظار: %@\n"
-         "تغير صلاحية المالك لا يثبت إلا من حالة Photon.",
-        snap.inRoom ? @"داخل" : @"خارج",
-        snap.isMaster ? @"أنت" : @"لاعب آخر",
-        age >= 0.0 && age <= 0.5 ? @"نشط" : @"متوقف",
-        age >= 0.0 ? [NSString stringWithFormat:@"%.1f ثانية", age] : @"لا يوجد",
-        cashHook ? @"مركب" : (cashReadable ? @"غير مركب" : @"غير قابل للقراءة"),
-        cashWritable ? @"نعم" : @"لا",
-        chatHook ? @"مركب" : (chatReadable ? @"غير مركب" : @"غير قابل للقراءة"),
-        chatWritable ? @"نعم" : @"لا",
-        queued ? @"نعم" : @"لا"];
-    details = [details stringByAppendingFormat:@"\nCash calls: %llu | Chat calls: %llu\nNetwork events: %llu | Host switches: %llu",
-        (unsigned long long)__atomic_load_n(&gOGSCashHookCalls, __ATOMIC_RELAXED),
-        (unsigned long long)__atomic_load_n(&gOGSChatHookCalls, __ATOMIC_RELAXED),
-        (unsigned long long)__atomic_load_n(&gOGSNetworkEvents, __ATOMIC_RELAXED),
-        (unsigned long long)__atomic_load_n(&gOGSMasterSwitchEvents, __ATOMIC_RELAXED)];
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"تشخيص تحديث OGS"
-                             message:details preferredStyle:UIAlertControllerStyleAlert];
-    [alert addAction:[UIAlertAction actionWithTitle:@"نسخ" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        (void)action;
-        [UIPasteboard generalPasteboard].string = details;
-    }]];
-    [alert addAction:[UIAlertAction actionWithTitle:@"إغلاق" style:UIAlertActionStyleCancel handler:nil]];
-    UIViewController *root = [self gameMainWindow].rootViewController;
-    if (root && !root.presentedViewController)
-        [root presentViewController:alert animated:YES completion:nil];
 }
 
 - (void)toggleMenu {
     self.menuPanel.hidden = !self.menuPanel.hidden;
     if (!self.menuPanel.hidden) {
         OGSInstallHooks();
+        OGSUpdateRoomSnapshot();
         [self refreshUI];
     }
 }
@@ -1785,160 +1653,35 @@ static double sOGSKickRequestTime = 0.0;
 }
 
 - (void)claimHostNow:(UIButton *)sender {
-    (void)sender;
     OGSRoomSnapshot snapshot = OGSCurrentSnapshot();
     if (!snapshot.inRoom) {
-        self.statusLabel.text = @"ادخل الروم أولاً لسحب الهوست";
+        self.statusLabel.text = @"ادخل داخل روم أولاً لسحب الهوست!";
         return;
     }
-    if (snapshot.isMaster) {
-        self.statusLabel.text = @"أنت الهوست بالفعل 👑";
-        return;
-    }
-
-    // Prefer the existing Unity update callback: it handles queued requests
-    // on the game thread instead of a repeating UIKit timer.
     __atomic_store_n(&gOGS.forceHostReq, 1, __ATOMIC_RELEASE);
-    double lastGameTick = 0.0;
-    double roomEnterTime = 0.0;
-    os_unfair_lock_lock(&gStateLock);
-    lastGameTick = gOGS.lastUnityFrameTick;
-    roomEnterTime = gOGS.roomEnterTime;
-    os_unfair_lock_unlock(&gStateLock);
-    double now = CFAbsoluteTimeGetCurrent();
-    if (lastGameTick > 0.0 && now - lastGameTick < 0.5) {
-        self.statusLabel.text = @"تم طلب سحب الهوست؛ بانتظار تأكيد اللعبة";
-        return;
-    }
-
-    // Some builds never call Cash/Chat update hooks. Permit a *single*
-    // user-triggered attempt on the main game/UI thread, after room settle.
-    // Never run this on NSTimer, never repeat blindly, never claim success.
-    if (![NSThread isMainThread] || roomEnterTime <= 0.0 ||
-        now - roomEnterTime < 1.5) {
-        __atomic_store_n(&gOGS.forceHostReq, 0, __ATOMIC_RELEASE);
-        self.statusLabel.text = @"انتظر استقرار الروم ثم حاول سحب الهوست";
-        return;
-    }
-    bool submitted = OGSClaimMasterReal(true);
-    __atomic_store_n(&gOGS.forceHostReq, 0, __ATOMIC_RELEASE);
-    self.statusLabel.text = submitted ?
-        @"أُرسل طلب سحب الهوست؛ انتظر تأكيد اللعبة 👑" :
-        @"تعذّر إرسال طلب سحب الهوست؛ افحص إصدار اللعبة";
+    bool ok = OGSClaimMasterReal(true);
+    OGSUpdateRoomSnapshot();
+    [self refreshUI];
+    self.statusLabel.text = ok ? @"تم إرسال حزمة سحب الهوست للسيرفر (208 + 248) 👑" : @"تعذر إرسال الطلب حالياً";
 }
 
-- (void)giveHostToSelected:(UIButton *)sender {
-    (void)sender;
-    OGSRoomSnapshot snapshot = OGSCurrentSnapshot();
-    if (!snapshot.inRoom || !snapshot.isMaster || snapshot.count == 0) {
-        self.statusLabel.text = @"إعطاء الهوست متاح فقط عندما تؤكد اللعبة أنك الهوست";
-        return;
+- (void)toggleAutoHost:(UIButton *)s {
+    gOGS.autoHostOn = !gOGS.autoHostOn;
+    if (gOGS.autoHostOn) {
+        __atomic_store_n(&gOGS.forceHostReq, 1, __ATOMIC_RELEASE);
+        OGSClaimMasterReal(true);
+        [s setTitle:@"حماية الهوست: مفعّل 👑" forState:UIControlStateNormal];
+        s.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
+    } else {
+        [s setTitle:@"حماية الهوست: متوقف" forState:UIControlStateNormal];
+        s.backgroundColor = [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
     }
-    uint32_t selected = __atomic_load_n(&gOGS.selectedPeer, __ATOMIC_ACQUIRE);
-    if (selected >= snapshot.count) {
-        self.statusLabel.text = @"حدد لاعبًا موجودًا في الروم أولًا";
-        return;
-    }
-    OGSPeerSnapshot recipient = snapshot.peers[selected];
-    if (recipient.actorID <= 0 || recipient.isHost) {
-        self.statusLabel.text = @"لا يمكن نقل الهوست لهذا اللاعب";
-        return;
-    }
-    const int32_t recipientID = recipient.actorID;
-    NSString *recipientName = [NSString stringWithUTF8String:recipient.name];
-    if (!recipientName.length) recipientName = [NSString stringWithFormat:@"ID:%d", recipientID];
-    NSString *question = [NSString stringWithFormat:
-        @"هل تريد نقل الهوست إلى %@ (ID:%d)؟\n"
-         "سيتم إرسال طلب واحد فقط عبر واجهة اللعبة؛ ولن يتم تعديل معرف الهوست محليًا أو تجاوز صلاحيات الخادم.",
-        recipientName, recipientID];
-    UIAlertController *confirm = [UIAlertController alertControllerWithTitle:@"تأكيد إعطاء الهوست"
-        message:question preferredStyle:UIAlertControllerStyleAlert];
-    [confirm addAction:[UIAlertAction actionWithTitle:@"إلغاء" style:UIAlertActionStyleCancel handler:nil]];
-    [confirm addAction:[UIAlertAction actionWithTitle:@"نقل الهوست" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        (void)action;
-        // Re-check active room, actual authority, and target ID AFTER the confirmation.
-        OGSRoomSnapshot current = OGSCurrentSnapshot();
-        uintptr_t roomAddr = OGSResolveRVA(gOffsets.rvaInRoom);
-        uintptr_t masterAddr = OGSResolveRVA(gOffsets.rvaIsMaster);
-        uintptr_t actorIdAddr = OGSResolveRVA(gOffsets.rvaPlayerGetID);
-        if (!current.inRoom || !current.isMaster ||
-            !OGSIsExecutableGameAddress(roomAddr) ||
-            !OGSIsExecutableGameAddress(masterAddr) ||
-            !OGSIsExecutableGameAddress(actorIdAddr) ||
-            !((Bool0Fn)roomAddr)(NULL) ||
-            !((Bool0Fn)masterAddr)(NULL)) {
-            self.statusLabel.text = @"أُلغي النقل: لا توجد صلاحية هوست مؤكدة الآن";
-            return;
-        }
-        bool listed = false;
-        for (uint32_t i = 0; i < current.count; ++i) {
-            if (current.peers[i].actorID == recipientID && !current.peers[i].isHost) {
-                listed = true;
-                break;
-            }
-        }
-        if (!listed) {
-            self.statusLabel.text = @"أُلغي النقل: اللاعب المحدد لم يعد موجودًا";
-            return;
-        }
-        void *localPlayer = NULL;
-        int32_t localID = OGSGetLocalPlayerID(&localPlayer);
-        if (localID <= 0 || recipientID == localID || !localPlayer) {
-            self.statusLabel.text = @"أُلغي النقل: بيانات اللاعبين غير صالحة";
-            return;
-        }
-        void *peers[OGS_MAX_PEERS];
-        uint32_t count = OGSReadPlayerArray(gOffsets.rvaGetPeers, peers);
-        void *target = NULL;
-        PlayerGetIDFn readID = (PlayerGetIDFn)actorIdAddr;
-        for (uint32_t i = 0; i < count; ++i) {
-            void *peer = peers[i];
-            void *klass = NULL;
-            if (peer && (uintptr_t)peer >= 0x100000000ULL &&
-                OGSReadPointer((uintptr_t)peer, &klass) && klass &&
-                readID(peer, NULL) == recipientID) {
-                target = peer;
-                break;
-            }
-        }
-        uintptr_t slot = OGSResolveRVA(gOffsets.tblSetMaster);
-        void *setMaster = NULL;
-        if (!target || !slot || !OGSReadPointer(slot, &setMaster) ||
-            !OGSIsExecutableGameAddress((uintptr_t)setMaster) ||
-            !((Bool0Fn)masterAddr)(NULL)) {
-            self.statusLabel.text = @"تعذر إجراء النقل: اللاعب أو واجهة اللعبة غير متاح";
-            return;
-        }
-        bool submitted = ((PeerAction1Fn)setMaster)(target, NULL);
-        if (!submitted) {
-            self.statusLabel.text = @"رفضت اللعبة إرسال طلب النقل";
-            return;
-        }
-        sOGSTransferTargetID = recipientID;
-        sOGSTransferRequestTime = CFAbsoluteTimeGetCurrent();
-        self.statusLabel.text = @"أُرسل طلب نقل الهوست؛ ننتظر تأكيد اللعبة";
-    }]];
-    UIViewController *root = [self gameMainWindow].rootViewController;
-    if (root && !root.presentedViewController) {
-        [root presentViewController:confirm animated:YES completion:nil];
-    }
-}
-
-- (void)toggleAutoHost:(UIButton *)sender {
-    int32_t next = !__atomic_load_n(&gOGS.autoHostOn, __ATOMIC_ACQUIRE);
-    __atomic_store_n(&gOGSHostMonitorOn, next, __ATOMIC_RELEASE);
-    __atomic_store_n(&gOGS.autoHostOn, next, __ATOMIC_RELEASE);
-    __atomic_store_n(&gOGS.forceHostReq, next ? 1 : 0, __ATOMIC_RELEASE);
-    [sender setTitle:(next ? @"حماية الهوست: مفعّل 👑" : @"حماية الهوست: متوقف") forState:UIControlStateNormal];
-    sender.backgroundColor = next ? [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0] :
-        [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
     [self refreshUI];
 }
 
 - (void)toggleGodMode:(UIButton *)s {
     int32_t current = __atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE);
     int32_t next = current ? 0 : 1;
-    // Allow arming the shield from the lobby, before entering a dangerous room.
     if (next && !OGSInstallDamageHookOnDemand(true)) {
         self.statusLabel.text = @"نسخة IPA الحالية لا تحتوي جسر الضرر المجهز قبل التوقيع";
         UIAlertController *warning = [UIAlertController alertControllerWithTitle:@"حماية من الكراش"
@@ -2030,90 +1773,55 @@ static double sOGSKickRequestTime = 0.0;
     if (utf8) {
         snprintf(gOGS.kickTargetName, sizeof(gOGS.kickTargetName), "%s", utf8);
     }
-    gOGS.kickRetries = 22;
+    gOGS.kickRetries = 25;
     os_unfair_lock_unlock(&gStateLock);
 
-    // Do not queue a separate master-claim attempt as a side effect of kicking.
-    // The active Unity tick will process this request for an actual host.
-    sOGSKickPendingTargetID = peer.actorID;
-    sOGSKickRequestTime = CFAbsoluteTimeGetCurrent();
+    __atomic_store_n(&gOGS.forceHostReq, 1, __ATOMIC_RELEASE);
+
+    // التنفيذ المباشر الفوري لحزمة الطرد كما في النسخة الفعالة
+    void *players[OGS_MAX_PEERS];
+    uint32_t count = OGSReadPlayerArray(gOffsets.rvaGetPeers, players);
+    uintptr_t idAddr = OGSResolveRVA(gOffsets.rvaPlayerGetID);
+    PlayerGetIDFn getID = (PlayerGetIDFn)idAddr;
+
+    for (uint32_t i = 0; i < count; i++) {
+        if (getID && getID(players[i], NULL) == peer.actorID) {
+            OGSKickPeerReal(players[i], true);
+            break;
+        }
+    }
 }
 
 - (void)kickSelected:(UIButton *)s {
-    (void)s;
     OGSRoomSnapshot snapshot = OGSCurrentSnapshot();
-    if (!snapshot.inRoom || !snapshot.count) {
-        self.statusLabel.text = @"ادخل الروم وحدد لاعبًا أولًا";
-        return;
-    }
-    if (!snapshot.isMaster) {
-        self.statusLabel.text = @"لم يتم الطرد: أنت لست الهوست الفعلي";
-        return;
-    }
-
-    double lastTick = 0.0;
-    os_unfair_lock_lock(&gStateLock);
-    lastTick = gOGS.lastUnityFrameTick;
-    os_unfair_lock_unlock(&gStateLock);
-    if (lastTick <= 0.0 || CFAbsoluteTimeGetCurrent() - lastTick > 0.5) {
-        self.statusLabel.text = @"لم يتم الطرد: تحديث محرك اللعبة غير نشط";
-        return;
-    }
-
+    if (!snapshot.count) return;
     uint32_t selected = __atomic_load_n(&gOGS.selectedPeer, __ATOMIC_ACQUIRE);
-    if (selected >= snapshot.count) {
-        self.statusLabel.text = @"حدد لاعبًا موجودًا في الروم";
-        return;
-    }
+    if (selected >= snapshot.count) selected = 0;
+
     OGSPeerSnapshot peer = snapshot.peers[selected];
-    if (peer.actorID <= 0 || peer.isHost) {
-        self.statusLabel.text = @"لا يمكن طرد الهوست أو لاعب غير صالح";
-        return;
-    }
     NSString *pName = [NSString stringWithUTF8String:peer.name];
     [self triggerImmediateKick:peer];
-    self.statusLabel.text = [NSString stringWithFormat:@"سُجل طلب طرد %@؛ ننتظر التحقق", pName ?: @"اللاعب"];
+    self.statusLabel.text = [NSString stringWithFormat:@"تم طرد: %@", pName ?: @"اللاعب"];
 }
 
 - (void)banSelected:(UIButton *)s {
-    (void)s;
     OGSRoomSnapshot snapshot = OGSCurrentSnapshot();
-    if (!snapshot.inRoom || !snapshot.count) {
-        self.statusLabel.text = @"لا يوجد لاعب لحظره";
-        return;
-    }
+    if (!snapshot.count) return;
     uint32_t selected = __atomic_load_n(&gOGS.selectedPeer, __ATOMIC_ACQUIRE);
-    if (selected >= snapshot.count) {
-        self.statusLabel.text = @"حدد لاعبًا موجودًا في الروم";
-        return;
-    }
-    OGSPeerSnapshot peer = snapshot.peers[selected];
-    if (peer.actorID <= 0 || peer.isHost) {
-        self.statusLabel.text = @"لا يمكن حظر الهوست أو لاعب غير صالح";
-        return;
-    }
+    if (selected >= snapshot.count) selected = 0;
 
+    OGSPeerSnapshot peer = snapshot.peers[selected];
     NSString *pName = [NSString stringWithUTF8String:peer.name];
     NSString *normName = OGSNormalizeKey(pName);
-    [self recordHijackerName:normName actorID:peer.actorID];
 
-    if (!snapshot.isMaster) {
-        self.statusLabel.text = @"حظر محلي فقط؛ أنت لست الهوست الفعلي";
-        return;
-    }
-    double lastTick = 0.0;
-    os_unfair_lock_lock(&gStateLock);
-    lastTick = gOGS.lastUnityFrameTick;
-    os_unfair_lock_unlock(&gStateLock);
-    if (lastTick <= 0.0 || CFAbsoluteTimeGetCurrent() - lastTick > 0.5) {
-        self.statusLabel.text = @"حظر محلي فقط؛ تحديث اللعبة غير نشط";
-        return;
-    }
+    [self recordHijackerName:normName actorID:peer.actorID];
     [self triggerImmediateKick:peer];
-    self.statusLabel.text = [NSString stringWithFormat:@"حُظر %@ محليًا؛ طلب الطرد قيد التحقق", pName ?: @"اللاعب"];
+    [self refreshUI];
+    self.statusLabel.text = [NSString stringWithFormat:@"تم طرد وحظر: %@", pName ?: @"اللاعب"];
 }
 
 - (void)toggleRoomLock:(UIButton *)s {
+    OGSUpdateRoomSnapshot();
     OGSRoomSnapshot snapshot = OGSCurrentSnapshot();
     os_unfair_lock_lock(&gBanSetLock);
     self.roomLockActive = !self.roomLockActive;
@@ -2159,14 +1867,8 @@ static double sOGSKickRequestTime = 0.0;
 - (void)applySpeed:(float)value {
     OGSRequestSpeed(value);
     float actual = gOGS.gameSpeed;
-    // UIKit touch actions execute on iOS main (Unity main on this build).
-    // Apply immediately; the Unity tick also reapplies/retries the value.
-    bool applied = [NSThread isMainThread] && OGSApplyTimescaleNow(actual);
     [self.speedSetButton setTitle:[NSString stringWithFormat:@"السرعة: %.1fx (اضغط للكتابة)", actual]
                          forState:UIControlStateNormal];
-    self.statusLabel.text = applied ?
-        [NSString stringWithFormat:@"تم تطبيق سرعة %.1fx", actual] :
-        @"السرعة محفوظة؛ التطبيق ينتظر تهيئة محرك اللعبة";
 }
 
 - (void)speedDown:(UIButton *)sender {
