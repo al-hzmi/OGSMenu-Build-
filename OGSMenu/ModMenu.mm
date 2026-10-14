@@ -202,6 +202,7 @@ typedef struct {
     double            lastMasterClaimTime;
     double            lastKickPacketTime;
     double            lastUnityFrameTick;
+    double            lastThreatTime;
     char              kickTargetName[OGS_MAX_NAME_BYTES];
     char              lastHijackerName[OGS_MAX_NAME_BYTES];
     char              customKickPhrase[OGS_MAX_NAME_BYTES];
@@ -215,7 +216,7 @@ static OGSRuntimeState gOGS = {
     1.0f,  // gameSpeed
     false, // speedDirty
     0,     // readFailures
-    1,     // autoHostOn (مفعّل افتراضياً كما في الكود الثاني)
+    1,     // autoHostOn
     0,     // aimbotOn
     0,     // godModeOn
     0,     // magicBulletOn
@@ -235,10 +236,79 @@ static OGSRuntimeState gOGS = {
     0.0,   // lastMasterClaimTime
     0.0,   // lastKickPacketTime
     0.0,   // lastUnityFrameTick
+    0.0,   // lastThreatTime
     {0},   // kickTargetName
     {0},   // lastHijackerName
     " تم طرده من الغرفة " // customKickPhrase
 };
+
+// عداد ذكي لمنع الفيض الشبكي (Server Flood) ضد اللاعبين الذين لديهم مضاد طرد
+typedef struct {
+    int32_t actorID;
+    int32_t attempts;
+    double  lastAttemptTime;
+} OGSAutoKickTracker;
+
+static OGSAutoKickTracker gAutoKickTrackers[OGS_MAX_PEERS];
+
+static void OGSResetAutoKickTrackers(void) {
+    os_unfair_lock_lock(&gStateLock);
+    memset(gAutoKickTrackers, 0, sizeof(gAutoKickTrackers));
+    os_unfair_lock_unlock(&gStateLock);
+}
+
+static bool OGSIsAutoKickAllowedForActor(int32_t actorID, double now) {
+    if (actorID <= 0) return true;
+    bool allowed = false;
+    os_unfair_lock_lock(&gStateLock);
+    int emptySlot = -1;
+    int foundSlot = -1;
+    for (int i = 0; i < OGS_MAX_PEERS; i++) {
+        if (gAutoKickTrackers[i].actorID == actorID) {
+            foundSlot = i;
+            break;
+        }
+        if (emptySlot == -1 && gAutoKickTrackers[i].actorID == 0) {
+            emptySlot = i;
+        }
+    }
+    if (foundSlot == -1) {
+        int slot = (emptySlot != -1) ? emptySlot : 0;
+        gAutoKickTrackers[slot].actorID = actorID;
+        gAutoKickTrackers[slot].attempts = 1;
+        gAutoKickTrackers[slot].lastAttemptTime = now;
+        allowed = true;
+    } else {
+        // إذا تم إرسال 6 محاولات طرد ولم يخرج اللاعب (لديه مضاد)، نتوقف مؤقتاً لمنع السيرفر من طردنا
+        if (gAutoKickTrackers[foundSlot].attempts < 6) {
+            if ((now - gAutoKickTrackers[foundSlot].lastAttemptTime) >= 0.35) {
+                gAutoKickTrackers[foundSlot].attempts++;
+                gAutoKickTrackers[foundSlot].lastAttemptTime = now;
+                allowed = true;
+            }
+        } else if ((now - gAutoKickTrackers[foundSlot].lastAttemptTime) >= 8.0) {
+            // إعادة محاولة هادئة كل 8 ثوانٍ فقط دون التسبب في فيض للسيرفر
+            gAutoKickTrackers[foundSlot].attempts = 1;
+            gAutoKickTrackers[foundSlot].lastAttemptTime = now;
+            allowed = true;
+        }
+    }
+    os_unfair_lock_unlock(&gStateLock);
+    return allowed;
+}
+
+static void OGSResetTrackerForActor(int32_t actorID) {
+    if (actorID <= 0) return;
+    os_unfair_lock_lock(&gStateLock);
+    for (int i = 0; i < OGS_MAX_PEERS; i++) {
+        if (gAutoKickTrackers[i].actorID == actorID) {
+            gAutoKickTrackers[i].attempts = 0;
+            gAutoKickTrackers[i].lastAttemptTime = 0.0;
+            break;
+        }
+    }
+    os_unfair_lock_unlock(&gStateLock);
+}
 
 // ============================================================
 // MARK: - Safe Memory Layer & Image Resolver
@@ -555,14 +625,17 @@ static bool OGSClaimMasterReal(bool bypassCooldown) {
     if (!inRoomAddr || !((Bool0Fn)inRoomAddr)(NULL)) return false;
 
     double now = CFAbsoluteTimeGetCurrent();
-    if (!bypassCooldown && (now - gOGS.lastMasterClaimTime) < 0.35) return false;
-    if (bypassCooldown && (now - gOGS.lastMasterClaimTime) < 0.15) return false;
+    if (!bypassCooldown && (now - gOGS.lastMasterClaimTime) < 0.32) return false;
+    if (bypassCooldown && (now - gOGS.lastMasterClaimTime) < 0.14) return false;
 
     void *myPlayer = NULL;
     int32_t myID = OGSGetLocalPlayerID(&myPlayer);
     if (!myPlayer || myID <= 0) return false;
 
     gOGS.lastMasterClaimTime = now;
+    os_unfair_lock_lock(&gStateLock);
+    gOGS.lastThreatTime = now;
+    os_unfair_lock_unlock(&gStateLock);
 
     void *netPeer = OGSGetNetworkingPeerSafe();
     uintptr_t getMMasterAddr = OGSResolveRVA(gOffsets.rvaNetPeerGetMMasterId);
@@ -596,8 +669,13 @@ static bool OGSClaimMasterReal(bool bypassCooldown) {
         }
     }
 
-    if (tempZeroed && !sent && netPeer && setMMasterAddr) {
-        ((SetMasterIdFn)setMMasterAddr)(netPeer, savedMaster, NULL);
+    // تثبيت ملكية الهوست محلياً فوراً وعدم إرجاعها للخصم أبداً
+    if (netPeer && setMMasterAddr) {
+        if (sent) {
+            ((SetMasterIdFn)setMMasterAddr)(netPeer, myID, NULL);
+        } else if (tempZeroed) {
+            ((SetMasterIdFn)setMMasterAddr)(netPeer, savedMaster, NULL);
+        }
     }
 
     return sent;
@@ -610,16 +688,18 @@ static bool OGSKickPeerReal(void *peerObj, bool bypassCooldown) {
     if (!OGSReadPointer((uintptr_t)peerObj, &klassPtr)) return false;
 
     double now = CFAbsoluteTimeGetCurrent();
-    if (!bypassCooldown && (now - gOGS.lastKickPacketTime) < 0.22) return false;
-    gOGS.lastKickPacketTime = now;
-    gOGS.kickMsgArmed = 1;
+    if (!bypassCooldown && (now - gOGS.lastKickPacketTime) < 0.25) return false;
 
     void *myPlayer = NULL;
     int32_t myID = OGSGetLocalPlayerID(&myPlayer);
     if (!myPlayer || myID <= 0 || peerObj == myPlayer) return false;
 
+    gOGS.lastKickPacketTime = now;
+    gOGS.kickMsgArmed = 1;
+
     uintptr_t isMasterAddr = OGSResolveRVA(gOffsets.rvaIsMaster);
-    if (isMasterAddr && !((Bool0Fn)isMasterAddr)(NULL)) {
+    bool currentlyMaster = isMasterAddr ? ((Bool0Fn)isMasterAddr)(NULL) : false;
+    if (!currentlyMaster) {
         OGSClaimMasterReal(false);
     }
 
@@ -645,7 +725,8 @@ static bool OGSKickPeerReal(void *peerObj, bool bypassCooldown) {
         result = ((PeerAction1Fn)fnPtr)(peerObj, NULL);
     }
 
-    if (patched && netPeer && setMasterIdAddr && origMasterID > 0) {
+    // إصلاح جذري: لا نعيد MasterID إلى الخصم (origMasterID) إذا كانت حماية الهوست مفعلة!
+    if (patched && !gOGS.autoHostOn && netPeer && setMasterIdAddr && origMasterID > 0) {
         ((SetMasterIdFn)setMasterIdAddr)(netPeer, origMasterID, NULL);
     }
 
@@ -727,7 +808,7 @@ static void OGSProcessSpeed(void) {
 // ============================================================
 static volatile bool s_inSnapshotUpdate = false;
 
-static void OGSUpdateRoomSnapshot(void) {
+static void OGSUpdateRoomSnapshot(bool passive = false) {
     if (__atomic_exchange_n(&s_inSnapshotUpdate, true, __ATOMIC_ACQ_REL)) return;
 
     uintptr_t inRoomAddress       = OGSResolveRVA(gOffsets.rvaInRoom);
@@ -756,6 +837,7 @@ static void OGSUpdateRoomSnapshot(void) {
         gOGS.masterAcquiredTime = 0.0;
         gOGS.kickRetries = 0;
         os_unfair_lock_unlock(&gStateLock);
+        OGSResetAutoKickTrackers();
         OGSPublishSnapshotValue(&snapshot);
         __atomic_store_n(&s_inSnapshotUpdate, false, __ATOMIC_RELEASE);
         return;
@@ -776,14 +858,14 @@ static void OGSUpdateRoomSnapshot(void) {
     int32_t myID = OGSGetLocalPlayerID(&myPlayer);
     OGSModMenu *menu = [OGSModMenu sharedInstance];
 
-    bool roomSettled = ((now - enterTime) >= 1.1 && myPlayer != NULL && myID > 0);
-    int32_t forceReq = __atomic_exchange_n(&gOGS.forceHostReq, 0, __ATOMIC_ACQ_REL);
+    bool roomSettled = ((now - enterTime) >= 0.8 && myPlayer != NULL && myID > 0);
+    int32_t forceReq = passive ? 0 : __atomic_exchange_n(&gOGS.forceHostReq, 0, __ATOMIC_ACQ_REL);
 
     if (master) {
         os_unfair_lock_lock(&gStateLock);
         if (gOGS.masterAcquiredTime == 0.0) {
             gOGS.masterAcquiredTime = now;
-        } else if ((now - gOGS.masterAcquiredTime) >= 0.35) {
+        } else if ((now - gOGS.masterAcquiredTime) >= 0.30) {
             __atomic_store_n(&gOGS.heldMasterStably, true, __ATOMIC_RELEASE);
         }
         os_unfair_lock_unlock(&gStateLock);
@@ -793,7 +875,7 @@ static void OGSUpdateRoomSnapshot(void) {
         int32_t curRetries = gOGS.kickRetries;
         os_unfair_lock_unlock(&gStateLock);
 
-        if (roomSettled && (gOGS.autoHostOn || forceReq > 0 || curRetries > 0)) {
+        if (!passive && roomSettled && (gOGS.autoHostOn || forceReq > 0 || curRetries > 0)) {
             bool heldStably = __atomic_load_n(&gOGS.heldMasterStably, __ATOMIC_ACQUIRE);
 
             if (gOGS.autoHostOn && heldStably && masterPlayer && masterPlayer != myPlayer) {
@@ -801,24 +883,24 @@ static void OGSUpdateRoomSnapshot(void) {
                 if (OGSReadPeer(masterPlayer, masterPlayer, &thiefSnap) && thiefSnap.actorID != myID && thiefSnap.actorID > 0) {
                     NSString *thiefName = [NSString stringWithUTF8String:thiefSnap.name];
                     NSString *normThief = OGSNormalizeKey(thiefName);
-                    [menu recordHijackerName:normThief actorID:thiefSnap.actorID];
 
                     os_unfair_lock_lock(&gStateLock);
+                    gOGS.lastThreatTime = now;
                     gOGS.kickTargetID = thiefSnap.actorID;
                     if (normThief.UTF8String) {
                         snprintf(gOGS.kickTargetName, sizeof(gOGS.kickTargetName), "%s", normThief.UTF8String);
                         snprintf(gOGS.lastHijackerName, sizeof(gOGS.lastHijackerName), "%s", thiefSnap.name);
                     }
-                    gOGS.kickRetries = 25;
+                    // تحديد محاولات طرد السارق بـ 6 محاولات فقط بعد استرجاع الهوست لمنع السيرفر من طردنا إذا كان لديه مضاد
+                    if (gOGS.kickRetries <= 0) {
+                        gOGS.kickRetries = 6;
+                    }
                     os_unfair_lock_unlock(&gStateLock);
                 }
             }
 
+            // الأولوية القصوى: استرجاع الهوست أولاً وعدم إرسال حزم طرد أثناء فقدان الصلاحية
             OGSClaimMasterReal(forceReq > 0);
-
-            if (gOGS.autoHostOn && heldStably && masterPlayer && masterPlayer != myPlayer) {
-                OGSKickPeerReal(masterPlayer, true);
-            }
         }
     }
 
@@ -849,7 +931,8 @@ static void OGSUpdateRoomSnapshot(void) {
         NSString *pName = [NSString stringWithUTF8String:peerSnap.name];
         NSString *normName = OGSNormalizeKey(pName);
 
-        if (roomSettled && curRetries > 0) {
+        // لا يتم إرسال حزم الطرد إلا بعد تأكيد استلامنا للهوست (master == true) لمنع تفعيل مضاد الخصم أو طردنا من السيرفر
+        if (!passive && roomSettled && master && curRetries > 0) {
             bool matchID = (curKickID > 0 && peerSnap.actorID == curKickID);
             bool matchName = (curKickName[0] != '\0' && normName.UTF8String && strcmp(normName.UTF8String, curKickName) == 0);
             if (matchID || matchName) {
@@ -858,12 +941,14 @@ static void OGSUpdateRoomSnapshot(void) {
             }
         }
 
-        if (roomSettled && [menu shouldAutoKickPeerWithName:normName actorID:peerSnap.actorID]) {
-            OGSKickPeerReal(players[i], false);
+        if (!passive && roomSettled && master && [menu shouldAutoKickPeerWithName:normName actorID:peerSnap.actorID]) {
+            if (OGSIsAutoKickAllowedForActor(peerSnap.actorID, now)) {
+                OGSKickPeerReal(players[i], false);
+            }
         }
     }
 
-    if (curRetries > 0) {
+    if (!passive && master && curRetries > 0) {
         os_unfair_lock_lock(&gStateLock);
         if (!targetStillInRoom) {
             gOGS.kickRetries = 0;
@@ -892,7 +977,7 @@ static void OGSUnityThreadTick(void) {
 
     if (forceReq > 0 || (now - s_lastSnapTime) >= 0.16) {
         s_lastSnapTime = now;
-        OGSUpdateRoomSnapshot();
+        OGSUpdateRoomSnapshot(false);
     }
 }
 
@@ -943,6 +1028,7 @@ static bool OGSIsDamageToLocalPlayer(void *playerNetwork, bool *verified) {
     if (!OGSReadMemory((uintptr_t)localPhotonPlayer + 0x10, &localActorID, sizeof(localActorID)) ||
         localActorID <= 0) return false;
 
+    // Use the same cached/getter PhotonView that DamageRemote itself uses.
     void *photonView = ((void *(*)(void *, const void *))viewGetter)(playerNetwork, NULL);
     if (!photonView) return false;
     int32_t ownerActorID = 0;
@@ -999,19 +1085,23 @@ static volatile int32_t gOGSHostMonitorOn = 1;
 
 static void hook_OnEvent(void *self, void *eventData, void *method) {
     __atomic_fetch_add(&gOGSNetworkEvents, 1ULL, __ATOMIC_RELAXED);
-    os_unfair_lock_lock(&gStateLock);
-    double enterTime = gOGS.roomEnterTime;
-    os_unfair_lock_unlock(&gStateLock);
-
     double now = CFAbsoluteTimeGetCurrent();
-    bool settled = (__atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE) && enterTime > 0.0 && (now - enterTime) > 1.2);
 
-    if (settled && eventData && (uintptr_t)eventData >= 0x100000000ULL) {
+    // حماية مطلقة 100%: حظر حزمة الطرد (203 CloseConnection) فوراً ودائماً تحت أي ظرف
+    if (eventData && (uintptr_t)eventData >= 0x100000000ULL) {
         uint8_t eventCode = 0;
         if (OGSReadMemory((uintptr_t)eventData + 0x10, &eventCode, sizeof(uint8_t))) {
-            if (eventCode == 203 && (gOGS.antiKickHardLock || gOGS.autoHostOn)) {
+            if (eventCode == 203) {
+                os_unfair_lock_lock(&gStateLock);
+                gOGS.lastThreatTime = now;
+                os_unfair_lock_unlock(&gStateLock);
                 __atomic_fetch_add(&gOGS.blockedKicksCount, 1, __ATOMIC_RELAXED);
                 return;
+            }
+            if (eventCode == 208 || eventCode == 253) {
+                os_unfair_lock_lock(&gStateLock);
+                gOGS.lastThreatTime = now;
+                os_unfair_lock_unlock(&gStateLock);
             }
         }
     }
@@ -1027,10 +1117,15 @@ static bool hook_LeaveRoom(int32_t becomeInactive, void *method) {
     double now = CFAbsoluteTimeGetCurrent();
     os_unfair_lock_lock(&gStateLock);
     double enterTime = gOGS.roomEnterTime;
+    double threatTime = gOGS.lastThreatTime;
     os_unfair_lock_unlock(&gStateLock);
 
-    bool settled = (__atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE) && enterTime > 0.0 && (now - enterTime) > 1.5);
-    if (settled && (gOGS.antiKickHardLock || (gOGS.autoHostOn && __atomic_load_n(&gOGS.insideNetworkEvent, __ATOMIC_ACQUIRE) > 0))) {
+    bool inRoomNow = __atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE);
+    bool settled = (inRoomNow && enterTime > 0.0 && (now - enterTime) > 0.3);
+    bool insideNet = (__atomic_load_n(&gOGS.insideNetworkEvent, __ATOMIC_ACQUIRE) > 0);
+    bool recentThreat = (threatTime > 0.0 && (now - threatTime) < 3.5);
+
+    if (inRoomNow && (gOGS.antiKickHardLock || insideNet || (settled && recentThreat))) {
         __atomic_fetch_add(&gOGS.blockedKicksCount, 1, __ATOMIC_RELAXED);
         return false;
     }
@@ -1041,10 +1136,16 @@ static void hook_Type4995LeaveRoom(void *self, void *method) {
     double now = CFAbsoluteTimeGetCurrent();
     os_unfair_lock_lock(&gStateLock);
     double enterTime = gOGS.roomEnterTime;
+    double threatTime = gOGS.lastThreatTime;
     os_unfair_lock_unlock(&gStateLock);
 
-    bool settled = (__atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE) && enterTime > 0.0 && (now - enterTime) > 1.5);
-    if (settled && (gOGS.antiKickHardLock || (gOGS.autoHostOn && __atomic_load_n(&gOGS.insideNetworkEvent, __ATOMIC_ACQUIRE) > 0))) {
+    bool inRoomNow = __atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE);
+    bool settled = (inRoomNow && enterTime > 0.0 && (now - enterTime) > 0.3);
+    bool insideNet = (__atomic_load_n(&gOGS.insideNetworkEvent, __ATOMIC_ACQUIRE) > 0);
+    bool recentThreat = (threatTime > 0.0 && (now - threatTime) < 3.5);
+
+    // منع دالة الطرد الداخلية Type4995LeaveRoom من إخراجك أثناء وجودك بالروم
+    if (inRoomNow && (gOGS.antiKickHardLock || gOGS.autoHostOn || insideNet || (settled && recentThreat))) {
         __atomic_fetch_add(&gOGS.blockedKicksCount, 1, __ATOMIC_RELAXED);
         return;
     }
@@ -1056,9 +1157,10 @@ static void OGSHandleMasterSwitchIntercept(void *newMasterPlayer) {
     double now = CFAbsoluteTimeGetCurrent();
     os_unfair_lock_lock(&gStateLock);
     double enterTime = gOGS.roomEnterTime;
+    gOGS.lastThreatTime = now;
     os_unfair_lock_unlock(&gStateLock);
 
-    bool settled = (__atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE) && enterTime > 0.0 && (now - enterTime) > 1.2);
+    bool settled = (__atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE) && enterTime > 0.0 && (now - enterTime) > 0.5);
     if (!settled || !gOGS.autoHostOn || !newMasterPlayer || (uintptr_t)newMasterPlayer < 0x100000000ULL) return;
 
     void *myPlayer = NULL;
@@ -1070,7 +1172,6 @@ static void OGSHandleMasterSwitchIntercept(void *newMasterPlayer) {
         if (__atomic_load_n(&gOGS.heldMasterStably, __ATOMIC_ACQUIRE)) {
             NSString *thiefName = [NSString stringWithUTF8String:thiefSnap.name];
             NSString *normThief = OGSNormalizeKey(thiefName);
-            [[OGSModMenu sharedInstance] recordHijackerName:normThief actorID:thiefSnap.actorID];
 
             os_unfair_lock_lock(&gStateLock);
             gOGS.kickTargetID = thiefSnap.actorID;
@@ -1078,18 +1179,20 @@ static void OGSHandleMasterSwitchIntercept(void *newMasterPlayer) {
                 snprintf(gOGS.kickTargetName, sizeof(gOGS.kickTargetName), "%s", normThief.UTF8String);
                 snprintf(gOGS.lastHijackerName, sizeof(gOGS.lastHijackerName), "%s", thiefSnap.name);
             }
-            gOGS.kickRetries = 25;
+            gOGS.kickRetries = 6;
             os_unfair_lock_unlock(&gStateLock);
         }
         __atomic_store_n(&gOGS.forceHostReq, 1, __ATOMIC_RELEASE);
+        // استرجاع الهوست فوراً في نفس اللحظة على خيط Unity
+        OGSClaimMasterReal(true);
     }
 }
 
-static void hook_OnMasterSwitched1(void *self, void *p, void *m) { OGSHandleMasterSwitchIntercept(p); if (orig_OnMasterSwitch1) orig_OnMasterSwitch1(self, p, m); }
-static void hook_OnMasterSwitched2(void *self, void *p, void *m) { OGSHandleMasterSwitchIntercept(p); if (orig_OnMasterSwitch2) orig_OnMasterSwitch2(self, p, m); }
-static void hook_OnMasterSwitched3(void *self, void *p, void *m) { OGSHandleMasterSwitchIntercept(p); if (orig_OnMasterSwitch3) orig_OnMasterSwitch3(self, p, m); }
-static void hook_OnMasterSwitched4(void *self, void *p, void *m) { OGSHandleMasterSwitchIntercept(p); if (orig_OnMasterSwitch4) orig_OnMasterSwitch4(self, p, m); }
-static void hook_OnMasterSwitched5(void *self, void *p, void *m) { OGSHandleMasterSwitchIntercept(p); if (orig_OnMasterSwitch5) orig_OnMasterSwitch5(self, p, m); }
+static void hook_OnMasterSwitched1(void *self, void *p, void *m) { if (orig_OnMasterSwitch1) orig_OnMasterSwitch1(self, p, m); OGSHandleMasterSwitchIntercept(p); }
+static void hook_OnMasterSwitched2(void *self, void *p, void *m) { if (orig_OnMasterSwitch2) orig_OnMasterSwitch2(self, p, m); OGSHandleMasterSwitchIntercept(p); }
+static void hook_OnMasterSwitched3(void *self, void *p, void *m) { if (orig_OnMasterSwitch3) orig_OnMasterSwitch3(self, p, m); OGSHandleMasterSwitchIntercept(p); }
+static void hook_OnMasterSwitched4(void *self, void *p, void *m) { if (orig_OnMasterSwitch4) orig_OnMasterSwitch4(self, p, m); OGSHandleMasterSwitchIntercept(p); }
+static void hook_OnMasterSwitched5(void *self, void *p, void *m) { if (orig_OnMasterSwitch5) orig_OnMasterSwitch5(self, p, m); OGSHandleMasterSwitchIntercept(p); }
 
 static void hook_OnPhotonPlayerDisconnected(void *self, void *player, void *method) {
     // Forward disconnect without writing to objects that may be destroyed
@@ -1109,7 +1212,7 @@ static void hook_SendChatRemote(void *self, void *senderStr, void *msgStr, int32
                 os_unfair_lock_lock(&gStateLock);
                 snprintf(gOGS.kickTargetName, sizeof(gOGS.kickTargetName), "%s", utf8);
                 gOGS.kickTargetID = -1;
-                gOGS.kickRetries = 20;
+                gOGS.kickRetries = 8;
                 os_unfair_lock_unlock(&gStateLock);
                 __atomic_store_n(&gOGS.forceHostReq, 1, __ATOMIC_RELEASE);
             }
@@ -1282,6 +1385,7 @@ static void OGSInstallHooks(void) {
     if (normName.length > 0) [self.bannedNames addObject:normName];
     if (actID > 0) [self.bannedActorIDs addObject:@(actID)];
     os_unfair_lock_unlock(&gBanSetLock);
+    OGSResetTrackerForActor(actID);
     [self saveLocalBans];
 }
 
@@ -1421,7 +1525,6 @@ static void OGSInstallHooks(void) {
         self.antiKickLockButton = [self makeBtn:CGRectMake(10, 142, 140, 32) title:@"قفل البقاء: تلقائي 🛡️" bg:darkGray action:@selector(toggleAntiKickHardLock:)];
         [self.menuPanel addSubview:self.antiKickLockButton];
 
-        // الأزرار الجديدة
         self.godModeButton = [self makeBtn:CGRectMake(155, 179, 150, 30) title:@"درع الحماية: متوقف 🛡️" bg:darkGray action:@selector(toggleGodMode:)];
         [self.menuPanel addSubview:self.godModeButton];
 
@@ -1544,6 +1647,7 @@ static void OGSInstallHooks(void) {
     double lastUnity = gOGS.lastUnityFrameTick;
     os_unfair_lock_unlock(&gStateLock);
 
+    // إذا كانت هوكات التحديث في اللعبة متوقفة، ننفذ التحديث من المؤقت الاحتياطي بأمان
     if ((now - lastUnity) > 0.35) {
         static double s_lastHookRetry = 0.0;
         if ((now - s_lastHookRetry) >= 2.0) {
@@ -1553,7 +1657,7 @@ static void OGSInstallHooks(void) {
         uintptr_t inRoomAddr = OGSResolveRVA(gOffsets.rvaInRoom);
         if (inRoomAddr && OGSIsExecutableGameAddress(inRoomAddr)) {
             OGSProcessSpeed();
-            OGSUpdateRoomSnapshot();
+            OGSUpdateRoomSnapshot(false);
         }
     }
 
@@ -1615,7 +1719,7 @@ static void OGSInstallHooks(void) {
         self.statusLabel.text = @"جاري إرسال حزمة الطرد للسيرفر...";
     } else if (hjBuf[0] != '\0') {
         NSString *hj = [NSString stringWithUTF8String:hjBuf];
-        self.statusLabel.text = [NSString stringWithFormat:@"طُرد السارق: %@ | صد طرد: %u 🛡️", hj ?: @"", blocked];
+        self.statusLabel.text = [NSString stringWithFormat:@"آخر سارق: %@ | صد طرد: %u 🛡️", hj ?: @"", blocked];
     } else {
         self.statusLabel.text = [NSString stringWithFormat:@"%@ | بالروم: %u | صد طرد: %u 🛡️",
                                  snapshot.inRoom ? (snapshot.isMaster ? @"الهوست الفعلي: أنت 👑" : @"متصل (بانتظار الهوست)") : @"غير متصل",
@@ -1713,8 +1817,10 @@ static void OGSInstallHooks(void) {
         self.statusLabel.text = @"ادخل داخل روم أولاً لسحب الهوست!";
         return;
     }
+    os_unfair_lock_lock(&gStateLock);
+    gOGS.lastThreatTime = CFAbsoluteTimeGetCurrent();
+    os_unfair_lock_unlock(&gStateLock);
     __atomic_store_n(&gOGS.forceHostReq, 1, __ATOMIC_RELEASE);
-    OGSClaimMasterReal(true);
     self.statusLabel.text = @"تم إرسال حزمة سحب الهوست للسيرفر (208) 👑";
 }
 
@@ -1821,18 +1927,18 @@ static void OGSInstallHooks(void) {
     NSString *normName = OGSNormalizeKey(pName);
     const char *utf8 = normName.UTF8String;
 
+    OGSResetTrackerForActor(peer.actorID);
+
     os_unfair_lock_lock(&gStateLock);
+    gOGS.lastThreatTime = CFAbsoluteTimeGetCurrent();
     gOGS.kickTargetID = peer.actorID;
     if (utf8) {
         snprintf(gOGS.kickTargetName, sizeof(gOGS.kickTargetName), "%s", utf8);
     }
-    gOGS.kickRetries = 22;
+    gOGS.kickRetries = 8;
     os_unfair_lock_unlock(&gStateLock);
 
     __atomic_store_n(&gOGS.forceHostReq, 1, __ATOMIC_RELEASE);
-    if (peer.playerObject) {
-        OGSKickPeerReal(peer.playerObject, true);
-    }
 }
 
 - (void)kickSelected:(UIButton *)s {
@@ -1879,6 +1985,8 @@ static void OGSInstallHooks(void) {
     BOOL isLocked = self.roomLockActive;
     os_unfair_lock_unlock(&gBanSetLock);
 
+    OGSResetAutoKickTrackers();
+
     if (isLocked) {
         __atomic_store_n(&gOGS.forceHostReq, 1, __ATOMIC_RELEASE);
         [s setTitle:@"قفل الروم: مقفل 🔒" forState:UIControlStateNormal];
@@ -1902,6 +2010,7 @@ static void OGSInstallHooks(void) {
     gOGS.kickTargetID = -1;
     os_unfair_lock_unlock(&gStateLock);
 
+    OGSResetAutoKickTrackers();
     [self saveLocalBans];
     [self refreshUI];
     self.statusLabel.text = @"تم مسح قائمة المحظورين بالكامل";
@@ -1953,4 +2062,4 @@ static void ogs_init(void) {
         OGSInstallHooks();
         [[OGSModMenu sharedInstance] setupMenu];
     });
-} 
+}
