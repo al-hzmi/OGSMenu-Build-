@@ -620,6 +620,9 @@ static void *OGSGetNetworkingPeerSafe(void) {
     return nil;
 }
 
+// Defined below in the pre-sign bridge validation section.
+static bool OGSIsExecutableGameAddress(uintptr_t addr);
+
 static bool OGSClaimMasterReal(bool bypassCooldown) {
     uintptr_t inRoomAddr = OGSResolveRVA(gOffsets.rvaInRoom);
     if (!inRoomAddr || !((Bool0Fn)inRoomAddr)(NULL)) return false;
@@ -645,7 +648,8 @@ static bool OGSClaimMasterReal(bool bypassCooldown) {
     bool sent = false;
     uintptr_t slotAddr = OGSResolveRVA(gOffsets.tblSetMaster);
     void *fnPtr = NULL;
-    if (OGSReadPointer(slotAddr, &fnPtr) && fnPtr) {
+    if (slotAddr && OGSReadPointer(slotAddr, &fnPtr) && fnPtr &&
+        OGSIsExecutableGameAddress((uintptr_t)fnPtr)) {
         sent = ((PeerAction1Fn)fnPtr)(myPlayer, NULL);
     }
 
@@ -653,7 +657,7 @@ static bool OGSClaimMasterReal(bool bypassCooldown) {
         void *currentRoom = NULL;
         if (OGSReadPointer((uintptr_t)netPeer + 0x158, &currentRoom) && currentRoom) {
             uintptr_t setPropMasterAddr = OGSResolveRVA(gOffsets.rvaNetPeerSetMasterProp);
-            if (setPropMasterAddr) {
+            if (setPropMasterAddr && OGSIsExecutableGameAddress(setPropMasterAddr)) {
                 ((SetMasterIdFn)setPropMasterAddr)(netPeer, myID, NULL);
                 sent = true;
             }
@@ -692,7 +696,8 @@ static bool OGSKickPeerReal(void *peerObj, bool bypassCooldown) {
     bool result = false;
     uintptr_t slotAddr = OGSResolveRVA(gOffsets.tblPeerSync);
     void *fnPtr = NULL;
-    if (OGSReadPointer(slotAddr, &fnPtr) && fnPtr) {
+    if (slotAddr && OGSReadPointer(slotAddr, &fnPtr) && fnPtr &&
+        OGSIsExecutableGameAddress((uintptr_t)fnPtr)) {
         result = ((PeerAction1Fn)fnPtr)(peerObj, NULL);
     }
 
@@ -1118,40 +1123,21 @@ static void hook_Type4995LeaveRoom(void *self, void *method) {
     if (orig_Type4995Leave) orig_Type4995Leave(self, method);
 }
 
+// Stage 1: do not dereference a peer after the original Photon callback.
+// Its managed lifetime may end inside the original callback. The verified
+// Unity update path already identifies current ownership from a fresh snapshot.
 static void OGSHandleMasterSwitchIntercept(void *newMasterPlayer) {
+    (void)newMasterPlayer;
     __atomic_fetch_add(&gOGSMasterSwitchEvents, 1ULL, __ATOMIC_RELAXED);
     double now = CFAbsoluteTimeGetCurrent();
     os_unfair_lock_lock(&gStateLock);
-    double enterTime = gOGS.roomEnterTime;
     gOGS.lastThreatTime = now;
+    double entered = gOGS.roomEnterTime;
     os_unfair_lock_unlock(&gStateLock);
-
-    bool settled = (__atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE) && enterTime > 0.0 && (now - enterTime) > 0.5);
-    if (!settled || !gOGS.autoHostOn || !newMasterPlayer || (uintptr_t)newMasterPlayer < 0x100000000ULL) return;
-
-    void *myPlayer = NULL;
-    int32_t myID = OGSGetLocalPlayerID(&myPlayer);
-    if (!myPlayer || newMasterPlayer == myPlayer) return;
-
-    OGSPeerSnapshot thiefSnap;
-    if (OGSReadPeer(newMasterPlayer, newMasterPlayer, &thiefSnap) && thiefSnap.actorID != myID && thiefSnap.actorID > 0) {
-        if (__atomic_load_n(&gOGS.heldMasterStably, __ATOMIC_ACQUIRE)) {
-            NSString *thiefName = [NSString stringWithUTF8String:thiefSnap.name];
-            NSString *normThief = OGSNormalizeKey(thiefName);
-
-            os_unfair_lock_lock(&gStateLock);
-            gOGS.kickTargetID = thiefSnap.actorID;
-            if (normThief.UTF8String) {
-                snprintf(gOGS.kickTargetName, sizeof(gOGS.kickTargetName), "%s", normThief.UTF8String);
-                snprintf(gOGS.lastHijackerName, sizeof(gOGS.lastHijackerName), "%s", thiefSnap.name);
-            }
-            gOGS.kickRetries = 6;
-            os_unfair_lock_unlock(&gStateLock);
-        }
+    bool active = __atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE);
+    if (active && entered > 0.0 && (now - entered) > 0.5 &&
+        __atomic_load_n(&gOGS.autoHostOn, __ATOMIC_ACQUIRE)) {
         __atomic_store_n(&gOGS.forceHostReq, 1, __ATOMIC_RELEASE);
-        // Defer processing: Photon master-switch callbacks may execute on the
-        // network dispatch path, not the Unity player loop. The request
-        // above is consumed only by a verified game update callback.
     }
 }
 
@@ -1623,8 +1609,9 @@ static void OGSInstallHooks(void) {
         }
         // Crash 7567FE79: Calling OGSUpdateRoomSnapshot from this UIKit
         // NSTimer entered IL2CPP object/peer code on an unsupported call path.
-        // Retain the working speed handling but never run room/network logic here.
-        OGSProcessSpeed();
+        // Stage 1: UI timer only manages UIKit and hook-install retries.
+        // Do not invoke any Unity/IL2CPP function on this UIKit timer.
+        // Speed remains directly adjustable with the existing controls.
     }
 
     if (!self.menuPanel || self.menuPanel.hidden) return;
@@ -1640,6 +1627,7 @@ static void OGSInstallHooks(void) {
     os_unfair_lock_unlock(&gStateLock);
     BOOL hookActive = lastUpdate > 0.0 && (CFAbsoluteTimeGetCurrent() - lastUpdate) <= 0.5;
     int32_t pending = __atomic_load_n(&gOGS.forceHostReq, __ATOMIC_ACQUIRE);
+    // UNKNOWN is safer than falsely declaring room ownership with a stale tick.
     NSString *masterStatus = !hookActive ? @"غير مؤكد" :
         (!snapshot.inRoom ? @"خارج" : (snapshot.isMaster ? @"أنت" : @"غيرك"));
     self.titleLabel.text = [NSString stringWithFormat:@"OGS | هوست:%@ | تحديث:%@ | طلب:%@", masterStatus, hookActive ? @"نشط" : @"متوقف", pending ? @"معلق" : @"لا"];
