@@ -638,18 +638,9 @@ static bool OGSClaimMasterReal(bool bypassCooldown) {
     os_unfair_lock_unlock(&gStateLock);
 
     void *netPeer = OGSGetNetworkingPeerSafe();
-    uintptr_t getMMasterAddr = OGSResolveRVA(gOffsets.rvaNetPeerGetMMasterId);
-    uintptr_t setMMasterAddr = OGSResolveRVA(gOffsets.rvaNetPeerSetMMasterId);
-    int32_t savedMaster = 0;
-    bool tempZeroed = false;
-
-    if (netPeer && getMMasterAddr && setMMasterAddr) {
-        savedMaster = ((GetMasterIdFn)getMMasterAddr)(netPeer, NULL);
-        if (savedMaster == myID) {
-            ((SetMasterIdFn)setMMasterAddr)(netPeer, 0, NULL);
-            tempZeroed = true;
-        }
-    }
+    // rvaNetPeerSetMMasterId is not a verified callable function entry.
+    // Do not call an instruction inside another function or rewrite Photon
+    // MasterClient fields locally; request authorization through game APIs.
 
     bool sent = false;
     uintptr_t slotAddr = OGSResolveRVA(gOffsets.tblSetMaster);
@@ -666,15 +657,6 @@ static bool OGSClaimMasterReal(bool bypassCooldown) {
                 ((SetMasterIdFn)setPropMasterAddr)(netPeer, myID, NULL);
                 sent = true;
             }
-        }
-    }
-
-    // تثبيت ملكية الهوست محلياً فوراً وعدم إرجاعها للخصم أبداً
-    if (netPeer && setMMasterAddr) {
-        if (sent) {
-            ((SetMasterIdFn)setMMasterAddr)(netPeer, myID, NULL);
-        } else if (tempZeroed) {
-            ((SetMasterIdFn)setMMasterAddr)(netPeer, savedMaster, NULL);
         }
     }
 
@@ -703,31 +685,15 @@ static bool OGSKickPeerReal(void *peerObj, bool bypassCooldown) {
         OGSClaimMasterReal(false);
     }
 
-    void *netPeer = OGSGetNetworkingPeerSafe();
-    uintptr_t getMasterIdAddr = OGSResolveRVA(gOffsets.rvaNetPeerGetMMasterId);
-    uintptr_t setMasterIdAddr = OGSResolveRVA(gOffsets.rvaNetPeerSetMMasterId);
-
-    int32_t origMasterID = 0;
-    bool patched = false;
-
-    if (netPeer && myID > 0 && getMasterIdAddr && setMasterIdAddr) {
-        origMasterID = ((GetMasterIdFn)getMasterIdAddr)(netPeer, NULL);
-        if (origMasterID != myID) {
-            ((SetMasterIdFn)setMasterIdAddr)(netPeer, myID, NULL);
-            patched = true;
-        }
-    }
+    // No temporary MasterClient spoofing. Photon ownership has to be
+    // confirmed by the game before invoking peer-management operations.
+    if (!currentlyMaster) return false;
 
     bool result = false;
     uintptr_t slotAddr = OGSResolveRVA(gOffsets.tblPeerSync);
     void *fnPtr = NULL;
     if (OGSReadPointer(slotAddr, &fnPtr) && fnPtr) {
         result = ((PeerAction1Fn)fnPtr)(peerObj, NULL);
-    }
-
-    // إصلاح جذري: لا نعيد MasterID إلى الخصم (origMasterID) إذا كانت حماية الهوست مفعلة!
-    if (patched && !gOGS.autoHostOn && netPeer && setMasterIdAddr && origMasterID > 0) {
-        ((SetMasterIdFn)setMasterIdAddr)(netPeer, origMasterID, NULL);
     }
 
     return result;
@@ -1183,8 +1149,9 @@ static void OGSHandleMasterSwitchIntercept(void *newMasterPlayer) {
             os_unfair_lock_unlock(&gStateLock);
         }
         __atomic_store_n(&gOGS.forceHostReq, 1, __ATOMIC_RELEASE);
-        // استرجاع الهوست فوراً في نفس اللحظة على خيط Unity
-        OGSClaimMasterReal(true);
+        // Defer processing: Photon master-switch callbacks may execute on the
+        // network dispatch path, not the Unity player loop. The request
+        // above is consumed only by a verified game update callback.
     }
 }
 
@@ -1654,11 +1621,10 @@ static void OGSInstallHooks(void) {
             s_lastHookRetry = now;
             OGSInstallHooks();
         }
-        uintptr_t inRoomAddr = OGSResolveRVA(gOffsets.rvaInRoom);
-        if (inRoomAddr && OGSIsExecutableGameAddress(inRoomAddr)) {
-            OGSProcessSpeed();
-            OGSUpdateRoomSnapshot(false);
-        }
+        // Crash 7567FE79: Calling OGSUpdateRoomSnapshot from this UIKit
+        // NSTimer entered IL2CPP object/peer code on an unsupported call path.
+        // Retain the working speed handling but never run room/network logic here.
+        OGSProcessSpeed();
     }
 
     if (!self.menuPanel || self.menuPanel.hidden) return;
@@ -1674,7 +1640,8 @@ static void OGSInstallHooks(void) {
     os_unfair_lock_unlock(&gStateLock);
     BOOL hookActive = lastUpdate > 0.0 && (CFAbsoluteTimeGetCurrent() - lastUpdate) <= 0.5;
     int32_t pending = __atomic_load_n(&gOGS.forceHostReq, __ATOMIC_ACQUIRE);
-    NSString *masterStatus = !snapshot.inRoom ? @"خارج" : (snapshot.isMaster ? @"أنت" : @"غيرك");
+    NSString *masterStatus = !hookActive ? @"غير مؤكد" :
+        (!snapshot.inRoom ? @"خارج" : (snapshot.isMaster ? @"أنت" : @"غيرك"));
     self.titleLabel.text = [NSString stringWithFormat:@"OGS | هوست:%@ | تحديث:%@ | طلب:%@", masterStatus, hookActive ? @"نشط" : @"متوقف", pending ? @"معلق" : @"لا"];
     uint32_t selected = __atomic_load_n(&gOGS.selectedPeer, __ATOMIC_ACQUIRE);
 
@@ -1821,7 +1788,7 @@ static void OGSInstallHooks(void) {
     gOGS.lastThreatTime = CFAbsoluteTimeGetCurrent();
     os_unfair_lock_unlock(&gStateLock);
     __atomic_store_n(&gOGS.forceHostReq, 1, __ATOMIC_RELEASE);
-    self.statusLabel.text = @"تم إرسال حزمة سحب الهوست للسيرفر (208) 👑";
+    self.statusLabel.text = @"تم تسجيل طلب الهوست؛ التنفيذ ينتظر تحديث محرك اللعبة وتأكيد Photon";
 }
 
 - (void)toggleAutoHost:(UIButton *)s {
