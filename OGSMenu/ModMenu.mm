@@ -898,6 +898,10 @@ static void OGSProcessSpeed(void) {
 @property (strong, nonatomic) NSMutableSet<NSString *> *allowedNamesWhenLocked;
 @property (assign, nonatomic) BOOL roomLockActive;
 @property (strong, nonatomic) NSTimer *masterTimer;
+// Names observed for the same actor *in this room session only*.
+// Actor numbers can change after rejoining and are not user identities.
+@property (strong, nonatomic) NSMutableDictionary<NSNumber *, NSMutableArray<NSString *> *> *sessionNameHistory;
+@property (assign, nonatomic) uintptr_t sessionNameRoom;
 + (instancetype)sharedInstance;
 - (void)setupMenu;
 - (void)ensureMenuVisible;
@@ -1618,6 +1622,88 @@ static volatile int32_t gOGSLastMasterFromActor = 0;
 static volatile int32_t gOGSLastMasterToActor = 0;
 static uint32_t gOGSPresenceNoRoomStreak = 0;
 
+/*
+ * Stage 13: read-only roster for Photon PUN classic fps 3.4.0.
+ * The following RVAs/offsets are confirmed from the actual iOS ARM64 fps:
+ *   PhotonNetwork.get_otherPlayers RVA 0x13CAF78 loads peer + 0x1B0;
+ *   PhotonPlayer.get_ID RVA 0x13CC384 reads + 0x10;
+ *   PhotonPlayer.get_NickName RVA 0x13D7534 loads string + 0x18;
+ *   room + 0x48 is the observed MasterClient actor.
+ * This is strictly Mach VM reading. No managed/Unity call on UIKit timer.
+ * Read failures publish an empty roster instead of reusing stale peer ptrs.
+ */
+static volatile uint32_t gOGSRosterReadOK = 0;
+static volatile uint32_t gOGSRosterReadFail = 0;
+static volatile uint32_t gOGSRosterLastCount = 0;
+static uintptr_t gOGSRosterLastRoom = 0; // UIKit timer only
+static void OGSRefreshReadOnlyRoster(void) {
+    OGSRoomSnapshot roster = {};
+    uintptr_t typeSlot = OGSResolveRVA(RVA_PHOTON_NET_TYPEINFO);
+    void *typeInfo = NULL, *fields = NULL, *netPeer = NULL;
+    uintptr_t room = 0, others = 0;
+    int32_t master = 0;
+    if (!typeSlot ||
+        !OGSReadPointer(typeSlot, &typeInfo) ||
+        !OGSReadPointer((uintptr_t)typeInfo + 0xB8, &fields) ||
+        !OGSReadPointer((uintptr_t)fields + 0x10, &netPeer) ||
+        !OGSReadMemory((uintptr_t)netPeer + 0x158, &room, sizeof(room)) ||
+        room < 0x100000000ULL ||
+        !OGSReadMemory(room + 0x48, &master, sizeof(master)) ||
+        master <= 0 || master >= 1000000 ||
+        !OGSReadMemory((uintptr_t)netPeer + 0x1B0, &others, sizeof(others))) {
+        gOGSRosterLastRoom = 0;
+        OGSPublishSnapshotValue(&roster);
+        __atomic_fetch_add(&gOGSRosterReadFail, 1u, __ATOMIC_RELAXED);
+        return;
+    }
+    roster.inRoom = true;
+    int32_t me = __atomic_load_n(&gOGSPresenceActorID, __ATOMIC_ACQUIRE);
+    roster.isMaster = me > 0 && master == me;
+    if (others == 0) {
+        gOGSRosterLastRoom = room;
+        OGSPublishSnapshotValue(&roster);
+        __atomic_store_n(&gOGSRosterLastCount, 0u, __ATOMIC_RELEASE);
+        __atomic_fetch_add(&gOGSRosterReadOK, 1u, __ATOMIC_RELAXED);
+        return;
+    }
+    uintptr_t count = 0;
+    if (others < 0x100000000ULL ||
+        !OGSReadMemory(others + 0x18, &count, sizeof(count)) ||
+        count > OGS_MAX_PEERS) {
+        OGSPublishSnapshotValue(&roster);
+        __atomic_fetch_add(&gOGSRosterReadFail, 1u, __ATOMIC_RELAXED);
+        return;
+    }
+    for (uintptr_t i = 0; i < count; ++i) {
+        void *player = NULL, *nameObject = NULL;
+        int32_t id = 0;
+        if (!OGSReadPointer(others + 0x20 + i * sizeof(void *), &player) ||
+            !OGSReadMemory((uintptr_t)player + 0x10, &id, sizeof(id)) ||
+            id <= 0 || id >= 1000000 || id == me ||
+            !OGSReadPointer((uintptr_t)player + 0x18, &nameObject)) continue;
+        NSString *name = OGSReadIl2CppString(nameObject);
+        if (!name.length) continue;
+        OGSPeerSnapshot *p = &roster.peers[roster.count++];
+        p->actorID = id;
+        p->isHost = id == master;
+        p->playerObject = NULL; // no managed pointers survive into UI snapshot
+        snprintf(p->name, sizeof(p->name), "%s", name.UTF8String ?: "");
+    }
+    uintptr_t roomAfter = 0;
+    if (!OGSReadMemory((uintptr_t)netPeer + 0x158, &roomAfter, sizeof(roomAfter)) ||
+        roomAfter != room) {
+        OGSPublishSnapshotValue(&(OGSRoomSnapshot){});
+        __atomic_fetch_add(&gOGSRosterReadFail, 1u, __ATOMIC_RELAXED);
+        return;
+    }
+    gOGSRosterLastRoom = room;
+    __atomic_store_n(&gOGSRosterLastCount, roster.count, __ATOMIC_RELEASE);
+    __atomic_fetch_add(&gOGSRosterReadOK, 1u, __ATOMIC_RELAXED);
+    OGSPublishSnapshotValue(&roster);
+}
+
+
+
 static void OGSRefreshReadOnlyPresence(void) {
     __atomic_fetch_add(&gOGSPresenceProbeCalls, 1u, __ATOMIC_RELAXED);
     uintptr_t slot = OGSResolveRVA(RVA_PHOTON_NET_TYPEINFO);
@@ -1749,6 +1835,7 @@ static void OGSInstallHooks(void) {
         inst.bannedNames = [NSMutableSet set];
         inst.bannedActorIDs = [NSMutableSet set];
         inst.allowedNamesWhenLocked = [NSMutableSet set];
+        inst.sessionNameHistory = [NSMutableDictionary dictionary];
         NSArray *savedBans = [[NSUserDefaults standardUserDefaults] stringArrayForKey:@"OGS_SavedBannedNames"];
         if (savedBans) [inst.bannedNames addObjectsFromArray:savedBans];
     });
@@ -1859,7 +1946,7 @@ static void OGSInstallHooks(void) {
         [self.floatingButton addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)]];
         [self.containerView addSubview:self.floatingButton];
 
-        self.menuPanel = [[UIView alloc] initWithFrame:CGRectMake(75, 18, 315, 285)];
+        self.menuPanel = [[UIView alloc] initWithFrame:CGRectMake(75, 18, 315, 321)];
         self.menuPanel.backgroundColor = [UIColor colorWithRed:0.09 green:0.09 blue:0.11 alpha:0.96];
         self.menuPanel.layer.cornerRadius = 14.0;
         self.menuPanel.layer.borderWidth = 2.0f;
@@ -1938,6 +2025,10 @@ static void OGSInstallHooks(void) {
         self.speedSetButton = [self makeBtn:CGRectMake(70, 249, 175, 30) title:@"السرعة: 1.0x (اضغط للكتابة)" bg:hostBlue action:@selector(promptCustomSpeed:)];
         [self.menuPanel addSubview:self.speedSetButton];
         [self.menuPanel addSubview:[self makeBtn:CGRectMake(250, 249, 55, 30) title:@"سرعة +" bg:darkGray action:@selector(speedUp:)]];
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(10, 284, 144, 30)
+            title:@"نسخ اسم المحدد 📋" bg:hostBlue action:@selector(copySelectedName:)]];
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(161, 284, 144, 30)
+            title:@"أسماء نفس الجلسة" bg:darkGray action:@selector(showSelectedNameHistory:)]];
 
         [self.containerView addSubview:self.menuPanel];
         self.containerView.floatingButton = self.floatingButton;
@@ -2052,12 +2143,85 @@ static void OGSInstallHooks(void) {
         // NSTimer entered IL2CPP object/peer code on an unsupported call path.
         // Read-only Mach VM reads only. No managed calls from UIKit timer.
         OGSRefreshReadOnlyPresence();
+        @autoreleasepool { OGSRefreshReadOnlyRoster(); }
     }
+    [self updateSessionNameHistory];
 
     if (!self.menuPanel || self.menuPanel.hidden) return;
     [self refreshUI];
 }
 
+- (void)updateSessionNameHistory {
+    // Observations only; never infer an identity across different actor IDs or rooms.
+    uintptr_t room = gOGSRosterLastRoom;
+    if (room != self.sessionNameRoom) {
+        self.sessionNameRoom = room;
+        [self.sessionNameHistory removeAllObjects];
+    }
+    if (!room) return;
+    OGSRoomSnapshot snapshot = OGSCurrentSnapshot();
+    if (!snapshot.inRoom) return;
+    for (uint32_t i = 0; i < snapshot.count; ++i) {
+        const OGSPeerSnapshot *peer = &snapshot.peers[i];
+        if (peer->actorID <= 0) continue;
+        NSString *name = [NSString stringWithUTF8String:peer->name];
+        if (!name.length) continue;
+        NSNumber *actorKey = @(peer->actorID);
+        NSMutableArray<NSString *> *names = self.sessionNameHistory[actorKey];
+        if (!names) {
+            names = [NSMutableArray arrayWithObject:name];
+            self.sessionNameHistory[actorKey] = names;
+        } else if (![names.lastObject isEqualToString:name] &&
+                   ![names containsObject:name]) {
+            // Keep at most 8 distinct names for this one actor in this room.
+            if (names.count >= 8) [names removeObjectAtIndex:0];
+            [names addObject:name];
+        }
+    }
+}
+- (void)copySelectedName:(UIButton *)sender {
+    (void)sender;
+    OGSRoomSnapshot snapshot = OGSCurrentSnapshot();
+    uint32_t index = __atomic_load_n(&gOGS.selectedPeer, __ATOMIC_ACQUIRE);
+    if (!snapshot.inRoom || index >= snapshot.count) {
+        self.statusLabel.text = @"القائمة خالية أو غير متاحة؛ لا يوجد اسم للنسخ";
+        return;
+    }
+    NSString *name = [NSString stringWithUTF8String:snapshot.peers[index].name];
+    if (!name.length) return;
+    [UIPasteboard generalPasteboard].string = name;
+    self.statusLabel.text = [NSString stringWithFormat:@"نُسخ الاسم: %@", name];
+}
+- (void)showSelectedNameHistory:(UIButton *)sender {
+    (void)sender;
+    OGSRoomSnapshot snapshot = OGSCurrentSnapshot();
+    uint32_t index = __atomic_load_n(&gOGS.selectedPeer, __ATOMIC_ACQUIRE);
+    if (!snapshot.inRoom || index >= snapshot.count) {
+        self.statusLabel.text = @"اختر لاعبًا من القائمة أولًا";
+        return;
+    }
+    OGSPeerSnapshot peer = snapshot.peers[index];
+    NSArray<NSString *> *names = [self.sessionNameHistory[@(peer.actorID)] copy];
+    NSString *last = [NSString stringWithUTF8String:peer.name] ?: @"غير معروف";
+    NSString *message = names.count > 1 ?
+        [NSString stringWithFormat:@"أسماء شوهدت لنفس Actor #%d في هذه الغرفة فقط:\n%@\n\nلا يمكن ربط أسماء أشخاص بعد الخروج والدخول أو عبر الأيام بهذه البيانات.",
+             peer.actorID, [names componentsJoinedByString:@" ← "]] :
+        [NSString stringWithFormat:@"Actor #%d: %@\nلم يُرصد تغيير اسم لهذا الرقم أثناء هذه الجلسة. رقم Actor ليس هوية حساب دائمة.",
+             peer.actorID, last];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"سجل الأسماء المحلي"
+        message:message preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"نسخ" style:UIAlertActionStyleDefault
+        handler:^(UIAlertAction *action) {
+            (void)action;
+            [UIPasteboard generalPasteboard].string =
+                names.count ? [names componentsJoinedByString:@" ← "] : last;
+        }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"إغلاق"
+        style:UIAlertActionStyleCancel handler:nil]];
+    UIViewController *root = [self gameMainWindow].rootViewController;
+    if (root && !root.presentedViewController)
+        [root presentViewController:alert animated:YES completion:nil];
+}
 - (void)refreshUI {
     OGSRoomSnapshot snapshot = OGSCurrentSnapshot();
     uint32_t count = snapshot.count;
@@ -2196,6 +2360,12 @@ static void OGSInstallHooks(void) {
         (unsigned long long)__atomic_load_n(&gOGSChatHookCalls, __ATOMIC_RELAXED),
         (unsigned long long)__atomic_load_n(&gOGSNetworkEvents, __ATOMIC_RELAXED),
         (unsigned long long)__atomic_load_n(&gOGSMasterSwitchEvents, __ATOMIC_RELAXED)];
+    details = [details stringByAppendingFormat:
+        @"\nRead-only roster: active=%u | list=%u | failures=%u | names tracked=%lu",
+        __atomic_load_n(&gOGSRosterReadOK, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSRosterLastCount, __ATOMIC_ACQUIRE),
+        __atomic_load_n(&gOGSRosterReadFail, __ATOMIC_RELAXED),
+        (unsigned long)self.sessionNameHistory.count];
     details = [details stringByAppendingFormat:
         @"\nRead-only presence: %@ | polls: %u | read failures: %u | local actor: %d",
         __atomic_load_n(&gOGSPresenceReadOnly, __ATOMIC_ACQUIRE) == 1 ? @"IN" :
