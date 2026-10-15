@@ -667,6 +667,39 @@ static bool OGSClaimMasterReal(bool bypassCooldown) {
     return sent;
 }
 
+// Stage 7: explicit, single-shot recovery experiment (OFF until user taps).
+// Call only from the already-active Photon event-processing context,
+// never the UIKit timer. Request the game API to ask Photon to restore the
+// local actor; do not edit MasterClient fields or send duplicate requests.
+static volatile uint32_t gOGSManualRecoveryPending = 0;
+static volatile uint32_t gOGSManualRecoveryAttempts = 0;
+static volatile uint32_t gOGSManualRecoveryAccepted = 0;
+static volatile uint32_t gOGSManualRecoveryFailed = 0;
+static volatile uint32_t gOGSManualRecoverySkipped = 0;
+
+static bool OGSRequestLocalMasterOnceOnEvent(void) {
+    void *netPeer = OGSGetNetworkingPeerSafe();
+    if (!netPeer) return false;
+    uintptr_t room = 0, localPlayer = 0;
+    int32_t localActor = 0, roomMaster = 0;
+    if (!OGSReadMemory((uintptr_t)netPeer + 0x158, &room, sizeof(room)) ||
+        !OGSReadMemory((uintptr_t)netPeer + 0x160, &localPlayer, sizeof(localPlayer)) ||
+        room < 0x100000000ULL || localPlayer < 0x100000000ULL ||
+        !OGSReadMemory(localPlayer + 0x10, &localActor, sizeof(localActor)) ||
+        !OGSReadMemory(room + 0x48, &roomMaster, sizeof(roomMaster)) ||
+        localActor <= 0 || localActor >= 1000000 ||
+        roomMaster <= 0 || roomMaster >= 1000000 ||
+        localActor == roomMaster) return false;
+
+    uintptr_t slot = OGSResolveRVA(gOffsets.tblSetMaster);
+    void *candidate = NULL;
+    if (!slot || !OGSReadPointer(slot, &candidate) || !candidate ||
+        !OGSIsExecutableGameAddress((uintptr_t)candidate)) return false;
+    // A true return means the local API accepted the request for submission.
+    // Only a later Photon room read can confirm actual MasterClient status.
+    return ((PeerAction1Fn)candidate)((void *)localPlayer, NULL);
+}
+
 static bool OGSKickPeerReal(void *peerObj, bool bypassCooldown) {
     if (!peerObj || (uintptr_t)peerObj < 0x100000000ULL) return false;
 
@@ -1148,6 +1181,19 @@ static void hook_OnEvent(void *self, void *eventData, void *method) {
         }
     } else {
         __atomic_fetch_add(&gOGSInlineMasterReadFailures, 1u, __ATOMIC_RELAXED);
+    }
+
+    // User-triggered one-shot only. Consume before dispatch to avoid
+    // recursion or retries even if the request generates more events.
+    if (__atomic_exchange_n(&gOGSManualRecoveryPending, 0u, __ATOMIC_ACQ_REL)) {
+        __atomic_fetch_add(&gOGSManualRecoveryAttempts, 1u, __ATOMIC_RELAXED);
+        if (masterAfter <= 0) {
+            __atomic_fetch_add(&gOGSManualRecoverySkipped, 1u, __ATOMIC_RELAXED);
+        } else if (OGSRequestLocalMasterOnceOnEvent()) {
+            __atomic_fetch_add(&gOGSManualRecoveryAccepted, 1u, __ATOMIC_RELAXED);
+        } else {
+            __atomic_fetch_add(&gOGSManualRecoveryFailed, 1u, __ATOMIC_RELAXED);
+        }
     }
 }
 
@@ -1964,6 +2010,14 @@ static void OGSInstallHooks(void) {
         __atomic_load_n(&gOGSInlineMasterChangeCode, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSInlineMasterFrom, __ATOMIC_ACQUIRE),
         __atomic_load_n(&gOGSInlineMasterTo, __ATOMIC_ACQUIRE)];
+    details = [details stringByAppendingFormat:
+        @"\nManual host restore: queued=%u | attempts=%u | API accepted=%u | failed=%u | skipped=%u"
+         "\nAPI accepted does not mean the server restored MasterClient.",
+        __atomic_load_n(&gOGSManualRecoveryPending, __ATOMIC_ACQUIRE),
+        __atomic_load_n(&gOGSManualRecoveryAttempts, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSManualRecoveryAccepted, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSManualRecoveryFailed, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSManualRecoverySkipped, __ATOMIC_RELAXED)];
     char eventTrailCopy[sizeof(gOGSLastTransitionEventTrail)] = {0};
     os_unfair_lock_lock(&gStateLock);
     memcpy(eventTrailCopy, gOGSLastTransitionEventTrail, sizeof(eventTrailCopy));
@@ -2017,16 +2071,27 @@ static void OGSInstallHooks(void) {
 }
 
 - (void)claimHostNow:(UIButton *)sender {
-    OGSRoomSnapshot snapshot = OGSCurrentSnapshot();
-    if (!snapshot.inRoom) {
-        self.statusLabel.text = @"ادخل داخل روم أولاً لسحب الهوست!";
+    (void)sender;
+    int32_t presence = __atomic_load_n(&gOGSPresenceReadOnly, __ATOMIC_ACQUIRE);
+    int32_t localActor = __atomic_load_n(&gOGSPresenceActorID, __ATOMIC_ACQUIRE);
+    int32_t masterActor = __atomic_load_n(&gOGSLocalMasterActorID, __ATOMIC_ACQUIRE);
+    if (presence != 1 || localActor <= 0 || masterActor <= 0) {
+        self.statusLabel.text = @"حالة الغرفة أو الهوست غير مؤكدة؛ افتح التشخيص أولًا";
         return;
     }
-    os_unfair_lock_lock(&gStateLock);
-    gOGS.lastThreatTime = CFAbsoluteTimeGetCurrent();
-    os_unfair_lock_unlock(&gStateLock);
-    __atomic_store_n(&gOGS.forceHostReq, 1, __ATOMIC_RELEASE);
-    self.statusLabel.text = @"تم تسجيل طلب الهوست؛ التنفيذ ينتظر تحديث محرك اللعبة وتأكيد Photon";
+    if (localActor == masterActor) {
+        self.statusLabel.text = @"أنت الهوست بالفعل بحسب بيانات Photon المحلية";
+        return;
+    }
+    static double lastManualClick = 0.0; // UIKit thread only
+    double now = CFAbsoluteTimeGetCurrent();
+    if (now - lastManualClick < 8.0) {
+        self.statusLabel.text = @"انتظر ثماني ثوانٍ قبل إعادة اختبار الاستعادة";
+        return;
+    }
+    lastManualClick = now;
+    __atomic_store_n(&gOGSManualRecoveryPending, 1u, __ATOMIC_RELEASE);
+    self.statusLabel.text = @"اختبار استعادة واحد في انتظار حدث Photon؛ هذا ليس تأكيدًا للاستعادة";
 }
 
 - (void)toggleAutoHost:(UIButton *)s {
