@@ -1292,6 +1292,12 @@ static volatile uint32_t gOGSPresenceProbeCalls = 0;
 static volatile uint32_t gOGSPresenceReadFailures = 0;
 static volatile int32_t gOGSPresenceReadOnly = 0; // 0 unknown, 1 room seen, 2 room absent
 static volatile int32_t gOGSPresenceActorID = 0;
+// fps 3.4.0: currentRoom->masterActorID +0x48 (ARM64 game RVA 0x13F1FF4).
+// Read-only Photon local state. Not confirmation of server-side authority.
+static volatile int32_t gOGSLocalMasterActorID = 0; // zero means unknown
+static volatile uint32_t gOGSLocalMasterSamples = 0;
+static volatile uint32_t gOGSLocalMasterReadFailures = 0;
+static volatile uint32_t gOGSLocalMasterChanges = 0;
 static uint32_t gOGSPresenceNoRoomStreak = 0;
 
 static void OGSRefreshReadOnlyPresence(void) {
@@ -1302,6 +1308,7 @@ static void OGSRefreshReadOnlyPresence(void) {
         !OGSReadPointer((uintptr_t)typeInfo + 0xB8, &fields) ||
         !OGSReadPointer((uintptr_t)fields + 0x10, &netPeer)) {
         __atomic_store_n(&gOGSPresenceReadOnly, 0, __ATOMIC_RELEASE);
+        __atomic_store_n(&gOGSLocalMasterActorID, 0, __ATOMIC_RELEASE);
         __atomic_fetch_add(&gOGSPresenceReadFailures, 1u, __ATOMIC_RELAXED);
         gOGSPresenceNoRoomStreak = 0;
         return;
@@ -1310,6 +1317,7 @@ static void OGSRefreshReadOnlyPresence(void) {
     if (!OGSReadMemory((uintptr_t)netPeer + 0x158, &room, sizeof(room)) ||
         !OGSReadMemory((uintptr_t)netPeer + 0x160, &local, sizeof(local))) {
         __atomic_store_n(&gOGSPresenceReadOnly, 0, __ATOMIC_RELEASE);
+        __atomic_store_n(&gOGSLocalMasterActorID, 0, __ATOMIC_RELEASE);
         __atomic_fetch_add(&gOGSPresenceReadFailures, 1u, __ATOMIC_RELAXED);
         gOGSPresenceNoRoomStreak = 0;
         return;
@@ -1321,6 +1329,20 @@ static void OGSRefreshReadOnlyPresence(void) {
     if (room > 0x100000000ULL && localValid) {
         __atomic_store_n(&gOGSPresenceReadOnly, 1, __ATOMIC_RELEASE);
         __atomic_store_n(&gOGSPresenceActorID, actor, __ATOMIC_RELEASE);
+        // Pure VM read: safe even when Cash/Chat update callbacks do not run.
+        // No invocation of a Photon getter or setter on the UIKit thread.
+        int32_t observedMaster = 0;
+        bool validMaster = OGSReadMemory(room + 0x48, &observedMaster, sizeof(observedMaster)) &&
+            observedMaster > 0 && observedMaster < 1000000;
+        if (validMaster) {
+            int32_t previous = __atomic_exchange_n(&gOGSLocalMasterActorID, observedMaster, __ATOMIC_ACQ_REL);
+            if (previous > 0 && previous != observedMaster)
+                __atomic_fetch_add(&gOGSLocalMasterChanges, 1u, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&gOGSLocalMasterSamples, 1u, __ATOMIC_RELAXED);
+        } else {
+            __atomic_store_n(&gOGSLocalMasterActorID, 0, __ATOMIC_RELEASE);
+            __atomic_fetch_add(&gOGSLocalMasterReadFailures, 1u, __ATOMIC_RELAXED);
+        }
         __atomic_store_n(&gOGS.inRoom, true, __ATOMIC_RELEASE);
         gOGSPresenceNoRoomStreak = 0;
         os_unfair_lock_lock(&gStateLock);
@@ -1330,6 +1352,7 @@ static void OGSRefreshReadOnlyPresence(void) {
     } else if (room == 0 && ++gOGSPresenceNoRoomStreak >= 4) {
         __atomic_store_n(&gOGSPresenceReadOnly, 2, __ATOMIC_RELEASE);
         __atomic_store_n(&gOGSPresenceActorID, 0, __ATOMIC_RELEASE);
+        __atomic_store_n(&gOGSLocalMasterActorID, 0, __ATOMIC_RELEASE);
         __atomic_store_n(&gOGS.inRoom, false, __ATOMIC_RELEASE);
         __atomic_store_n(&gOGS.isMaster, false, __ATOMIC_RELEASE);
         __atomic_store_n(&gOGS.heldMasterStably, false, __ATOMIC_RELEASE);
@@ -1339,6 +1362,7 @@ static void OGSRefreshReadOnlyPresence(void) {
         os_unfair_lock_unlock(&gStateLock);
     } else {
         __atomic_store_n(&gOGSPresenceReadOnly, 0, __ATOMIC_RELEASE);
+        __atomic_store_n(&gOGSLocalMasterActorID, 0, __ATOMIC_RELEASE);
         if (room != 0) gOGSPresenceNoRoomStreak = 0;
     }
 }
@@ -1796,6 +1820,17 @@ static void OGSInstallHooks(void) {
         __atomic_load_n(&gOGSPresenceProbeCalls, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSPresenceReadFailures, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSPresenceActorID, __ATOMIC_ACQUIRE)];
+    int32_t observedMaster = __atomic_load_n(&gOGSLocalMasterActorID, __ATOMIC_ACQUIRE);
+    int32_t myActor = __atomic_load_n(&gOGSPresenceActorID, __ATOMIC_ACQUIRE);
+    int32_t presence = __atomic_load_n(&gOGSPresenceReadOnly, __ATOMIC_ACQUIRE);
+    NSString *matchText = presence == 1 && observedMaster > 0 && myActor > 0 ?
+        (observedMaster == myActor ? @"YOU (local)" : @"OTHER (local)") : @"UNKNOWN";
+    details = [details stringByAppendingFormat:
+        @"\nPhoton local master actor: %d | local actor: %d | match: %@\nMaster reads: %u | failures: %u | changes: %u",
+        observedMaster, myActor, matchText,
+        __atomic_load_n(&gOGSLocalMasterSamples, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSLocalMasterReadFailures, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSLocalMasterChanges, __ATOMIC_RELAXED)];
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"تشخيص تحديث OGS"
                              message:details preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"نسخ" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
