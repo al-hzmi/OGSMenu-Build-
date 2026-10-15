@@ -1053,6 +1053,10 @@ static volatile uint64_t gOGSChatHookCalls = 0;
 static volatile uint64_t gOGSNetworkEvents = 0;
 static volatile uint64_t gOGSMasterSwitchEvents = 0;
 static volatile int32_t gOGSHostMonitorOn = 1;
+// Photon network event diagnostics. Defined before hook_OnEvent uses them.
+static volatile uint32_t gOGSEventCodes[256] = {0};
+static volatile uint32_t gOGSEventCodeReadFailures = 0;
+static volatile uint32_t gOGSLastEventCode = 0;
 
 static void hook_OnEvent(void *self, void *eventData, void *method) {
     __atomic_fetch_add(&gOGSNetworkEvents, 1ULL, __ATOMIC_RELAXED);
@@ -1309,9 +1313,6 @@ static uintptr_t gOGSLastReliableRoomAddress = 0; // UIKit timer thread only
 static int32_t gOGSLastReliableMasterActor = 0;    // UIKit timer thread only
 static volatile int32_t gOGSLastMasterFromActor = 0;
 static volatile int32_t gOGSLastMasterToActor = 0;
-static volatile uint32_t gOGSEventCodes[256] = {0};
-static volatile uint32_t gOGSEventCodeReadFailures = 0;
-static volatile uint32_t gOGSLastEventCode = 0;
 static uint32_t gOGSPresenceNoRoomStreak = 0;
 
 static void OGSRefreshReadOnlyPresence(void) {
