@@ -1532,6 +1532,13 @@ static void OGSRefreshReadOnlyPresence(void) {
     if (room > 0x100000000ULL && localValid) {
         __atomic_store_n(&gOGSPresenceReadOnly, 1, __ATOMIC_RELEASE);
         __atomic_store_n(&gOGSPresenceActorID, actor, __ATOMIC_RELEASE);
+        if (__atomic_load_n(&gOGSAutoEnabled, __ATOMIC_ACQUIRE)) {
+            bool mismatch = false;
+            os_unfair_lock_lock(&gStateLock);
+            mismatch = gOGSAutoRoom != room || gOGSAutoOwner != actor;
+            os_unfair_lock_unlock(&gStateLock);
+            if (mismatch) OGSDisarmAutoRoom();
+        }
         // Pure VM read: safe even when Cash/Chat update callbacks do not run.
         // No invocation of a Photon getter or setter on the UIKit thread.
         int32_t observedMaster = 0;
@@ -1579,6 +1586,7 @@ static void OGSRefreshReadOnlyPresence(void) {
             gOGS.roomEnterTime = CFAbsoluteTimeGetCurrent();
         os_unfair_lock_unlock(&gStateLock);
     } else if (room == 0 && ++gOGSPresenceNoRoomStreak >= 4) {
+        OGSDisarmAutoRoom();
         __atomic_store_n(&gOGSPresenceReadOnly, 2, __ATOMIC_RELEASE);
         gOGSLastReliableRoomAddress = 0;
         gOGSLastReliableMasterActor = 0;
@@ -1788,7 +1796,7 @@ static void OGSInstallHooks(void) {
         [self.menuPanel addSubview:[self makeBtn:CGRectMake(161, 105, 144, 32) title:@"طرد المحدد فقط" bg:kickOrange action:@selector(kickSelected:)]];
         [self.menuPanel addSubview:[self makeBtn:CGRectMake(10, 105, 144, 32) title:@"طرد وحظر (Ban)" bg:banRed action:@selector(banSelected:)]];
 
-        self.hostLockButton = [self makeBtn:CGRectMake(155, 142, 150, 32) title:@"حماية الهوست: مفعّل 👑" bg:wpnGreen action:@selector(toggleAutoHost:)];
+        self.hostLockButton = [self makeBtn:CGRectMake(155, 142, 150, 32) title:@"استعادة تلقائية: إيقاف" bg:darkGray action:@selector(toggleAutoHost:)];
         [self.menuPanel addSubview:self.hostLockButton];
 
         self.antiKickLockButton = [self makeBtn:CGRectMake(10, 142, 140, 32) title:@"قفل البقاء: تلقائي 🛡️" bg:darkGray action:@selector(toggleAntiKickHardLock:)];
@@ -1941,6 +1949,14 @@ static void OGSInstallHooks(void) {
     lastUpdate = gOGS.lastUnityFrameTick;
     os_unfair_lock_unlock(&gStateLock);
     BOOL hookActive = lastUpdate > 0.0 && (CFAbsoluteTimeGetCurrent() - lastUpdate) <= 0.5;
+    BOOL autoArmed = __atomic_load_n(&gOGSAutoEnabled, __ATOMIC_ACQUIRE) != 0;
+    NSString *autoTitle = autoArmed ? @"استعادة تلقائية: مفعلة 👑" : @"استعادة تلقائية: إيقاف";
+    if (self.hostLockButton && ![self.hostLockButton.currentTitle isEqualToString:autoTitle]) {
+        [self.hostLockButton setTitle:autoTitle forState:UIControlStateNormal];
+        self.hostLockButton.backgroundColor = autoArmed ?
+            [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0] :
+            [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
+    }
     int32_t pending = __atomic_load_n(&gOGS.forceHostReq, __ATOMIC_ACQUIRE);
     // UNKNOWN is safer than falsely declaring room ownership with a stale tick.
     int32_t readPresence = __atomic_load_n(&gOGSPresenceReadOnly, __ATOMIC_ACQUIRE);
@@ -2102,6 +2118,16 @@ static void OGSInstallHooks(void) {
         __atomic_load_n(&gOGSManualRecoveryAccepted, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSManualRecoveryFailed, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSManualRecoverySkipped, __ATOMIC_RELAXED)];
+    details = [details stringByAppendingFormat:
+        @"\nAuto recovery: %@ | attempts=%u | API accepted=%u | failed=%u"
+         "\nCooldown skips=%u | guard skips=%u | disarms=%u",
+        __atomic_load_n(&gOGSAutoEnabled, __ATOMIC_ACQUIRE) ? @"ARMED" : @"OFF",
+        __atomic_load_n(&gOGSAutoAttempts, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSAutoAccepted, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSAutoFailed, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSAutoCooldown, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSAutoGuarded, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSAutoDisarmed, __ATOMIC_RELAXED)];
     char eventTrailCopy[sizeof(gOGSLastTransitionEventTrail)] = {0};
     os_unfair_lock_lock(&gStateLock);
     memcpy(eventTrailCopy, gOGSLastTransitionEventTrail, sizeof(eventTrailCopy));
@@ -2179,17 +2205,32 @@ static void OGSInstallHooks(void) {
 }
 
 - (void)toggleAutoHost:(UIButton *)s {
-    gOGS.autoHostOn = !gOGS.autoHostOn;
-    __atomic_store_n(&gOGSHostMonitorOn, gOGS.autoHostOn, __ATOMIC_RELEASE);
-    if (gOGS.autoHostOn) {
-        __atomic_store_n(&gOGS.forceHostReq, 1, __ATOMIC_RELEASE);
-        [s setTitle:@"حماية الهوست: مفعّل 👑" forState:UIControlStateNormal];
-        s.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
-    } else {
-        [s setTitle:@"حماية الهوست: متوقف" forState:UIControlStateNormal];
+    // Disable the legacy path (Unity update hooks never fire in this build).
+    __atomic_store_n(&gOGS.autoHostOn, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&gOGSHostMonitorOn, 0, __ATOMIC_RELEASE);
+    if (__atomic_load_n(&gOGSAutoEnabled, __ATOMIC_ACQUIRE)) {
+        OGSDisarmAutoRoom();
+        [s setTitle:@"استعادة تلقائية: إيقاف" forState:UIControlStateNormal];
         s.backgroundColor = [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
+        self.statusLabel.text = @"تم إيقاف الاستعادة التلقائية";
+        return;
     }
-    [self refreshUI];
+    uintptr_t room = 0;
+    int32_t localActor = 0, master = 0;
+    if (!OGSReadAutoRoom(&room, &localActor, &master) ||
+        localActor != 1 || master != localActor) {
+        self.statusLabel.text = @"فعّل الاستعادة وأنت الهوست الأصلي (اللاعب 1) فقط";
+        return;
+    }
+    os_unfair_lock_lock(&gStateLock);
+    gOGSAutoRoom = room;
+    gOGSAutoOwner = localActor;
+    gOGSAutoLastRequestAt = 0.;
+    __atomic_store_n(&gOGSAutoEnabled, 1u, __ATOMIC_RELEASE);
+    os_unfair_lock_unlock(&gStateLock);
+    [s setTitle:@"استعادة تلقائية: مفعلة 👑" forState:UIControlStateNormal];
+    s.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
+    self.statusLabel.text = @"مفعلة لهذا الروم فقط: محاولة واحدة عند الفقد وتبريد 8 ثوانٍ";
 }
 
 - (void)toggleGodMode:(UIButton *)s {
