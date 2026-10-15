@@ -836,6 +836,78 @@ static bool OGSReserveMasterRequestLocked(uintptr_t room, int32_t actor, double 
     return true;
 }
 
+// Verified for fps 3.4.0 (IL2CPP metadata Room.set_IsOpen / Room.set_IsVisible).
+// Both are PUN Room property setters; invoke only on the game's Photon callback,
+// never from the UIKit timer. Slot pointers have been checked against ARM64.
+static const uintptr_t kOGSRoomSetOpenSlot = 0x02391758;
+static const uintptr_t kOGSRoomSetVisibleSlot = 0x02391768;
+// 0=no action, 1=hidden & joinable, 2=hidden & closed, 3=public & joinable.
+static volatile uint32_t gOGSPrivacyPending = 0;
+static uintptr_t gOGSPrivacyRequestedRoom = 0; // gStateLock
+static int32_t gOGSPrivacyRequestedActor = 0; // gStateLock
+static volatile uint32_t gOGSPrivacyApplied = 0;
+static volatile uint32_t gOGSPrivacyRejected = 0;
+
+static bool OGSReadRoomPrivacy(uintptr_t room, bool *isOpen, bool *isVisible) {
+    uint8_t o = 0, v = 0;
+    if (room < 0x100000000ULL ||
+        !OGSReadMemory(room + 0x38, &o, sizeof(o)) ||
+        !OGSReadMemory(room + 0x39, &v, sizeof(v)) ||
+        o > 1 || v > 1) return false;
+    if (isOpen) *isOpen = (o != 0);
+    if (isVisible) *isVisible = (v != 0);
+    return true;
+}
+
+typedef void (*OGSRoomBoolSetterFn)(void *room, bool value, void *methodInfo);
+
+// Process a user-requested room privacy mode from a Photon callback. A room
+// and local-master check prevents applying a stale request after rejoin/transfer.
+// Property setter updates locally and queues Photon room properties; server
+// acceptance is not assumed by this local action.
+static void OGSProcessRoomPrivacyOnEvent(void) {
+    uint32_t mode = __atomic_exchange_n(&gOGSPrivacyPending, 0u, __ATOMIC_ACQ_REL);
+    if (mode < 1 || mode > 3) return;
+
+    uintptr_t wantedRoom = 0;
+    int32_t wantedActor = 0;
+    os_unfair_lock_lock(&gStateLock);
+    wantedRoom = gOGSPrivacyRequestedRoom;
+    wantedActor = gOGSPrivacyRequestedActor;
+    os_unfair_lock_unlock(&gStateLock);
+
+    uintptr_t room = 0;
+    int32_t localActor = 0, masterActor = 0;
+    bool isOpen = true, isVisible = true;
+    uintptr_t openSlot = OGSResolveRVA(kOGSRoomSetOpenSlot);
+    uintptr_t visibleSlot = OGSResolveRVA(kOGSRoomSetVisibleSlot);
+    void *openSetter = NULL, *visibleSetter = NULL;
+    if (!OGSReadAutoRoom(&room, &localActor, &masterActor) ||
+        room != wantedRoom || localActor != wantedActor ||
+        localActor != masterActor ||
+        !OGSReadRoomPrivacy(room, &isOpen, &isVisible) ||
+        !openSlot || !visibleSlot ||
+        !OGSReadPointer(openSlot, &openSetter) ||
+        !OGSReadPointer(visibleSlot, &visibleSetter) ||
+        !OGSIsExecutableGameAddress((uintptr_t)openSetter) ||
+        !OGSIsExecutableGameAddress((uintptr_t)visibleSetter)) {
+        __atomic_fetch_add(&gOGSPrivacyRejected, 1u, __ATOMIC_RELAXED);
+        return;
+    }
+
+    bool targetOpen = mode != 2;
+    bool targetVisible = mode == 3;
+    // Hide first when closing. Open first when publishing. Both changes
+    // use the verified PUN Room property API, never direct memory writes.
+    if (!targetVisible && isVisible)
+        ((OGSRoomBoolSetterFn)visibleSetter)((void *)room, false, NULL);
+    if (isOpen != targetOpen)
+        ((OGSRoomBoolSetterFn)openSetter)((void *)room, targetOpen, NULL);
+    if (targetVisible && !isVisible)
+        ((OGSRoomBoolSetterFn)visibleSetter)((void *)room, true, NULL);
+    __atomic_fetch_add(&gOGSPrivacyApplied, 1u, __ATOMIC_RELAXED);
+}
+
 static bool OGSRequestLocalMasterOnceOnEvent(void) {
     void *netPeer = OGSGetNetworkingPeerSafe();
     if (!netPeer) return false;
@@ -964,6 +1036,8 @@ static void OGSProcessSpeed(void) {
 @property (strong, nonatomic) UIButton *unbanButton;
 @property (strong, nonatomic) UIButton *lockButton;
 @property (strong, nonatomic) UIButton *hostLockButton;
+@property (strong, nonatomic) UIButton *privacyHiddenButton;
+@property (strong, nonatomic) UIButton *privacyClosedButton;
 @property (strong, nonatomic) UIButton *godModeButton;     // درع الحماية
 @property (strong, nonatomic) UIButton *magicBulletButton; // رصاصة سحرية
 @property (strong, nonatomic) UIButton *antiKickLockButton;
@@ -1498,6 +1572,9 @@ static void hook_OnEvent(void *self, void *eventData, void *method) {
         }
     }
 
+    // Execute queued room visibility/open settings on the Photon callback,
+    // after the original game networking handler has updated room state.
+    OGSProcessRoomPrivacyOnEvent();
     // Process explicit user actions only after the game's Photon handler.
     OGSProcessManualKickOnEvent();
     if (__atomic_load_n(&gOGS.speedDirty, __ATOMIC_ACQUIRE))
@@ -2079,7 +2156,7 @@ static void OGSInstallHooks(void) {
         [self.floatingButton addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)]];
         [self.containerView addSubview:self.floatingButton];
 
-        self.menuPanel = [[UIView alloc] initWithFrame:CGRectMake(75, 18, 315, 321)];
+        self.menuPanel = [[UIView alloc] initWithFrame:CGRectMake(75, 18, 315, 358)];
         self.menuPanel.backgroundColor = [UIColor colorWithRed:0.09 green:0.09 blue:0.11 alpha:0.96];
         self.menuPanel.layer.cornerRadius = 14.0;
         self.menuPanel.layer.borderWidth = 2.0f;
@@ -2087,7 +2164,7 @@ static void OGSInstallHooks(void) {
         self.menuPanel.hidden = YES;
 
         self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 5, 260, 18)];
-        self.titleLabel.text = @"OGS Stage 13 | إدارة الروم";
+        self.titleLabel.text = @"OGS Stage 15 | إدارة الروم";
         self.titleLabel.textColor = [UIColor whiteColor];
         self.titleLabel.textAlignment = NSTextAlignmentCenter;
         self.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
@@ -2162,6 +2239,15 @@ static void OGSInstallHooks(void) {
             title:@"نسخ اسم المحدد 📋" bg:hostBlue action:@selector(copySelectedName:)]];
         [self.menuPanel addSubview:[self makeBtn:CGRectMake(161, 284, 144, 30)
             title:@"أسماء نفس الجلسة" bg:darkGray action:@selector(showSelectedNameHistory:)]];
+
+        // Exactly two optional privacy choices; tapping the active choice
+        // again restores the public and joinable default.
+        self.privacyHiddenButton = [self makeBtn:CGRectMake(10, 319, 144, 30)
+            title:@"مخفي: إيقاف" bg:darkGray action:@selector(togglePrivacyHidden:)];
+        [self.menuPanel addSubview:self.privacyHiddenButton];
+        self.privacyClosedButton = [self makeBtn:CGRectMake(161, 319, 144, 30)
+            title:@"خاص ومغلق: إيقاف" bg:darkGray action:@selector(togglePrivacyClosed:)];
+        [self.menuPanel addSubview:self.privacyClosedButton];
 
         [self.containerView addSubview:self.menuPanel];
         self.containerView.floatingButton = self.floatingButton;
@@ -2364,6 +2450,24 @@ static void OGSInstallHooks(void) {
     os_unfair_lock_unlock(&gStateLock);
     BOOL hookActive = lastUpdate > 0.0 && (CFAbsoluteTimeGetCurrent() - lastUpdate) <= 0.5;
     BOOL autoArmed = __atomic_load_n(&gOGSAutoEnabled, __ATOMIC_ACQUIRE) != 0;
+    // Render privacy from fresh room memory, not a claimed local UI state.
+    uintptr_t privacyRoom = 0;
+    int32_t privacyLocal = 0, privacyMaster = 0;
+    bool privacyOpen = true, privacyVisible = true;
+    BOOL privacyReadable = OGSReadAutoRoom(&privacyRoom, &privacyLocal, &privacyMaster) &&
+        OGSReadRoomPrivacy(privacyRoom, &privacyOpen, &privacyVisible);
+    BOOL hiddenActive = privacyReadable && !privacyVisible && privacyOpen;
+    BOOL closedActive = privacyReadable && !privacyVisible && !privacyOpen;
+    UIColor *privacyGray = [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
+    UIColor *privacyGreen = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
+    if (self.privacyHiddenButton) {
+        [self.privacyHiddenButton setTitle:(hiddenActive ? @"مخفي: مفعّل" : @"مخفي: إيقاف") forState:UIControlStateNormal];
+        self.privacyHiddenButton.backgroundColor = hiddenActive ? privacyGreen : privacyGray;
+    }
+    if (self.privacyClosedButton) {
+        [self.privacyClosedButton setTitle:(closedActive ? @"خاص ومغلق: مفعّل" : @"خاص ومغلق: إيقاف") forState:UIControlStateNormal];
+        self.privacyClosedButton.backgroundColor = closedActive ? privacyGreen : privacyGray;
+    }
     NSString *autoTitle = autoArmed ? @"استعادة تلقائية: مفعلة 👑" : @"استعادة تلقائية: إيقاف";
     if (self.hostLockButton && ![self.hostLockButton.currentTitle isEqualToString:autoTitle]) {
         [self.hostLockButton setTitle:autoTitle forState:UIControlStateNormal];
@@ -2660,6 +2764,41 @@ static void OGSInstallHooks(void) {
     uint32_t current = __atomic_load_n(&gOGS.selectedPeer, __ATOMIC_ACQUIRE);
     __atomic_store_n(&gOGS.selectedPeer, (current + snapshot.count - 1) % snapshot.count, __ATOMIC_RELEASE);
     [self refreshUI];
+}
+
+// UI only queues an intent. The managed Room setters execute on OnEvent.
+- (void)requestPrivacyMode:(uint32_t)mode {
+    uintptr_t room = 0;
+    int32_t actor = 0, master = 0;
+    bool open = true, visible = true;
+    if (!OGSReadAutoRoom(&room, &actor, &master) ||
+        !OGSReadRoomPrivacy(room, &open, &visible)) {
+        self.statusLabel.text = @"لا يمكن قراءة حالة الروم؛ ادخل رومًا مستقرًا";
+        return;
+    }
+    if (actor != master) {
+        self.statusLabel.text = @"تغيير خصوصية الروم متاح عندما تكون الهوست فقط";
+        return;
+    }
+    bool alreadyActive = (mode == 1 && !visible && open) ||
+                         (mode == 2 && !visible && !open);
+    uint32_t targetMode = alreadyActive ? 3u : mode;
+    os_unfair_lock_lock(&gStateLock);
+    gOGSPrivacyRequestedRoom = room;
+    gOGSPrivacyRequestedActor = actor;
+    __atomic_store_n(&gOGSPrivacyPending, targetMode, __ATOMIC_RELEASE);
+    os_unfair_lock_unlock(&gStateLock);
+    self.statusLabel.text = targetMode == 3 ? @"طلب إظهار الروم وفتحه ينتظر حدث Photon" :
+        targetMode == 1 ? @"طلب إخفاء الروم مع السماح بالدخول باسمه" :
+                          @"طلب إخفاء الروم وإغلاق الانضمام";
+}
+- (void)togglePrivacyHidden:(UIButton *)sender {
+    (void)sender;
+    [self requestPrivacyMode:1u];
+}
+- (void)togglePrivacyClosed:(UIButton *)sender {
+    (void)sender;
+    [self requestPrivacyMode:2u];
 }
 
 - (void)claimHostNow:(UIButton *)sender {
