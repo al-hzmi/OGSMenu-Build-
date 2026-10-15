@@ -687,6 +687,16 @@ static volatile uint32_t gOGSAutoFailed = 0;
 static volatile uint32_t gOGSAutoCooldown = 0;
 static volatile uint32_t gOGSAutoGuarded = 0;
 static volatile uint32_t gOGSAutoDisarmed = 0;
+// Stage 9: preserve a detected loss through the cooldown, then act on
+// the next valid Photon event while the original owner is still not master.
+// Limit submissions in each explicitly armed room to prevent ping-pong.
+static volatile uint32_t gOGSAutoPendingLoss = 0;
+static volatile uint32_t gOGSAutoDeferredQueued = 0;
+static volatile uint32_t gOGSAutoDeferredExecuted = 0;
+static volatile uint32_t gOGSAutoDeferredCancelled = 0;
+static volatile uint32_t gOGSAutoBudgetStops = 0;
+static uint32_t gOGSAutoRoomAttempts = 0; // guarded by gStateLock
+static const uint32_t kOGSAutoRoomAttemptLimit = 3;
 
 // Verified room + local actor + master are read using Mach VM only.
 static bool OGSReadAutoRoom(uintptr_t *roomOut, int32_t *localOut, int32_t *masterOut) {
@@ -714,6 +724,9 @@ static void OGSDisarmAutoRoom(void) {
     gOGSAutoRoom = 0;
     gOGSAutoOwner = 0;
     gOGSAutoLastRequestAt = 0.;
+    if (__atomic_exchange_n(&gOGSAutoPendingLoss, 0u, __ATOMIC_ACQ_REL))
+        __atomic_fetch_add(&gOGSAutoDeferredCancelled, 1u, __ATOMIC_RELAXED);
+    gOGSAutoRoomAttempts = 0;
     os_unfair_lock_unlock(&gStateLock);
 }
 
@@ -1223,36 +1236,55 @@ static void hook_OnEvent(void *self, void *eventData, void *method) {
         __atomic_fetch_add(&gOGSInlineMasterReadFailures, 1u, __ATOMIC_RELAXED);
     }
 
-    // Stage 8: a protected room owner may automatically request a single
-    // recovery only when an incoming event moved MasterClient away from them.
-    // Never auto-claim when joining another person's room.
+    // Stage 9: only an explicitly armed room owner can recover; a change
+    // detected inside the 8s cooldown must not disappear. Keep it pending
+    // until the next incoming event after cooldown, and revalidate the room.
+    // There is NO scheduled Unity/Photon call from UIKit.
     bool autoSent = false;
-    if (masterBefore > 0 && masterAfter > 0 && masterBefore != masterAfter &&
-        __atomic_load_n(&gOGSAutoEnabled, __ATOMIC_ACQUIRE)) {
+    if (__atomic_load_n(&gOGSAutoEnabled, __ATOMIC_ACQUIRE)) {
         uintptr_t liveRoom = 0;
         int32_t localID = 0, liveMaster = 0;
         if (OGSReadAutoRoom(&liveRoom, &localID, &liveMaster)) {
-            bool ready = false, wrongRoom = false;
+            bool ready = false, wrongRoom = false, budgetStop = false;
             double currentTime = CFAbsoluteTimeGetCurrent();
             os_unfair_lock_lock(&gStateLock);
             if (__atomic_load_n(&gOGSAutoEnabled, __ATOMIC_ACQUIRE)) {
                 wrongRoom = gOGSAutoRoom != liveRoom ||
                             gOGSAutoOwner != localID || localID != 1;
-                if (!wrongRoom && masterBefore == localID &&
-                    masterAfter == liveMaster && liveMaster != localID) {
-                    if (gOGSAutoLastRequestAt > 0. &&
-                        currentTime - gOGSAutoLastRequestAt < 8.) {
-                        __atomic_fetch_add(&gOGSAutoCooldown, 1u, __ATOMIC_RELAXED);
-                    } else {
-                        gOGSAutoLastRequestAt = currentTime;
-                        ready = true;
+                if (!wrongRoom) {
+                    bool lostThisEvent = masterBefore == localID &&
+                        masterAfter == liveMaster && masterAfter != localID &&
+                        masterBefore != masterAfter && observedEventCode == 253;
+                    if (lostThisEvent &&
+                        !__atomic_load_n(&gOGSAutoPendingLoss, __ATOMIC_RELAXED)) {
+                        __atomic_store_n(&gOGSAutoPendingLoss, 1u, __ATOMIC_RELEASE);
+                        if (gOGSAutoLastRequestAt > 0. &&
+                            currentTime - gOGSAutoLastRequestAt < 8.) {
+                            __atomic_fetch_add(&gOGSAutoCooldown, 1u, __ATOMIC_RELAXED);
+                            __atomic_fetch_add(&gOGSAutoDeferredQueued, 1u, __ATOMIC_RELAXED);
+                        }
                     }
-                } else if (!wrongRoom) {
-                    __atomic_fetch_add(&gOGSAutoGuarded, 1u, __ATOMIC_RELAXED);
+                    if (liveMaster == localID) {
+                        if (__atomic_exchange_n(&gOGSAutoPendingLoss, 0u, __ATOMIC_ACQ_REL))
+                            __atomic_fetch_add(&gOGSAutoDeferredCancelled, 1u, __ATOMIC_RELAXED);
+                    } else if (__atomic_load_n(&gOGSAutoPendingLoss, __ATOMIC_ACQUIRE)) {
+                        if (gOGSAutoRoomAttempts >= kOGSAutoRoomAttemptLimit) {
+                            budgetStop = true;
+                            __atomic_fetch_add(&gOGSAutoBudgetStops, 1u, __ATOMIC_RELAXED);
+                        } else if (gOGSAutoLastRequestAt <= 0. ||
+                                   currentTime - gOGSAutoLastRequestAt >= 8.) {
+                            gOGSAutoLastRequestAt = currentTime;
+                            ++gOGSAutoRoomAttempts;
+                            __atomic_store_n(&gOGSAutoPendingLoss, 0u, __ATOMIC_RELEASE);
+                            ready = true;
+                            if (!lostThisEvent)
+                                __atomic_fetch_add(&gOGSAutoDeferredExecuted, 1u, __ATOMIC_RELAXED);
+                        }
+                    }
                 }
             }
             os_unfair_lock_unlock(&gStateLock);
-            if (wrongRoom) OGSDisarmAutoRoom();
+            if (wrongRoom || budgetStop) OGSDisarmAutoRoom();
             if (ready) {
                 autoSent = true;
                 __atomic_fetch_add(&gOGSAutoAttempts, 1u, __ATOMIC_RELAXED);
@@ -1973,7 +2005,8 @@ static void OGSInstallHooks(void) {
 
     if (count == 0) {
         __atomic_store_n(&gOGS.selectedPeer, 0, __ATOMIC_RELEASE);
-        self.playerLabel.text = @"المحدد: لا يوجد لاعبين معك حالياً";
+        self.playerLabel.text = hookActive ? @"المحدد: لا يوجد لاعبين معك حالياً" :
+            @"قائمة اللاعبين غير متاحة: تحديث اللعبة متوقف";
     } else {
         if (selected >= count) {
             selected = 0;
@@ -2056,7 +2089,16 @@ static void OGSInstallHooks(void) {
         age >= 0.0 && age <= 0.5 ? (snap.inRoom ? @"داخل" : @"خارج") :
             (__atomic_load_n(&gOGSPresenceReadOnly, __ATOMIC_ACQUIRE) == 1 ? @"مرصودة من الذاكرة" :
              __atomic_load_n(&gOGSPresenceReadOnly, __ATOMIC_ACQUIRE) == 2 ? @"لا توجد غرفة محلياً" : @"غير مؤكدة"),
-        age >= 0.0 && age <= 0.5 ? (snap.isMaster ? @"أنت" : @"لاعب آخر") : @"غير مؤكد",
+        age >= 0.0 && age <= 0.5 ? (snap.isMaster ? @"أنت" : @"لاعب آخر") :
+            (__atomic_load_n(&gOGSPresenceReadOnly, __ATOMIC_ACQUIRE) == 1 &&
+             __atomic_load_n(&gOGSLocalMasterActorID, __ATOMIC_ACQUIRE) > 0 &&
+             __atomic_load_n(&gOGSPresenceActorID, __ATOMIC_ACQUIRE) > 0 ?
+                (__atomic_load_n(&gOGSLocalMasterActorID, __ATOMIC_ACQUIRE) ==
+                 __atomic_load_n(&gOGSPresenceActorID, __ATOMIC_ACQUIRE) ?
+                 @"أنت (محليًا)" :
+                 [NSString stringWithFormat:@"لاعب %d (محليًا)",
+                    __atomic_load_n(&gOGSLocalMasterActorID, __ATOMIC_ACQUIRE)]) :
+                @"غير مؤكد"),
         age >= 0.0 && age <= 0.5 ? @"نشط" : @"متوقف",
         age >= 0.0 ? [NSString stringWithFormat:@"%.1f ثانية", age] : @"لا يوجد",
         cashHook ? @"مركب" : (cashReadable ? @"غير مركب" : @"غير قابل للقراءة"),
@@ -2128,6 +2170,20 @@ static void OGSInstallHooks(void) {
         __atomic_load_n(&gOGSAutoCooldown, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSAutoGuarded, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSAutoDisarmed, __ATOMIC_RELAXED)];
+    uint32_t budgetUsed = 0;
+    os_unfair_lock_lock(&gStateLock);
+    budgetUsed = gOGSAutoRoomAttempts;
+    os_unfair_lock_unlock(&gStateLock);
+    details = [details stringByAppendingFormat:
+        @"\nAuto pending loss=%u | deferred queued=%u | deferred executed=%u | cancelled=%u"
+         "\nRoom attempt budget=%u/%u | budget stops=%u"
+         "\nDeferred requests are tried on the next Photon event AFTER cooldown, not by a UI timer.",
+        __atomic_load_n(&gOGSAutoPendingLoss, __ATOMIC_ACQUIRE),
+        __atomic_load_n(&gOGSAutoDeferredQueued, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSAutoDeferredExecuted, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSAutoDeferredCancelled, __ATOMIC_RELAXED),
+        budgetUsed, kOGSAutoRoomAttemptLimit,
+        __atomic_load_n(&gOGSAutoBudgetStops, __ATOMIC_RELAXED)];
     char eventTrailCopy[sizeof(gOGSLastTransitionEventTrail)] = {0};
     os_unfair_lock_lock(&gStateLock);
     memcpy(eventTrailCopy, gOGSLastTransitionEventTrail, sizeof(eventTrailCopy));
@@ -2226,11 +2282,13 @@ static void OGSInstallHooks(void) {
     gOGSAutoRoom = room;
     gOGSAutoOwner = localActor;
     gOGSAutoLastRequestAt = 0.;
+    gOGSAutoRoomAttempts = 0;
+    __atomic_store_n(&gOGSAutoPendingLoss, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&gOGSAutoEnabled, 1u, __ATOMIC_RELEASE);
     os_unfair_lock_unlock(&gStateLock);
     [s setTitle:@"استعادة تلقائية: مفعلة 👑" forState:UIControlStateNormal];
     s.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
-    self.statusLabel.text = @"مفعلة لهذا الروم فقط: محاولة واحدة عند الفقد وتبريد 8 ثوانٍ";
+    self.statusLabel.text = @"استعادة تلقائية لهذا الروم؛ أي فقد أثناء التبريد ينتظر، بحد 3 محاولات";
 }
 
 - (void)toggleGodMode:(UIButton *)s {
