@@ -1035,7 +1035,7 @@ static void OGSProcessSpeed(void) {
 @interface OGSModMenu : NSObject
 @property (strong, nonatomic) OGSPassthroughContainer *containerView;
 @property (strong, nonatomic) UIButton *floatingButton;
-@property (strong, nonatomic) UIView *menuPanel;
+@property (strong, nonatomic) UIScrollView *menuPanel;
 @property (strong, nonatomic) UILabel *titleLabel;
 @property (strong, nonatomic) UILabel *playerLabel;
 @property (strong, nonatomic) UILabel *statusLabel;
@@ -2148,6 +2148,18 @@ static void OGSInstallHooks(void) {
     if (!CGRectEqualToRect(self.containerView.frame, gw.bounds)) {
         self.containerView.frame = gw.bounds;
     }
+    // Resize without increasing panel content height; scrolling preserves
+    // access to the final row on iPhone landscape and compact screens.
+    if (self.menuPanel) {
+        CGFloat vh = MIN(358.0, MAX(160.0, CGRectGetHeight(gw.bounds) - 26.0));
+        CGFloat vx = MAX(8.0, MIN(75.0, CGRectGetWidth(gw.bounds) - 323.0));
+        CGRect box = self.menuPanel.frame;
+        if (box.size.height != vh || box.origin.x != vx) {
+            box.size.height = vh;
+            box.origin.x = vx;
+            self.menuPanel.frame = box;
+        }
+    }
     self.containerView.hidden = NO;
     self.floatingButton.hidden = NO;
     [gw bringSubviewToFront:self.containerView];
@@ -2178,7 +2190,13 @@ static void OGSInstallHooks(void) {
         [self.floatingButton addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)]];
         [self.containerView addSubview:self.floatingButton];
 
-        self.menuPanel = [[UIView alloc] initWithFrame:CGRectMake(75, 18, 315, 394)];
+        CGFloat menuViewportHeight = MIN(358.0, MAX(160.0, CGRectGetHeight(gw.bounds) - 26.0));
+        CGFloat menuX = MAX(8.0, MIN(75.0, CGRectGetWidth(gw.bounds) - 323.0));
+        self.menuPanel = [[UIScrollView alloc] initWithFrame:CGRectMake(menuX, 18, 315, menuViewportHeight)];
+        self.menuPanel.contentSize = CGSizeMake(315, 358);
+        self.menuPanel.alwaysBounceVertical = NO;
+        self.menuPanel.showsVerticalScrollIndicator = YES;
+        self.menuPanel.clipsToBounds = YES;
         self.menuPanel.backgroundColor = [UIColor colorWithRed:0.09 green:0.09 blue:0.11 alpha:0.96];
         self.menuPanel.layer.cornerRadius = 14.0;
         self.menuPanel.layer.borderWidth = 2.0f;
@@ -2186,7 +2204,7 @@ static void OGSInstallHooks(void) {
         self.menuPanel.hidden = YES;
 
         self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 5, 260, 18)];
-        self.titleLabel.text = @"OGS Stage 16 | إدارة الروم";
+        self.titleLabel.text = @"OGS Stage 17 | إدارة الروم";
         self.titleLabel.textColor = [UIColor whiteColor];
         self.titleLabel.textAlignment = NSTextAlignmentCenter;
         self.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
@@ -2270,10 +2288,6 @@ static void OGSInstallHooks(void) {
         self.privacyClosedButton = [self makeBtn:CGRectMake(161, 319, 144, 30)
             title:@"خاص ومغلق: إيقاف" bg:darkGray action:@selector(togglePrivacyClosed:)];
         [self.menuPanel addSubview:self.privacyClosedButton];
-
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(10, 354, 295, 30)
-            title:@"طرد وحظر محلي + إخفاء وإغلاق 🔒" bg:banRed
-            action:@selector(kickBanAndCloseSelected:)]];
 
         [self.containerView addSubview:self.menuPanel];
         self.containerView.floatingButton = self.floatingButton;
@@ -3047,39 +3061,6 @@ static void OGSInstallHooks(void) {
     self.statusLabel.text = [NSString stringWithFormat:
         @"طرد %@: طلب يدوي واحد ينتظر حدث Photon؛ راقب التشخيص",
         pName ?: @"اللاعب"];
-}
-
-// This is a global room close, not user-specific Photon visibility or a
-// permanent server-side account ban. All new joins are blocked while closed.
-- (void)kickBanAndCloseSelected:(UIButton *)sender {
-    (void)sender;
-    OGSRoomSnapshot snapshot = OGSCurrentSnapshot();
-    uint32_t selected = __atomic_load_n(&gOGS.selectedPeer, __ATOMIC_ACQUIRE);
-    uintptr_t room = 0;
-    int32_t me = 0, master = 0;
-    if (!snapshot.inRoom || selected >= snapshot.count ||
-        !OGSReadAutoRoom(&room, &me, &master) ||
-        room != gOGSRosterLastRoom || me != master) {
-        self.statusLabel.text = @"اختر لاعبًا وتأكد أنك الهوست؛ لم يتم إغلاق الروم";
-        return;
-    }
-    OGSPeerSnapshot peer = snapshot.peers[selected];
-    if (peer.actorID <= 0 || peer.actorID == me) {
-        self.statusLabel.text = @"اللاعب المحدد غير صالح؛ لم يتم إغلاق الروم";
-        return;
-    }
-    [self triggerImmediateKick:peer];
-    if (!__atomic_load_n(&gOGSManualKickPending, __ATOMIC_ACQUIRE)) {
-        self.statusLabel.text = @"تعذر تجهيز الطرد؛ لم يتم إغلاق الروم";
-        return;
-    }
-    NSString *name = [NSString stringWithUTF8String:peer.name] ?: @"اللاعب";
-    [self recordHijackerName:OGSNormalizeKey(name) actorID:peer.actorID];
-    // Explicit mode 2 always means CLOSED; never accidentally unhide/open
-    // when the combined button is pressed twice.
-    [self requestPrivacyMode:2u forced:YES];
-    self.statusLabel.text = [NSString stringWithFormat:
-        @"طلب طرد %@ ثم إخفاء وإغلاق الروم عن جميع الداخلين الجدد", name];
 }
 
 - (void)banSelected:(UIButton *)s {
