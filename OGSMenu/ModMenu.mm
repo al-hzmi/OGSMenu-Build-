@@ -705,10 +705,9 @@ static volatile uint32_t gOGSAutoCooldown = 0;
 static volatile uint32_t gOGSAutoGuarded = 0;
 static volatile uint32_t gOGSAutoDisarmed = 0;
 static volatile uint32_t gOGSAutoRejoinApprovals = 0;
-// Stage 12: ongoing opt-in recovery across a long-lived room session.
-// An 8s minimum spacing and 6 attempts per 60s window rate-limit the
-// client's requests without permanently disarming after three attempts.
-// OnEvent is the only thread allowed to call the Photon action.
+// Stage 14: Photon-event-driven fast recovery, bounded by a shared
+// token bucket. Never patch local master fields or run engine APIs on UIKit.
+// Manual and automatic recovery share one quota in the same room.
 static volatile uint32_t gOGSAutoPendingLoss = 0;
 static volatile uint32_t gOGSAutoDeferredQueued = 0;
 static volatile uint32_t gOGSAutoDeferredExecuted = 0;
@@ -723,7 +722,11 @@ static bool gOGSAutoWindowPauseCounted = false;   // gStateLock
 static bool gOGSAutoAttemptedPending = false;     // gStateLock
 static const uint32_t kOGSAutoWindowAttemptLimit = 6;
 static const double kOGSAutoWindowSeconds = 60.0;
-static const double kOGSAutoCooldownSeconds = 8.0;
+static const double kOGSAutoCooldownSeconds = 0.65; // first counter after a confirmed loss can be immediate
+static const double kOGSRecoveryTokenCapacity = 3.0;
+static const double kOGSRecoveryTokenRefillSeconds = 10.0;
+static double gOGSRecoveryTokens = 3.0;          // gStateLock
+static double gOGSRecoveryTokenRefillAt = 0.0;  // gStateLock
 
 // Verified room + local actor + master are read using Mach VM only.
 static bool OGSReadAutoRoom(uintptr_t *roomOut, int32_t *localOut, int32_t *masterOut) {
@@ -770,6 +773,8 @@ static void OGSArmAutoRoomBounded(uintptr_t room, int32_t actor, int32_t master)
         gOGSAutoWindowStartedAt = 0.;
         gOGSAutoWindowPauseCounted = false;
         gOGSAutoLastRequestAt = 0.;
+        gOGSRecoveryTokens = kOGSRecoveryTokenCapacity;
+        gOGSRecoveryTokenRefillAt = 0.;
     }
     gOGSAutoRoom = room;
     gOGSAutoOwner = actor;
@@ -778,6 +783,57 @@ static void OGSArmAutoRoomBounded(uintptr_t room, int32_t actor, int32_t master)
                      __ATOMIC_RELEASE);
     __atomic_store_n(&gOGSAutoEnabled, 1u, __ATOMIC_RELEASE);
     os_unfair_lock_unlock(&gStateLock);
+}
+
+
+/*
+ * Atomic reservation for BOTH manual and automatic SetMasterClient requests.
+ * Requires gStateLock. No Photon/IL2CPP methods are invoked here.
+ * - maximum 3 immediately available requests, 650ms apart;
+ * - one token refills every 10 seconds, up to 3;
+ * - strict ceiling of 6 submissions in each 60-second window.
+ * This constrains client traffic; the server may still reject any request.
+ */
+static bool OGSReserveMasterRequestLocked(uintptr_t room, int32_t actor, double now) {
+    if (!room || actor <= 0) return false;
+    if (gOGSAutoWindowRoom != room || gOGSAutoWindowActor != actor) {
+        gOGSAutoWindowRoom = room;
+        gOGSAutoWindowActor = actor;
+        gOGSAutoWindowAttempts = 0;
+        gOGSAutoWindowStartedAt = 0.;
+        gOGSAutoWindowPauseCounted = false;
+        gOGSAutoLastRequestAt = 0.;
+        gOGSRecoveryTokens = kOGSRecoveryTokenCapacity;
+        gOGSRecoveryTokenRefillAt = now;
+    }
+    if (gOGSRecoveryTokenRefillAt <= 0.) gOGSRecoveryTokenRefillAt = now;
+    if (now > gOGSRecoveryTokenRefillAt) {
+        gOGSRecoveryTokens = fmin(kOGSRecoveryTokenCapacity,
+            gOGSRecoveryTokens + (now - gOGSRecoveryTokenRefillAt) /
+                                 kOGSRecoveryTokenRefillSeconds);
+        gOGSRecoveryTokenRefillAt = now;
+    }
+    if (gOGSAutoWindowStartedAt <= 0. ||
+        now - gOGSAutoWindowStartedAt >= kOGSAutoWindowSeconds) {
+        gOGSAutoWindowStartedAt = now;
+        gOGSAutoWindowAttempts = 0;
+        gOGSAutoWindowPauseCounted = false;
+    }
+    if (gOGSAutoLastRequestAt > 0. &&
+        now - gOGSAutoLastRequestAt < kOGSAutoCooldownSeconds)
+        return false;
+    if (gOGSAutoWindowAttempts >= kOGSAutoWindowAttemptLimit) {
+        if (!gOGSAutoWindowPauseCounted) {
+            gOGSAutoWindowPauseCounted = true;
+            __atomic_fetch_add(&gOGSAutoRateLimitedWindows, 1u, __ATOMIC_RELAXED);
+        }
+        return false;
+    }
+    if (gOGSRecoveryTokens < 1.0) return false;
+    --gOGSRecoveryTokens;
+    ++gOGSAutoWindowAttempts;
+    gOGSAutoLastRequestAt = now;
+    return true;
 }
 
 static bool OGSRequestLocalMasterOnceOnEvent(void) {
@@ -1410,38 +1466,19 @@ static void hook_OnEvent(void *self, void *eventData, void *method) {
                             __atomic_fetch_add(&gOGSAutoDeferredCancelled, 1u, __ATOMIC_RELAXED);
                         gOGSAutoAttemptedPending = false;
                     } else if (__atomic_load_n(&gOGSAutoPendingLoss, __ATOMIC_ACQUIRE)) {
-                        // The loss remains pending until the room confirms our
-                        // MasterClient actor again. A locally accepted API request
-                        // alone does not prove Photon changed ownership.
-                        if (gOGSAutoWindowStartedAt <= 0. ||
-                            currentTime - gOGSAutoWindowStartedAt >= kOGSAutoWindowSeconds) {
-                            gOGSAutoWindowStartedAt = currentTime;
-                            gOGSAutoWindowAttempts = 0;
-                            gOGSAutoWindowPauseCounted = false;
-                        }
-                        if (gOGSAutoLastRequestAt <= 0. ||
-                            currentTime - gOGSAutoLastRequestAt >= kOGSAutoCooldownSeconds) {
-                            if (gOGSAutoWindowAttempts >= kOGSAutoWindowAttemptLimit) {
-                                // Pause until the next 60s window; remain ARMED.
-                                // Counting once per window avoids inflated telemetry
-                                // when large quantities of network events arrive.
-                                if (!gOGSAutoWindowPauseCounted) {
-                                    gOGSAutoWindowPauseCounted = true;
-                                    __atomic_fetch_add(&gOGSAutoRateLimitedWindows, 1u,
-                                                       __ATOMIC_RELAXED);
-                                }
-                            } else {
-                                ++gOGSAutoWindowAttempts;
-                                gOGSAutoLastRequestAt = currentTime;
-                                ready = true;
-                                if (gOGSAutoAttemptedPending)
-                                    __atomic_fetch_add(&gOGSAutoRetriesWhileLost, 1u,
-                                                       __ATOMIC_RELAXED);
-                                gOGSAutoAttemptedPending = true;
-                                if (!lostThisEvent)
-                                    __atomic_fetch_add(&gOGSAutoDeferredExecuted, 1u,
-                                                       __ATOMIC_RELAXED);
-                            }
+                        // A confirmed local loss can trigger a response in
+                        // this same Photon callback; only the shared bounded
+                        // limiter decides when another request is permitted.
+                        // The pending loss stays queued during token refill.
+                        if (OGSReserveMasterRequestLocked(liveRoom, localID, currentTime)) {
+                            ready = true;
+                            if (gOGSAutoAttemptedPending)
+                                __atomic_fetch_add(&gOGSAutoRetriesWhileLost, 1u,
+                                                   __ATOMIC_RELAXED);
+                            gOGSAutoAttemptedPending = true;
+                            if (!lostThisEvent)
+                                __atomic_fetch_add(&gOGSAutoDeferredExecuted, 1u,
+                                                   __ATOMIC_RELAXED);
                         }
                     }
                 }
@@ -1466,17 +1503,31 @@ static void hook_OnEvent(void *self, void *eventData, void *method) {
     if (__atomic_load_n(&gOGS.speedDirty, __ATOMIC_ACQUIRE))
         OGSProcessSpeed();
 
-    // Manual request remains available and uses the same known working API.
-    // If auto already attempted this event, consume but do not send twice.
-    if (__atomic_exchange_n(&gOGSManualRecoveryPending, 0u, __ATOMIC_ACQ_REL) &&
-        !autoSent) {
-        __atomic_fetch_add(&gOGSManualRecoveryAttempts, 1u, __ATOMIC_RELAXED);
-        if (masterAfter <= 0) {
+    // One manual request uses the same bounded quota as auto. An auto
+    // attempt in this callback takes precedence; no double submission.
+    if (__atomic_exchange_n(&gOGSManualRecoveryPending, 0u, __ATOMIC_ACQ_REL)) {
+        if (autoSent || masterAfter <= 0) {
             __atomic_fetch_add(&gOGSManualRecoverySkipped, 1u, __ATOMIC_RELAXED);
-        } else if (OGSRequestLocalMasterOnceOnEvent()) {
-            __atomic_fetch_add(&gOGSManualRecoveryAccepted, 1u, __ATOMIC_RELAXED);
         } else {
-            __atomic_fetch_add(&gOGSManualRecoveryFailed, 1u, __ATOMIC_RELAXED);
+            uintptr_t liveRoom = 0;
+            int32_t localID = 0, liveMaster = 0;
+            bool permitted = false;
+            if (OGSReadAutoRoom(&liveRoom, &localID, &liveMaster) &&
+                liveMaster != localID) {
+                os_unfair_lock_lock(&gStateLock);
+                permitted = OGSReserveMasterRequestLocked(
+                    liveRoom, localID, CFAbsoluteTimeGetCurrent());
+                os_unfair_lock_unlock(&gStateLock);
+            }
+            if (!permitted) {
+                __atomic_fetch_add(&gOGSManualRecoverySkipped, 1u, __ATOMIC_RELAXED);
+            } else {
+                __atomic_fetch_add(&gOGSManualRecoveryAttempts, 1u, __ATOMIC_RELAXED);
+                if (OGSRequestLocalMasterOnceOnEvent())
+                    __atomic_fetch_add(&gOGSManualRecoveryAccepted, 1u, __ATOMIC_RELAXED);
+                else
+                    __atomic_fetch_add(&gOGSManualRecoveryFailed, 1u, __ATOMIC_RELAXED);
+            }
         }
     }
 }
@@ -2525,6 +2576,13 @@ static void OGSInstallHooks(void) {
         rateWindowLeft = fmax(0.0, kOGSAutoWindowSeconds -
                              (CFAbsoluteTimeGetCurrent() - gOGSAutoWindowStartedAt));
     os_unfair_lock_unlock(&gStateLock);
+    double availableTokens = 0.;
+    os_unfair_lock_lock(&gStateLock);
+    availableTokens = gOGSRecoveryTokens;
+    os_unfair_lock_unlock(&gStateLock);
+    details = [details stringByAppendingFormat:
+        @"\nRecovery tokens=%.2f/3 | shared manual+auto | min interval=650ms",
+        availableTokens];
     details = [details stringByAppendingFormat:
         @"\nAuto pending loss=%u | deferred queued=%u | deferred executed=%u | cancelled=%u"
          "\nRolling rate limit=%u/%u in 60s | window resets in %.1fs"
@@ -2619,8 +2677,8 @@ static void OGSInstallHooks(void) {
     }
     static double lastManualClick = 0.0; // UIKit thread only
     double now = CFAbsoluteTimeGetCurrent();
-    if (now - lastManualClick < 8.0) {
-        self.statusLabel.text = @"انتظر ثماني ثوانٍ قبل إعادة اختبار الاستعادة";
+    if (now - lastManualClick < kOGSAutoCooldownSeconds) {
+        self.statusLabel.text = @"انتظر قليلًا قبل الطلب التالي؛ السحب اليدوي والتلقائي يشتركان في الحماية";
         return;
     }
     lastManualClick = now;
@@ -2674,7 +2732,7 @@ static void OGSInstallHooks(void) {
                 s.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
                 self.statusLabel.text = verifiedLocal == verifiedMaster ?
                     @"أنت الهوست الآن؛ تمت حماية الروم الحالي" :
-                    @"الاستعادة مفعلة للروم؛ 6 طلبات بحد أقصى كل دقيقة، وتستأنف تلقائيًا";
+                    @"الاستعادة التفاعلية مفعلة؛ 3 طلبات سريعة كحد أقصى، و6 بكل دقيقة";
             }]];
         UIViewController *root = [self gameMainWindow].rootViewController;
         if (root && !root.presentedViewController) {
@@ -2689,8 +2747,8 @@ static void OGSInstallHooks(void) {
     [s setTitle:@"استعادة تلقائية: مفعلة 👑" forState:UIControlStateNormal];
     s.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
     self.statusLabel.text = master != localActor ?
-        @"طلب الاستعادة ينتظر حدث Photon؛ 6 طلبات لكل دقيقة مع استئناف تلقائي" :
-        @"الاستعادة مستمرة؛ لا يوجد حد إجمالي، و8 ثوانٍ بين الطلبات";
+        @"الاستعادة التفاعلية تنتظر حدث Photon؛ 3 طلبات سريعة، و6 بكل دقيقة" :
+        @"الاستعادة التفاعلية مستمرة؛ تشترك اليدوية والتلقائية في الحد";
 }
 
 - (void)toggleGodMode:(UIButton *)s {
