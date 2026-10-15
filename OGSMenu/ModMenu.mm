@@ -687,6 +687,7 @@ static volatile uint32_t gOGSAutoFailed = 0;
 static volatile uint32_t gOGSAutoCooldown = 0;
 static volatile uint32_t gOGSAutoGuarded = 0;
 static volatile uint32_t gOGSAutoDisarmed = 0;
+static volatile uint32_t gOGSAutoRejoinApprovals = 0;
 // Stage 9: preserve a detected loss through the cooldown, then act on
 // the next valid Photon event while the original owner is still not master.
 // Limit submissions in each explicitly armed room to prevent ping-pong.
@@ -1250,7 +1251,7 @@ static void hook_OnEvent(void *self, void *eventData, void *method) {
             os_unfair_lock_lock(&gStateLock);
             if (__atomic_load_n(&gOGSAutoEnabled, __ATOMIC_ACQUIRE)) {
                 wrongRoom = gOGSAutoRoom != liveRoom ||
-                            gOGSAutoOwner != localID || localID != 1;
+                            gOGSAutoOwner != localID;
                 if (!wrongRoom) {
                     bool lostThisEvent = masterBefore == localID &&
                         masterAfter == liveMaster && masterAfter != localID &&
@@ -2184,6 +2185,10 @@ static void OGSInstallHooks(void) {
         __atomic_load_n(&gOGSAutoDeferredCancelled, __ATOMIC_RELAXED),
         budgetUsed, kOGSAutoRoomAttemptLimit,
         __atomic_load_n(&gOGSAutoBudgetStops, __ATOMIC_RELAXED)];
+    details = [details stringByAppendingFormat:
+        @"\nRejoin approvals=%u | local actor may differ from first entrant"
+         "\nA rejoin request must be explicitly approved; it does not prove server ownership.",
+        __atomic_load_n(&gOGSAutoRejoinApprovals, __ATOMIC_RELAXED)];
     char eventTrailCopy[sizeof(gOGSLastTransitionEventTrail)] = {0};
     os_unfair_lock_lock(&gStateLock);
     memcpy(eventTrailCopy, gOGSLastTransitionEventTrail, sizeof(eventTrailCopy));
@@ -2273,9 +2278,56 @@ static void OGSInstallHooks(void) {
     }
     uintptr_t room = 0;
     int32_t localActor = 0, master = 0;
-    if (!OGSReadAutoRoom(&room, &localActor, &master) ||
-        localActor != 1 || master != localActor) {
-        self.statusLabel.text = @"فعّل الاستعادة وأنت الهوست الأصلي (اللاعب 1) فقط";
+    if (!OGSReadAutoRoom(&room, &localActor, &master)) {
+        self.statusLabel.text = @"ادخل رومًا مستقرًا أولًا؛ لا توجد بيانات موثوقة لتفعيل الاستعادة";
+        return;
+    }
+    // No actor==1 requirement: a returning creator may be actor 3, 4, ...
+    // If MasterClient is someone else, get an explicit affirmative choice
+    // before allowing the first recovery request. This prevents accidentally
+    // arming auto-claim while browsing unrelated rooms.
+    if (master != localActor) {
+        int32_t proposedActor = localActor;
+        uintptr_t proposedRoom = room;
+        UIAlertController *confirm = [UIAlertController
+            alertControllerWithTitle:@"استعادة هوست رومك بعد العودة"
+            message:@"رقمك تغير أو الهوست مع لاعب آخر. لا يمكن للعميل إثبات أنك منشئ هذه الغرفة بعد إعادة الدخول. استخدم هذا الخيار فقط في رومك الذي أنشأته. هل تريد تفعيل محاولة استعادة للروم الحالي؟"
+            preferredStyle:UIAlertControllerStyleAlert];
+        [confirm addAction:[UIAlertAction actionWithTitle:@"إلغاء"
+            style:UIAlertActionStyleCancel handler:nil]];
+        [confirm addAction:[UIAlertAction actionWithTitle:@"نعم، هذا رومي"
+            style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+                (void)action;
+                uintptr_t verifiedRoom = 0;
+                int32_t verifiedLocal = 0, verifiedMaster = 0;
+                if (!OGSReadAutoRoom(&verifiedRoom, &verifiedLocal, &verifiedMaster) ||
+                    verifiedRoom != proposedRoom || verifiedLocal != proposedActor) {
+                    self.statusLabel.text = @"تغيرت الغرفة أو هويتك أثناء التأكيد؛ أعد التفعيل";
+                    return;
+                }
+                os_unfair_lock_lock(&gStateLock);
+                gOGSAutoRoom = verifiedRoom;
+                gOGSAutoOwner = verifiedLocal;
+                __atomic_fetch_add(&gOGSAutoRejoinApprovals, 1u, __ATOMIC_RELAXED);
+                gOGSAutoLastRequestAt = 0.;
+                gOGSAutoRoomAttempts = 0;
+                __atomic_store_n(&gOGSAutoPendingLoss,
+                                 verifiedLocal == verifiedMaster ? 0u : 1u,
+                                 __ATOMIC_RELEASE);
+                __atomic_store_n(&gOGSAutoEnabled, 1u, __ATOMIC_RELEASE);
+                os_unfair_lock_unlock(&gStateLock);
+                [s setTitle:@"استعادة تلقائية: مفعلة 👑" forState:UIControlStateNormal];
+                s.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
+                self.statusLabel.text = verifiedLocal == verifiedMaster ?
+                    @"أنت الهوست الآن؛ تمت حماية الروم الحالي" :
+                    @"استعادة الروم بعد العودة مسلّحة؛ بانتظار حدث Photon، بحد 3 محاولات";
+            }]];
+        UIViewController *root = [self gameMainWindow].rootViewController;
+        if (root && !root.presentedViewController) {
+            [root presentViewController:confirm animated:YES completion:nil];
+        } else {
+            self.statusLabel.text = @"أغلق أي نافذة أخرى وحاول تفعيل الاستعادة من جديد";
+        }
         return;
     }
     os_unfair_lock_lock(&gStateLock);
@@ -2283,12 +2335,18 @@ static void OGSInstallHooks(void) {
     gOGSAutoOwner = localActor;
     gOGSAutoLastRequestAt = 0.;
     gOGSAutoRoomAttempts = 0;
-    __atomic_store_n(&gOGSAutoPendingLoss, 0u, __ATOMIC_RELEASE);
+    // Rejoining an existing owned room may assign a new actor number.
+    // Explicitly approved rejoin recovery begins with a pending request,
+    // even if no 1->2 change can be observed in this session.
+    __atomic_store_n(&gOGSAutoPendingLoss, master != localActor ? 1u : 0u,
+                     __ATOMIC_RELEASE);
     __atomic_store_n(&gOGSAutoEnabled, 1u, __ATOMIC_RELEASE);
     os_unfair_lock_unlock(&gStateLock);
     [s setTitle:@"استعادة تلقائية: مفعلة 👑" forState:UIControlStateNormal];
     s.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
-    self.statusLabel.text = @"استعادة تلقائية لهذا الروم؛ أي فقد أثناء التبريد ينتظر، بحد 3 محاولات";
+    self.statusLabel.text = master != localActor ?
+        @"تم طلب الاستعادة للروم الحالي؛ التنفيذ ينتظر حدث Photon، بحد 3 محاولات" :
+        @"استعادة تلقائية للروم الحالي؛ محاولة واحدة عند الفقد وتبريد 8 ثوانٍ";
 }
 
 - (void)toggleGodMode:(UIButton *)s {
