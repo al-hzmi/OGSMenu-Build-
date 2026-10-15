@@ -677,6 +677,16 @@ static volatile uint32_t gOGSManualRecoveryAttempts = 0;
 static volatile uint32_t gOGSManualRecoveryAccepted = 0;
 static volatile uint32_t gOGSManualRecoveryFailed = 0;
 static volatile uint32_t gOGSManualRecoverySkipped = 0;
+// Stage 18: preserve a room-bound manual intent behind the shared limiter.
+static uintptr_t gOGSManualRecoveryRoom = 0;        // gStateLock
+static int32_t gOGSManualRecoveryActor = 0;         // gStateLock
+static double gOGSManualRecoveryQueuedAt = 0.;     // gStateLock
+static bool gOGSManualRecoveryDeferredCounted = false; // gStateLock
+static volatile uint32_t gOGSManualRecoveryDeferred = 0;
+static volatile uint32_t gOGSManualRecoveryExpired = 0;
+static volatile uint32_t gOGSImmediateLocalMaster = 0;
+static volatile uint32_t gOGSImmediateOtherMaster = 0;
+static volatile uint32_t gOGSImmediateMasterReadFail = 0;
 // Stage 11: defensive accounting only. A locally filtered event is not
 // proof that Photon server-side disconnects or hostile clients were stopped.
 // User-initiated, one-shot peer management request, scoped to current room.
@@ -942,8 +952,20 @@ static bool OGSRequestLocalMasterOnceOnEvent(void) {
     gOGSLastRecoveryAttemptAt = CFAbsoluteTimeGetCurrent();
     os_unfair_lock_unlock(&gStateLock);
     // A true return means the local API accepted the request for submission.
-    // Only a later Photon room read can confirm actual MasterClient status.
-    return ((PeerAction1Fn)candidate)((void *)localPlayer, NULL);
+    // Local room reads may be optimistic; server confirmation needs other evidence.
+    bool submitted = ((PeerAction1Fn)candidate)((void *)localPlayer, NULL);
+    // Read-only telemetry: PUN Classic may optimistically change the local
+    // MasterClient prior to any server acknowledgement.
+    int32_t immediate = 0;
+    if (OGSReadMemory(room + 0x48, &immediate, sizeof(immediate))) {
+        if (immediate == localActor)
+            __atomic_fetch_add(&gOGSImmediateLocalMaster, 1u, __ATOMIC_RELAXED);
+        else
+            __atomic_fetch_add(&gOGSImmediateOtherMaster, 1u, __ATOMIC_RELAXED);
+    } else {
+        __atomic_fetch_add(&gOGSImmediateMasterReadFail, 1u, __ATOMIC_RELAXED);
+    }
+    return submitted;
 }
 
 static bool OGSKickPeerReal(void *peerObj, bool bypassCooldown) {
@@ -1534,7 +1556,6 @@ static void hook_OnEvent(void *self, void *eventData, void *method) {
     // detected inside the 8s cooldown must not disappear. Keep it pending
     // until the next incoming event after cooldown, and revalidate the room.
     // There is NO scheduled Unity/Photon call from UIKit.
-    bool autoSent = false;
     if (__atomic_load_n(&gOGSAutoEnabled, __ATOMIC_ACQUIRE)) {
         uintptr_t liveRoom = 0;
         int32_t localID = 0, liveMaster = 0;
@@ -1593,7 +1614,6 @@ static void hook_OnEvent(void *self, void *eventData, void *method) {
             os_unfair_lock_unlock(&gStateLock);
             if (wrongRoom) OGSDisarmAutoRoom();
             if (ready && __atomic_load_n(&gOGSAutoEnabled, __ATOMIC_ACQUIRE)) {
-                autoSent = true;
                 __atomic_fetch_add(&gOGSAutoAttempts, 1u, __ATOMIC_RELAXED);
                 if (OGSRequestLocalMasterOnceOnEvent())
                     __atomic_fetch_add(&gOGSAutoAccepted, 1u, __ATOMIC_RELAXED);
@@ -1614,29 +1634,42 @@ static void hook_OnEvent(void *self, void *eventData, void *method) {
     // One manual request uses the same bounded quota as auto.
     // A user tap takes precedence over auto in this callback, but cannot
     // override any cooldown, room validity check or request budget.
-    if (__atomic_exchange_n(&gOGSManualRecoveryPending, 0u, __ATOMIC_ACQ_REL)) {
-        if (autoSent || masterAfter <= 0) {
-            __atomic_fetch_add(&gOGSManualRecoverySkipped, 1u, __ATOMIC_RELAXED);
-        } else {
-            uintptr_t liveRoom = 0;
-            int32_t localID = 0, liveMaster = 0;
-            bool permitted = false;
-            if (OGSReadAutoRoom(&liveRoom, &localID, &liveMaster) &&
-                liveMaster != localID) {
-                os_unfair_lock_lock(&gStateLock);
-                permitted = OGSReserveMasterRequestLocked(
-                    liveRoom, localID, CFAbsoluteTimeGetCurrent());
-                os_unfair_lock_unlock(&gStateLock);
-            }
-            if (!permitted) {
+    if (__atomic_load_n(&gOGSManualRecoveryPending, __ATOMIC_ACQUIRE)) {
+        uintptr_t liveRoom = 0;
+        int32_t localID = 0, liveMaster = 0;
+        bool readable = OGSReadAutoRoom(&liveRoom, &localID, &liveMaster);
+        bool permitted = false;
+        double checkedAt = CFAbsoluteTimeGetCurrent();
+        os_unfair_lock_lock(&gStateLock);
+        if (__atomic_load_n(&gOGSManualRecoveryPending, __ATOMIC_ACQUIRE)) {
+            double age = checkedAt - gOGSManualRecoveryQueuedAt;
+            if (gOGSManualRecoveryQueuedAt <= 0. || age > 12.0) {
+                __atomic_store_n(&gOGSManualRecoveryPending, 0u, __ATOMIC_RELEASE);
+                __atomic_fetch_add(&gOGSManualRecoveryExpired, 1u, __ATOMIC_RELAXED);
+            } else if (readable &&
+                       (liveRoom != gOGSManualRecoveryRoom ||
+                        localID != gOGSManualRecoveryActor ||
+                        liveMaster == localID)) {
+                // Do not reuse a tap after switching rooms or actor IDs.
+                // Local ownership is only an observation, not server proof.
+                __atomic_store_n(&gOGSManualRecoveryPending, 0u, __ATOMIC_RELEASE);
                 __atomic_fetch_add(&gOGSManualRecoverySkipped, 1u, __ATOMIC_RELAXED);
-            } else {
-                __atomic_fetch_add(&gOGSManualRecoveryAttempts, 1u, __ATOMIC_RELAXED);
-                if (OGSRequestLocalMasterOnceOnEvent())
-                    __atomic_fetch_add(&gOGSManualRecoveryAccepted, 1u, __ATOMIC_RELAXED);
-                else
-                    __atomic_fetch_add(&gOGSManualRecoveryFailed, 1u, __ATOMIC_RELAXED);
+            } else if (readable &&
+                       OGSReserveMasterRequestLocked(liveRoom, localID, checkedAt)) {
+                __atomic_store_n(&gOGSManualRecoveryPending, 0u, __ATOMIC_RELEASE);
+                permitted = true;
+            } else if (!gOGSManualRecoveryDeferredCounted) {
+                gOGSManualRecoveryDeferredCounted = true;
+                __atomic_fetch_add(&gOGSManualRecoveryDeferred, 1u, __ATOMIC_RELAXED);
             }
+        }
+        os_unfair_lock_unlock(&gStateLock);
+        if (permitted) {
+            __atomic_fetch_add(&gOGSManualRecoveryAttempts, 1u, __ATOMIC_RELAXED);
+            if (OGSRequestLocalMasterOnceOnEvent())
+                __atomic_fetch_add(&gOGSManualRecoveryAccepted, 1u, __ATOMIC_RELAXED);
+            else
+                __atomic_fetch_add(&gOGSManualRecoveryFailed, 1u, __ATOMIC_RELAXED);
         }
     }
 }
@@ -2714,12 +2747,21 @@ static void OGSInstallHooks(void) {
         __atomic_load_n(&gOGSInlineMasterTo, __ATOMIC_ACQUIRE)];
     details = [details stringByAppendingFormat:
         @"\nManual host restore: queued=%u | attempts=%u | API accepted=%u | failed=%u | skipped=%u"
-         "\nAPI accepted does not mean the server restored MasterClient.",
+         "\nAPI returned true indicates local submission, NOT server confirmation.",
         __atomic_load_n(&gOGSManualRecoveryPending, __ATOMIC_ACQUIRE),
         __atomic_load_n(&gOGSManualRecoveryAttempts, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSManualRecoveryAccepted, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSManualRecoveryFailed, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSManualRecoverySkipped, __ATOMIC_RELAXED)];
+    details = [details stringByAppendingFormat:
+        @"\nManual deferred=%u | expired=%u | room+actor bound | TTL=12s"
+         "\nImmediate local read after API: mine=%u | other=%u | read fail=%u"
+         "\nThese immediate samples are local, NOT server acknowledgments.",
+        __atomic_load_n(&gOGSManualRecoveryDeferred, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSManualRecoveryExpired, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSImmediateLocalMaster, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSImmediateOtherMaster, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSImmediateMasterReadFail, __ATOMIC_RELAXED)];
     details = [details stringByAppendingFormat:
         @"\nAuto recovery: %@ | attempts=%u | API accepted=%u | failed=%u"
          "\nCooldown skips=%u | guard skips=%u | disarms=%u",
@@ -2881,9 +2923,22 @@ static void OGSInstallHooks(void) {
         self.statusLabel.text = @"انتظر قليلًا قبل الطلب التالي؛ السحب اليدوي والتلقائي يشتركان في الحماية";
         return;
     }
+    uintptr_t requestedRoom = 0;
+    int32_t verifiedActor = 0, verifiedMaster = 0;
+    if (!OGSReadAutoRoom(&requestedRoom, &verifiedActor, &verifiedMaster) ||
+        verifiedActor != localActor || verifiedMaster == verifiedActor) {
+        self.statusLabel.text = @"تغيرت حالة الغرفة أثناء الضغط؛ أعد المحاولة";
+        return;
+    }
     lastManualClick = now;
+    os_unfair_lock_lock(&gStateLock);
+    gOGSManualRecoveryRoom = requestedRoom;
+    gOGSManualRecoveryActor = verifiedActor;
+    gOGSManualRecoveryQueuedAt = now;
+    gOGSManualRecoveryDeferredCounted = false;
     __atomic_store_n(&gOGSManualRecoveryPending, 1u, __ATOMIC_RELEASE);
-    self.statusLabel.text = @"اختبار استعادة واحد في انتظار حدث Photon؛ هذا ليس تأكيدًا للاستعادة";
+    os_unfair_lock_unlock(&gStateLock);
+    self.statusLabel.text = @"طلب يدوي معلّق حتى 12 ثانية؛ ضمن نفس الحد المشترك، وليس إثبات استعادة";
 }
 
 - (void)toggleAutoHost:(UIButton *)s {
