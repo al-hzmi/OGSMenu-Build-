@@ -1540,7 +1540,8 @@ static void OGSProcessManualKickOnEvent(void) {
 // The existing shared token bucket remains the only authority for sending.
 static void OGSProcessRecoveryOnPhotonCallback(uint32_t observedEventCode,
                                                int32_t masterBefore,
-                                               int32_t masterAfter) {
+                                               int32_t masterAfter,
+                                               bool viaUpdate) {
     // Sample BEFORE this dispatcher submits a new local recovery request.
     // This distinction is essential: the SDK may change local ownership
     // optimistically before the Photon server has accepted any transfer.
@@ -1549,7 +1550,7 @@ static void OGSProcessRecoveryOnPhotonCallback(uint32_t observedEventCode,
     bool snapshotOK = OGSReadAutoRoom(&observedRoom, &observedActor, &observedMaster);
     if (snapshotOK)
         OGSRecordHostLocalObservation(observedRoom, observedActor, observedMaster,
-                                      observedEventCode, observedEventCode == 0);
+                                      observedEventCode, viaUpdate);
     // Auto recovery remains strictly opt-in, bound to the original room/actor.
     // Evaluate ownership with a fresh room-bound snapshot on every selected
     // Photon callback, including bounded Update probes during quiet periods.
@@ -1697,7 +1698,7 @@ static void hook_PhotonHandlerUpdate(void *self, void *method) {
         os_unfair_lock_unlock(&gStateLock);
         if (due) {
             __atomic_fetch_add(&gOGSRecoveryUpdateProbes, 1u, __ATOMIC_RELAXED);
-            OGSProcessRecoveryOnPhotonCallback(0u, 0, 0);
+            OGSProcessRecoveryOnPhotonCallback(0u, 0, 0, true);
         }
     }
 }
@@ -1776,7 +1777,7 @@ static void hook_OnEvent(void *self, void *eventData, void *method) {
     // event dispatch and PhotonHandler.Update (main-thread, non-UIKit).
     // This also survives locally filtered event 203 and quiet rooms.
     __atomic_fetch_add(&gOGSRecoveryEventProbes, 1u, __ATOMIC_RELAXED);
-    OGSProcessRecoveryOnPhotonCallback(observedEventCode, masterBefore, masterAfter);
+    OGSProcessRecoveryOnPhotonCallback(observedEventCode, masterBefore, masterAfter, false);
 
     // Execute queued room actions after the original Photon callback.
     OGSProcessManualKickOnEvent();
