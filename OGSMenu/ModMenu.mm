@@ -864,6 +864,10 @@ static volatile uint32_t gOGSPrivacyRejected = 0;
 // Independent Unity/PUN frame callback handles queued actions even when
 // a private room has no incoming Photon OnEvent callbacks.
 static volatile uint64_t gOGSPhotonHandlerUpdateCalls = 0;
+// Recovery fallback is throttled separately from the unchanged Photon request quota.
+static double gOGSRecoveryLastUpdateProbeAt = 0.; // gStateLock
+static volatile uint32_t gOGSRecoveryUpdateProbes = 0;
+static volatile uint32_t gOGSRecoveryEventProbes = 0;
 static const uintptr_t kOGSPhotonHandlerUpdateSlot = 0x023905F0;
 // Verified against fps 3.4.0 IL2CPP metadata: PhotonHandler.Update method
 // index 28734 maps to the ARM64 entry at RVA 0x013C8400 via this slot.
@@ -1468,6 +1472,126 @@ static void OGSProcessManualKickOnEvent(void) {
     __atomic_fetch_add(&gOGSManualKickRejected, 1u, __ATOMIC_RELAXED);
 }
 
+// Stage 19: reusable Unity/PUN-thread recovery state machine. A room read or
+// local API result is NOT a confirmation of server-side MasterClient ownership.
+// The existing shared token bucket remains the only authority for sending.
+static void OGSProcessRecoveryOnPhotonCallback(uint32_t observedEventCode,
+                                               int32_t masterBefore,
+                                               int32_t masterAfter) {
+    // Auto recovery remains strictly opt-in, bound to the original room/actor.
+    // Evaluate ownership with a fresh room-bound snapshot on every selected
+    // Photon callback, including bounded Update probes during quiet periods.
+    if (__atomic_load_n(&gOGSAutoEnabled, __ATOMIC_ACQUIRE)) {
+        uintptr_t liveRoom = 0;
+        int32_t localID = 0, liveMaster = 0;
+        if (OGSReadAutoRoom(&liveRoom, &localID, &liveMaster)) {
+            bool ready = false, wrongRoom = false;
+            double currentTime = CFAbsoluteTimeGetCurrent();
+            os_unfair_lock_lock(&gStateLock);
+            if (__atomic_load_n(&gOGSAutoEnabled, __ATOMIC_ACQUIRE)) {
+                wrongRoom = gOGSAutoRoom != liveRoom ||
+                            gOGSAutoOwner != localID;
+                if (!wrongRoom) {
+                    bool lostThisEvent = masterBefore == localID &&
+                        masterAfter == liveMaster && masterAfter != localID &&
+                        masterBefore != masterAfter && observedEventCode == 253;
+                    // Stage 17: do not miss host loss if the exact 253
+                    // transition fell outside our hooked callback. A later
+                    // validated room-state read can still detect the loss.
+                    bool lostSinceOwned = gOGSAutoSawOwnedMaster && liveMaster != localID;
+                    if ((lostThisEvent || lostSinceOwned) &&
+                        !__atomic_load_n(&gOGSAutoPendingLoss, __ATOMIC_RELAXED)) {
+                        __atomic_store_n(&gOGSAutoPendingLoss, 1u, __ATOMIC_RELEASE);
+                        gOGSAutoAttemptedPending = false;
+                        if (gOGSAutoLastRequestAt > 0. &&
+                            currentTime - gOGSAutoLastRequestAt < kOGSAutoCooldownSeconds) {
+                            __atomic_fetch_add(&gOGSAutoCooldown, 1u, __ATOMIC_RELAXED);
+                            __atomic_fetch_add(&gOGSAutoDeferredQueued, 1u, __ATOMIC_RELAXED);
+                        }
+                    }
+                    if (liveMaster == localID) {
+                        gOGSAutoSawOwnedMaster = true;
+                        if (__atomic_exchange_n(&gOGSAutoPendingLoss, 0u, __ATOMIC_ACQ_REL))
+                            __atomic_fetch_add(&gOGSAutoDeferredCancelled, 1u, __ATOMIC_RELAXED);
+                        gOGSAutoAttemptedPending = false;
+                    } else if (__atomic_load_n(&gOGSAutoPendingLoss, __ATOMIC_ACQUIRE)) {
+                        // A confirmed local loss can trigger a response in
+                        // this same Photon callback; only the shared bounded
+                        // limiter decides when another request is permitted.
+                        // The pending loss stays queued during token refill.
+                        // An explicit manual request takes precedence on
+                        // this callback, using the SAME bounded quota.
+                        // Do not consume its slot and discard the tap.
+                        if (!__atomic_load_n(&gOGSManualRecoveryPending, __ATOMIC_ACQUIRE) &&
+                            OGSReserveMasterRequestLocked(liveRoom, localID, currentTime)) {
+                            ready = true;
+                            if (gOGSAutoAttemptedPending)
+                                __atomic_fetch_add(&gOGSAutoRetriesWhileLost, 1u,
+                                                   __ATOMIC_RELAXED);
+                            gOGSAutoAttemptedPending = true;
+                            if (!lostThisEvent)
+                                __atomic_fetch_add(&gOGSAutoDeferredExecuted, 1u,
+                                                   __ATOMIC_RELAXED);
+                        }
+                    }
+                }
+            }
+            os_unfair_lock_unlock(&gStateLock);
+            if (wrongRoom) OGSDisarmAutoRoom();
+            if (ready && __atomic_load_n(&gOGSAutoEnabled, __ATOMIC_ACQUIRE)) {
+                __atomic_fetch_add(&gOGSAutoAttempts, 1u, __ATOMIC_RELAXED);
+                if (OGSRequestLocalMasterOnceOnEvent())
+                    __atomic_fetch_add(&gOGSAutoAccepted, 1u, __ATOMIC_RELAXED);
+                else
+                    __atomic_fetch_add(&gOGSAutoFailed, 1u, __ATOMIC_RELAXED);
+            }
+        } else {
+            __atomic_fetch_add(&gOGSAutoGuarded, 1u, __ATOMIC_RELAXED);
+        }
+    }
+    // One manual request uses the same bounded quota as auto.
+    // A user tap takes precedence over auto in this callback, but cannot
+    // override any cooldown, room validity check or request budget.
+    if (__atomic_load_n(&gOGSManualRecoveryPending, __ATOMIC_ACQUIRE)) {
+        uintptr_t liveRoom = 0;
+        int32_t localID = 0, liveMaster = 0;
+        bool readable = OGSReadAutoRoom(&liveRoom, &localID, &liveMaster);
+        bool permitted = false;
+        double checkedAt = CFAbsoluteTimeGetCurrent();
+        os_unfair_lock_lock(&gStateLock);
+        if (__atomic_load_n(&gOGSManualRecoveryPending, __ATOMIC_ACQUIRE)) {
+            double age = checkedAt - gOGSManualRecoveryQueuedAt;
+            if (gOGSManualRecoveryQueuedAt <= 0. || age > 12.0) {
+                __atomic_store_n(&gOGSManualRecoveryPending, 0u, __ATOMIC_RELEASE);
+                __atomic_fetch_add(&gOGSManualRecoveryExpired, 1u, __ATOMIC_RELAXED);
+            } else if (readable &&
+                       (liveRoom != gOGSManualRecoveryRoom ||
+                        localID != gOGSManualRecoveryActor ||
+                        liveMaster == localID)) {
+                // Do not reuse a tap after switching rooms or actor IDs.
+                // Local ownership is only an observation, not server proof.
+                __atomic_store_n(&gOGSManualRecoveryPending, 0u, __ATOMIC_RELEASE);
+                __atomic_fetch_add(&gOGSManualRecoverySkipped, 1u, __ATOMIC_RELAXED);
+            } else if (readable &&
+                       OGSReserveMasterRequestLocked(liveRoom, localID, checkedAt)) {
+                __atomic_store_n(&gOGSManualRecoveryPending, 0u, __ATOMIC_RELEASE);
+                permitted = true;
+            } else if (!gOGSManualRecoveryDeferredCounted) {
+                gOGSManualRecoveryDeferredCounted = true;
+                __atomic_fetch_add(&gOGSManualRecoveryDeferred, 1u, __ATOMIC_RELAXED);
+            }
+        }
+        os_unfair_lock_unlock(&gStateLock);
+        if (permitted) {
+            __atomic_fetch_add(&gOGSManualRecoveryAttempts, 1u, __ATOMIC_RELAXED);
+            if (OGSRequestLocalMasterOnceOnEvent())
+                __atomic_fetch_add(&gOGSManualRecoveryAccepted, 1u, __ATOMIC_RELAXED);
+            else
+                __atomic_fetch_add(&gOGSManualRecoveryFailed, 1u, __ATOMIC_RELAXED);
+        }
+    }
+}
+
 // Executed on the game's Unity/PUN Update thread, never from the UIKit
 // menu timer. Makes standalone room privacy possible with zero other players.
 static void hook_PhotonHandlerUpdate(void *self, void *method) {
@@ -1480,6 +1604,25 @@ static void hook_PhotonHandlerUpdate(void *self, void *method) {
         OGSProcessManualKickOnEvent();
     if (__atomic_load_n(&gOGSPrivacyPending, __ATOMIC_ACQUIRE))
         OGSProcessRoomPrivacyOnEvent();
+
+    // Still service pending intents when the room has no incoming events
+    // or when event 203 is deliberately filtered by this client.
+    if (__atomic_load_n(&gOGSAutoEnabled, __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&gOGSManualRecoveryPending, __ATOMIC_ACQUIRE)) {
+        bool due = false;
+        double tick = CFAbsoluteTimeGetCurrent();
+        os_unfair_lock_lock(&gStateLock);
+        if (gOGSRecoveryLastUpdateProbeAt <= 0. ||
+            tick - gOGSRecoveryLastUpdateProbeAt >= 0.12) {
+            gOGSRecoveryLastUpdateProbeAt = tick;
+            due = true;
+        }
+        os_unfair_lock_unlock(&gStateLock);
+        if (due) {
+            __atomic_fetch_add(&gOGSRecoveryUpdateProbes, 1u, __ATOMIC_RELAXED);
+            OGSProcessRecoveryOnPhotonCallback(0u, 0, 0);
+        }
+    }
 }
 
 static void hook_OnEvent(void *self, void *eventData, void *method) {
@@ -1552,78 +1695,11 @@ static void hook_OnEvent(void *self, void *eventData, void *method) {
         __atomic_fetch_add(&gOGSInlineMasterReadFailures, 1u, __ATOMIC_RELAXED);
     }
 
-    // Stage 9: only an explicitly armed room owner can recover; a change
-    // detected inside the 8s cooldown must not disappear. Keep it pending
-    // until the next incoming event after cooldown, and revalidate the room.
-    // There is NO scheduled Unity/Photon call from UIKit.
-    if (__atomic_load_n(&gOGSAutoEnabled, __ATOMIC_ACQUIRE)) {
-        uintptr_t liveRoom = 0;
-        int32_t localID = 0, liveMaster = 0;
-        if (OGSReadAutoRoom(&liveRoom, &localID, &liveMaster)) {
-            bool ready = false, wrongRoom = false;
-            double currentTime = CFAbsoluteTimeGetCurrent();
-            os_unfair_lock_lock(&gStateLock);
-            if (__atomic_load_n(&gOGSAutoEnabled, __ATOMIC_ACQUIRE)) {
-                wrongRoom = gOGSAutoRoom != liveRoom ||
-                            gOGSAutoOwner != localID;
-                if (!wrongRoom) {
-                    bool lostThisEvent = masterBefore == localID &&
-                        masterAfter == liveMaster && masterAfter != localID &&
-                        masterBefore != masterAfter && observedEventCode == 253;
-                    // Stage 17: do not miss host loss if the exact 253
-                    // transition fell outside our hooked callback. A later
-                    // validated room-state read can still detect the loss.
-                    bool lostSinceOwned = gOGSAutoSawOwnedMaster && liveMaster != localID;
-                    if ((lostThisEvent || lostSinceOwned) &&
-                        !__atomic_load_n(&gOGSAutoPendingLoss, __ATOMIC_RELAXED)) {
-                        __atomic_store_n(&gOGSAutoPendingLoss, 1u, __ATOMIC_RELEASE);
-                        gOGSAutoAttemptedPending = false;
-                        if (gOGSAutoLastRequestAt > 0. &&
-                            currentTime - gOGSAutoLastRequestAt < kOGSAutoCooldownSeconds) {
-                            __atomic_fetch_add(&gOGSAutoCooldown, 1u, __ATOMIC_RELAXED);
-                            __atomic_fetch_add(&gOGSAutoDeferredQueued, 1u, __ATOMIC_RELAXED);
-                        }
-                    }
-                    if (liveMaster == localID) {
-                        gOGSAutoSawOwnedMaster = true;
-                        if (__atomic_exchange_n(&gOGSAutoPendingLoss, 0u, __ATOMIC_ACQ_REL))
-                            __atomic_fetch_add(&gOGSAutoDeferredCancelled, 1u, __ATOMIC_RELAXED);
-                        gOGSAutoAttemptedPending = false;
-                    } else if (__atomic_load_n(&gOGSAutoPendingLoss, __ATOMIC_ACQUIRE)) {
-                        // A confirmed local loss can trigger a response in
-                        // this same Photon callback; only the shared bounded
-                        // limiter decides when another request is permitted.
-                        // The pending loss stays queued during token refill.
-                        // An explicit manual request takes precedence on
-                        // this callback, using the SAME bounded quota.
-                        // Do not consume its slot and discard the tap.
-                        if (!__atomic_load_n(&gOGSManualRecoveryPending, __ATOMIC_ACQUIRE) &&
-                            OGSReserveMasterRequestLocked(liveRoom, localID, currentTime)) {
-                            ready = true;
-                            if (gOGSAutoAttemptedPending)
-                                __atomic_fetch_add(&gOGSAutoRetriesWhileLost, 1u,
-                                                   __ATOMIC_RELAXED);
-                            gOGSAutoAttemptedPending = true;
-                            if (!lostThisEvent)
-                                __atomic_fetch_add(&gOGSAutoDeferredExecuted, 1u,
-                                                   __ATOMIC_RELAXED);
-                        }
-                    }
-                }
-            }
-            os_unfair_lock_unlock(&gStateLock);
-            if (wrongRoom) OGSDisarmAutoRoom();
-            if (ready && __atomic_load_n(&gOGSAutoEnabled, __ATOMIC_ACQUIRE)) {
-                __atomic_fetch_add(&gOGSAutoAttempts, 1u, __ATOMIC_RELAXED);
-                if (OGSRequestLocalMasterOnceOnEvent())
-                    __atomic_fetch_add(&gOGSAutoAccepted, 1u, __ATOMIC_RELAXED);
-                else
-                    __atomic_fetch_add(&gOGSAutoFailed, 1u, __ATOMIC_RELAXED);
-            }
-        } else {
-            __atomic_fetch_add(&gOGSAutoGuarded, 1u, __ATOMIC_RELAXED);
-        }
-    }
+    // Stage 19: a single rate-limited recovery dispatcher for both Photon
+    // event dispatch and PhotonHandler.Update (main-thread, non-UIKit).
+    // This also survives locally filtered event 203 and quiet rooms.
+    __atomic_fetch_add(&gOGSRecoveryEventProbes, 1u, __ATOMIC_RELAXED);
+    OGSProcessRecoveryOnPhotonCallback(observedEventCode, masterBefore, masterAfter);
 
     // Execute queued room actions after the original Photon callback.
     OGSProcessManualKickOnEvent();
@@ -1631,47 +1707,7 @@ static void hook_OnEvent(void *self, void *eventData, void *method) {
     if (__atomic_load_n(&gOGS.speedDirty, __ATOMIC_ACQUIRE))
         OGSProcessSpeed();
 
-    // One manual request uses the same bounded quota as auto.
-    // A user tap takes precedence over auto in this callback, but cannot
-    // override any cooldown, room validity check or request budget.
-    if (__atomic_load_n(&gOGSManualRecoveryPending, __ATOMIC_ACQUIRE)) {
-        uintptr_t liveRoom = 0;
-        int32_t localID = 0, liveMaster = 0;
-        bool readable = OGSReadAutoRoom(&liveRoom, &localID, &liveMaster);
-        bool permitted = false;
-        double checkedAt = CFAbsoluteTimeGetCurrent();
-        os_unfair_lock_lock(&gStateLock);
-        if (__atomic_load_n(&gOGSManualRecoveryPending, __ATOMIC_ACQUIRE)) {
-            double age = checkedAt - gOGSManualRecoveryQueuedAt;
-            if (gOGSManualRecoveryQueuedAt <= 0. || age > 12.0) {
-                __atomic_store_n(&gOGSManualRecoveryPending, 0u, __ATOMIC_RELEASE);
-                __atomic_fetch_add(&gOGSManualRecoveryExpired, 1u, __ATOMIC_RELAXED);
-            } else if (readable &&
-                       (liveRoom != gOGSManualRecoveryRoom ||
-                        localID != gOGSManualRecoveryActor ||
-                        liveMaster == localID)) {
-                // Do not reuse a tap after switching rooms or actor IDs.
-                // Local ownership is only an observation, not server proof.
-                __atomic_store_n(&gOGSManualRecoveryPending, 0u, __ATOMIC_RELEASE);
-                __atomic_fetch_add(&gOGSManualRecoverySkipped, 1u, __ATOMIC_RELAXED);
-            } else if (readable &&
-                       OGSReserveMasterRequestLocked(liveRoom, localID, checkedAt)) {
-                __atomic_store_n(&gOGSManualRecoveryPending, 0u, __ATOMIC_RELEASE);
-                permitted = true;
-            } else if (!gOGSManualRecoveryDeferredCounted) {
-                gOGSManualRecoveryDeferredCounted = true;
-                __atomic_fetch_add(&gOGSManualRecoveryDeferred, 1u, __ATOMIC_RELAXED);
-            }
-        }
-        os_unfair_lock_unlock(&gStateLock);
-        if (permitted) {
-            __atomic_fetch_add(&gOGSManualRecoveryAttempts, 1u, __ATOMIC_RELAXED);
-            if (OGSRequestLocalMasterOnceOnEvent())
-                __atomic_fetch_add(&gOGSManualRecoveryAccepted, 1u, __ATOMIC_RELAXED);
-            else
-                __atomic_fetch_add(&gOGSManualRecoveryFailed, 1u, __ATOMIC_RELAXED);
-        }
-    }
+
 }
 
 static bool hook_LeaveRoom(int32_t becomeInactive, void *method) {
@@ -2753,6 +2789,12 @@ static void OGSInstallHooks(void) {
         __atomic_load_n(&gOGSManualRecoveryAccepted, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSManualRecoveryFailed, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSManualRecoverySkipped, __ATOMIC_RELAXED)];
+    details = [details stringByAppendingFormat:
+        @"\nStage 19 recovery probes: Photon Update=%u | OnEvent=%u"
+         "\nUpdate fallback runs at most ~8 times/s (not network sends)."
+         "\nServer-confirmed MasterClient: not measurable by these local-only counters.",
+        __atomic_load_n(&gOGSRecoveryUpdateProbes, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSRecoveryEventProbes, __ATOMIC_RELAXED)];
     details = [details stringByAppendingFormat:
         @"\nManual deferred=%u | expired=%u | room+actor bound | TTL=12s"
          "\nImmediate local read after API: mine=%u | other=%u | read fail=%u"
