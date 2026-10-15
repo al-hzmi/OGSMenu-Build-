@@ -1116,7 +1116,8 @@ static void hook_Type4995LeaveRoom(void *self, void *method) {
     bool recentThreat = (threatTime > 0.0 && (now - threatTime) < 3.5);
 
     // منع دالة الطرد الداخلية Type4995LeaveRoom من إخراجك أثناء وجودك بالروم
-    if (inRoomNow && (gOGS.antiKickHardLock || gOGS.autoHostOn || insideNet || (settled && recentThreat))) {
+    // Auto-host setting must not prevent intentional LeaveRoom.
+    if (inRoomNow && (gOGS.antiKickHardLock || insideNet || (settled && recentThreat))) {
         __atomic_fetch_add(&gOGS.blockedKicksCount, 1, __ATOMIC_RELAXED);
         return;
     }
@@ -1280,6 +1281,66 @@ static bool OGSInstallPointerSlotHook(uintptr_t rva, void *replacement, void **o
                                      false, __ATOMIC_RELEASE, __ATOMIC_RELAXED)) return false;
     if (outOriginal) *outOriginal = prior;
     return true;
+}
+
+// Stage 2: read-only Photon presence. No IL2CPP/Photon function calls
+// from the UIKit timer. Verified fps 3.4.0 offsets:
+// typeInfo->staticFields +0xB8 -> networkPeer +0x10;
+// peer->currentRoom +0x158, peer->localPlayer +0x160;
+// player->actorID +0x10. This is NOT proof of host authority.
+static volatile uint32_t gOGSPresenceProbeCalls = 0;
+static volatile uint32_t gOGSPresenceReadFailures = 0;
+static volatile int32_t gOGSPresenceReadOnly = 0; // 0 unknown, 1 room seen, 2 room absent
+static volatile int32_t gOGSPresenceActorID = 0;
+static uint32_t gOGSPresenceNoRoomStreak = 0;
+
+static void OGSRefreshReadOnlyPresence(void) {
+    __atomic_fetch_add(&gOGSPresenceProbeCalls, 1u, __ATOMIC_RELAXED);
+    uintptr_t slot = OGSResolveRVA(RVA_PHOTON_NET_TYPEINFO);
+    void *typeInfo = NULL, *fields = NULL, *netPeer = NULL;
+    if (!slot || !OGSReadPointer(slot, &typeInfo) ||
+        !OGSReadPointer((uintptr_t)typeInfo + 0xB8, &fields) ||
+        !OGSReadPointer((uintptr_t)fields + 0x10, &netPeer)) {
+        __atomic_store_n(&gOGSPresenceReadOnly, 0, __ATOMIC_RELEASE);
+        __atomic_fetch_add(&gOGSPresenceReadFailures, 1u, __ATOMIC_RELAXED);
+        gOGSPresenceNoRoomStreak = 0;
+        return;
+    }
+    uintptr_t room = 0, local = 0;
+    if (!OGSReadMemory((uintptr_t)netPeer + 0x158, &room, sizeof(room)) ||
+        !OGSReadMemory((uintptr_t)netPeer + 0x160, &local, sizeof(local))) {
+        __atomic_store_n(&gOGSPresenceReadOnly, 0, __ATOMIC_RELEASE);
+        __atomic_fetch_add(&gOGSPresenceReadFailures, 1u, __ATOMIC_RELAXED);
+        gOGSPresenceNoRoomStreak = 0;
+        return;
+    }
+    int32_t actor = 0;
+    bool localValid = local > 0x100000000ULL &&
+        OGSReadMemory(local + 0x10, &actor, sizeof(actor)) &&
+        actor > 0 && actor < 1000000;
+    if (room > 0x100000000ULL && localValid) {
+        __atomic_store_n(&gOGSPresenceReadOnly, 1, __ATOMIC_RELEASE);
+        __atomic_store_n(&gOGSPresenceActorID, actor, __ATOMIC_RELEASE);
+        __atomic_store_n(&gOGS.inRoom, true, __ATOMIC_RELEASE);
+        gOGSPresenceNoRoomStreak = 0;
+        os_unfair_lock_lock(&gStateLock);
+        if (gOGS.roomEnterTime <= 0.0)
+            gOGS.roomEnterTime = CFAbsoluteTimeGetCurrent();
+        os_unfair_lock_unlock(&gStateLock);
+    } else if (room == 0 && ++gOGSPresenceNoRoomStreak >= 4) {
+        __atomic_store_n(&gOGSPresenceReadOnly, 2, __ATOMIC_RELEASE);
+        __atomic_store_n(&gOGSPresenceActorID, 0, __ATOMIC_RELEASE);
+        __atomic_store_n(&gOGS.inRoom, false, __ATOMIC_RELEASE);
+        __atomic_store_n(&gOGS.isMaster, false, __ATOMIC_RELEASE);
+        __atomic_store_n(&gOGS.heldMasterStably, false, __ATOMIC_RELEASE);
+        os_unfair_lock_lock(&gStateLock);
+        gOGS.roomEnterTime = 0.0;
+        gOGS.masterAcquiredTime = 0.0;
+        os_unfair_lock_unlock(&gStateLock);
+    } else {
+        __atomic_store_n(&gOGSPresenceReadOnly, 0, __ATOMIC_RELEASE);
+        if (room != 0) gOGSPresenceNoRoomStreak = 0;
+    }
 }
 
 static void OGSInstallHooks(void) {
@@ -1609,9 +1670,8 @@ static void OGSInstallHooks(void) {
         }
         // Crash 7567FE79: Calling OGSUpdateRoomSnapshot from this UIKit
         // NSTimer entered IL2CPP object/peer code on an unsupported call path.
-        // Stage 1: UI timer only manages UIKit and hook-install retries.
-        // Do not invoke any Unity/IL2CPP function on this UIKit timer.
-        // Speed remains directly adjustable with the existing controls.
+        // Read-only Mach VM reads only. No managed calls from UIKit timer.
+        OGSRefreshReadOnlyPresence();
     }
 
     if (!self.menuPanel || self.menuPanel.hidden) return;
