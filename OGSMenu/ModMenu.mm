@@ -740,6 +740,28 @@ static const double kOGSRecoveryTokenRefillSeconds = 10.0;
 static double gOGSRecoveryTokens = 3.0;          // gStateLock
 static double gOGSRecoveryTokenRefillAt = 0.0;  // gStateLock
 
+// Stage 20: bounded, read-only, room-scoped local MasterClient chronology.
+// The timeline records OBSERVED local state changes, not server approvals.
+#define OGS_MASTER_TIMELINE_CAPACITY 32
+typedef struct {
+    double observedAt;
+    int32_t localActor;
+    int32_t fromActor;
+    int32_t toActor;
+    uint32_t eventCode;      // 0 for PhotonHandler.Update
+    uint8_t viaUpdate;
+    double locallyHeldMs;    // approximate observation gap, not server duration
+} OGSHostTimelineEntry;
+static OGSHostTimelineEntry gOGSHostTimeline[OGS_MASTER_TIMELINE_CAPACITY];
+static uint64_t gOGSHostTimelineWrites = 0;  // gStateLock
+static uintptr_t gOGSHostObservedRoom = 0;   // gStateLock
+static int32_t gOGSHostObservedActor = 0;    // gStateLock
+static int32_t gOGSHostObservedMaster = 0;   // gStateLock
+static double gOGSHostLocalObservedSince = 0.; // gStateLock
+static volatile uint32_t gOGSHostLossEvent208 = 0;
+static volatile uint32_t gOGSHostLossEvent253 = 0;
+static volatile uint32_t gOGSHostLossUpdate = 0;
+
 // Verified room + local actor + master are read using Mach VM only.
 static bool OGSReadAutoRoom(uintptr_t *roomOut, int32_t *localOut, int32_t *masterOut) {
     void *peer = OGSGetNetworkingPeerSafe();
@@ -757,6 +779,47 @@ static bool OGSReadAutoRoom(uintptr_t *roomOut, int32_t *localOut, int32_t *mast
     if (localOut) *localOut = localID;
     if (masterOut) *masterOut = masterID;
     return true;
+}
+
+// Never modify or synthesize a Photon event. Capture only cross-callback
+// observations under one lock, resetting baseline whenever room/actor changes.
+static void OGSRecordHostLocalObservation(uintptr_t room, int32_t actor,
+                                          int32_t master, uint32_t code,
+                                          bool viaUpdate) {
+    if (!room || actor <= 0 || master <= 0) return;
+    double observedAt = CFAbsoluteTimeGetCurrent();
+    os_unfair_lock_lock(&gStateLock);
+    if (gOGSHostObservedRoom != room || gOGSHostObservedActor != actor ||
+        gOGSHostObservedMaster <= 0) {
+        gOGSHostObservedRoom = room;
+        gOGSHostObservedActor = actor;
+        gOGSHostObservedMaster = master;
+        gOGSHostLocalObservedSince = master == actor ? observedAt : 0.;
+    } else if (gOGSHostObservedMaster != master) {
+        OGSHostTimelineEntry *entry =
+            &gOGSHostTimeline[gOGSHostTimelineWrites % OGS_MASTER_TIMELINE_CAPACITY];
+        entry->observedAt = observedAt;
+        entry->localActor = actor;
+        entry->fromActor = gOGSHostObservedMaster;
+        entry->toActor = master;
+        entry->eventCode = code;
+        entry->viaUpdate = viaUpdate ? 1u : 0u;
+        entry->locallyHeldMs =
+            (gOGSHostObservedMaster == actor && gOGSHostLocalObservedSince > 0.) ?
+            fmax(0., (observedAt - gOGSHostLocalObservedSince) * 1000.) : 0.;
+        ++gOGSHostTimelineWrites;
+        if (entry->fromActor == actor && master != actor) {
+            if (viaUpdate)
+                __atomic_fetch_add(&gOGSHostLossUpdate, 1u, __ATOMIC_RELAXED);
+            else if (code == 208)
+                __atomic_fetch_add(&gOGSHostLossEvent208, 1u, __ATOMIC_RELAXED);
+            else if (code == 253)
+                __atomic_fetch_add(&gOGSHostLossEvent253, 1u, __ATOMIC_RELAXED);
+        }
+        gOGSHostObservedMaster = master;
+        gOGSHostLocalObservedSince = master == actor ? observedAt : 0.;
+    }
+    os_unfair_lock_unlock(&gStateLock);
 }
 
 static void OGSDisarmAutoRoom(void) {
@@ -1478,13 +1541,22 @@ static void OGSProcessManualKickOnEvent(void) {
 static void OGSProcessRecoveryOnPhotonCallback(uint32_t observedEventCode,
                                                int32_t masterBefore,
                                                int32_t masterAfter) {
+    // Sample BEFORE this dispatcher submits a new local recovery request.
+    // This distinction is essential: the SDK may change local ownership
+    // optimistically before the Photon server has accepted any transfer.
+    uintptr_t observedRoom = 0;
+    int32_t observedActor = 0, observedMaster = 0;
+    bool snapshotOK = OGSReadAutoRoom(&observedRoom, &observedActor, &observedMaster);
+    if (snapshotOK)
+        OGSRecordHostLocalObservation(observedRoom, observedActor, observedMaster,
+                                      observedEventCode, observedEventCode == 0);
     // Auto recovery remains strictly opt-in, bound to the original room/actor.
     // Evaluate ownership with a fresh room-bound snapshot on every selected
     // Photon callback, including bounded Update probes during quiet periods.
     if (__atomic_load_n(&gOGSAutoEnabled, __ATOMIC_ACQUIRE)) {
-        uintptr_t liveRoom = 0;
-        int32_t localID = 0, liveMaster = 0;
-        if (OGSReadAutoRoom(&liveRoom, &localID, &liveMaster)) {
+        uintptr_t liveRoom = observedRoom;
+        int32_t localID = observedActor, liveMaster = observedMaster;
+        if (snapshotOK) {
             bool ready = false, wrongRoom = false;
             double currentTime = CFAbsoluteTimeGetCurrent();
             os_unfair_lock_lock(&gStateLock);
@@ -1492,9 +1564,14 @@ static void OGSProcessRecoveryOnPhotonCallback(uint32_t observedEventCode,
                 wrongRoom = gOGSAutoRoom != liveRoom ||
                             gOGSAutoOwner != localID;
                 if (!wrongRoom) {
+                    // Verified ARM64 fps 3.4.0 NetworkingPeer.SetMasterClient
+                    // invokes RaiseEvent(208) for master assignment. 253 is
+                    // separately retained for room property update correlation.
+                    bool masterChangeCode = observedEventCode == 208 ||
+                                            observedEventCode == 253;
                     bool lostThisEvent = masterBefore == localID &&
                         masterAfter == liveMaster && masterAfter != localID &&
-                        masterBefore != masterAfter && observedEventCode == 253;
+                        masterBefore != masterAfter && masterChangeCode;
                     // Stage 17: do not miss host loss if the exact 253
                     // transition fell outside our hooked callback. A later
                     // validated room-state read can still detect the loss.
@@ -1553,9 +1630,9 @@ static void OGSProcessRecoveryOnPhotonCallback(uint32_t observedEventCode,
     // A user tap takes precedence over auto in this callback, but cannot
     // override any cooldown, room validity check or request budget.
     if (__atomic_load_n(&gOGSManualRecoveryPending, __ATOMIC_ACQUIRE)) {
-        uintptr_t liveRoom = 0;
-        int32_t localID = 0, liveMaster = 0;
-        bool readable = OGSReadAutoRoom(&liveRoom, &localID, &liveMaster);
+        uintptr_t liveRoom = observedRoom;
+        int32_t localID = observedActor, liveMaster = observedMaster;
+        bool readable = snapshotOK;
         bool permitted = false;
         double checkedAt = CFAbsoluteTimeGetCurrent();
         os_unfair_lock_lock(&gStateLock);
@@ -2285,7 +2362,7 @@ static void OGSInstallHooks(void) {
         self.menuPanel.hidden = YES;
 
         self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 5, 260, 18)];
-        self.titleLabel.text = @"OGS Stage 17 | إدارة الروم";
+        self.titleLabel.text = @"OGS Stage 20 | إدارة الروم";
         self.titleLabel.textColor = [UIColor whiteColor];
         self.titleLabel.textAlignment = NSTextAlignmentCenter;
         self.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
@@ -2790,11 +2867,34 @@ static void OGSInstallHooks(void) {
         __atomic_load_n(&gOGSManualRecoveryFailed, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSManualRecoverySkipped, __ATOMIC_RELAXED)];
     details = [details stringByAppendingFormat:
-        @"\nStage 19 recovery probes: Photon Update=%u | OnEvent=%u"
+        @"\nStage 20 recovery probes: Photon Update=%u | OnEvent=%u"
          "\nUpdate fallback runs at most ~8 times/s (not network sends)."
          "\nServer-confirmed MasterClient: not measurable by these local-only counters.",
         __atomic_load_n(&gOGSRecoveryUpdateProbes, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSRecoveryEventProbes, __ATOMIC_RELAXED)];
+    details = [details stringByAppendingFormat:
+        @"\nObserved local host loss: event208=%u | event253=%u | update=%u"
+         "\n208 is confirmed from fps ARM64 RaiseEvent; still not server proof.",
+        __atomic_load_n(&gOGSHostLossEvent208, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSHostLossEvent253, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSHostLossUpdate, __ATOMIC_RELAXED)];
+    OGSHostTimelineEntry trace[12] = {};
+    uint32_t traceCount = 0;
+    os_unfair_lock_lock(&gStateLock);
+    traceCount = (uint32_t)fmin((double)gOGSHostTimelineWrites, 12.);
+    for (uint32_t i = 0; i < traceCount; ++i)
+        trace[i] = gOGSHostTimeline[(gOGSHostTimelineWrites - 1u - i) %
+                                    OGS_MASTER_TIMELINE_CAPACITY];
+    os_unfair_lock_unlock(&gStateLock);
+    details = [details stringByAppendingString:@"\nRecent local master transitions (newest first):"];
+    for (uint32_t i = 0; i < traceCount; ++i) {
+        const OGSHostTimelineEntry *e = &trace[i];
+        details = [details stringByAppendingFormat:
+            @"\n- %.0fms ago | %d -> %d | %@%u | yours~%.1fms",
+            fmax(0., (CFAbsoluteTimeGetCurrent() - e->observedAt) * 1000.),
+            e->fromActor, e->toActor, e->viaUpdate ? @"Update" : @"Event",
+            e->eventCode, e->locallyHeldMs];
+    }
     details = [details stringByAppendingFormat:
         @"\nManual deferred=%u | expired=%u | room+actor bound | TTL=12s"
          "\nImmediate local read after API: mine=%u | other=%u | read fail=%u"
@@ -2833,7 +2933,7 @@ static void OGSInstallHooks(void) {
         @"\nAuto pending loss=%u | deferred queued=%u | deferred executed=%u | cancelled=%u"
          "\nRolling rate limit=%u/%u in 60s | window resets in %.1fs"
          "\nRate-limited windows=%u | retries while still not host=%u"
-         "\nStay ARMED when limited; requests continue on next Photon event after cooldown/window reset.",
+         "\nStay ARMED when limited; requests continue on the next Photon Update/Event after cooldown/window reset.",
         __atomic_load_n(&gOGSAutoPendingLoss, __ATOMIC_ACQUIRE),
         __atomic_load_n(&gOGSAutoDeferredQueued, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSAutoDeferredExecuted, __ATOMIC_RELAXED),
