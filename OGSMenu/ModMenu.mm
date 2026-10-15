@@ -156,6 +156,7 @@ static Update0Fn        orig_ChatUpdate      = NULL;
 static SendChatRemoteFn orig_SendChatRemote  = NULL;
 static OnDisconnectFn   orig_OnDisconnect    = NULL;
 static OnEventFn        orig_OnEvent         = NULL;
+static Update0Fn        orig_PhotonHandlerUpdate = NULL;
 static LeaveRoomFn      orig_LeaveRoom       = NULL;
 static Type4995LeaveFn  orig_Type4995Leave   = NULL;
 static OnMasterSwitchFn orig_OnMasterSwitch1 = NULL;
@@ -847,6 +848,12 @@ static uintptr_t gOGSPrivacyRequestedRoom = 0; // gStateLock
 static int32_t gOGSPrivacyRequestedActor = 0; // gStateLock
 static volatile uint32_t gOGSPrivacyApplied = 0;
 static volatile uint32_t gOGSPrivacyRejected = 0;
+// Independent Unity/PUN frame callback handles queued actions even when
+// a private room has no incoming Photon OnEvent callbacks.
+static volatile uint64_t gOGSPhotonHandlerUpdateCalls = 0;
+static const uintptr_t kOGSPhotonHandlerUpdateSlot = 0x023905F0;
+// Verified against fps 3.4.0 IL2CPP metadata: PhotonHandler.Update method
+// index 28734 maps to the ARM64 entry at RVA 0x013C8400 via this slot.
 
 static bool OGSReadRoomPrivacy(uintptr_t room, bool *isOpen, bool *isVisible) {
     uint8_t o = 0, v = 0;
@@ -1436,6 +1443,20 @@ static void OGSProcessManualKickOnEvent(void) {
     __atomic_fetch_add(&gOGSManualKickRejected, 1u, __ATOMIC_RELAXED);
 }
 
+// Executed on the game's Unity/PUN Update thread, never from the UIKit
+// menu timer. Makes standalone room privacy possible with zero other players.
+static void hook_PhotonHandlerUpdate(void *self, void *method) {
+    if (orig_PhotonHandlerUpdate)
+        orig_PhotonHandlerUpdate(self, method);
+    __atomic_fetch_add(&gOGSPhotonHandlerUpdateCalls, 1ULL, __ATOMIC_RELAXED);
+    // Both callbacks may run on the same frame. Pending actions are atomically
+    // consumed only once; kick executes before optional room close.
+    if (__atomic_load_n(&gOGSManualKickPending, __ATOMIC_ACQUIRE))
+        OGSProcessManualKickOnEvent();
+    if (__atomic_load_n(&gOGSPrivacyPending, __ATOMIC_ACQUIRE))
+        OGSProcessRoomPrivacyOnEvent();
+}
+
 static void hook_OnEvent(void *self, void *eventData, void *method) {
     __atomic_fetch_add(&gOGSNetworkEvents, 1ULL, __ATOMIC_RELAXED);
     double now = CFAbsoluteTimeGetCurrent();
@@ -1572,11 +1593,10 @@ static void hook_OnEvent(void *self, void *eventData, void *method) {
         }
     }
 
-    // Execute queued room visibility/open settings on the Photon callback,
-    // after the original game networking handler has updated room state.
-    OGSProcessRoomPrivacyOnEvent();
-    // Process explicit user actions only after the game's Photon handler.
+    // Execute queued room actions after the original Photon callback.
+    // When combining kick+close, issue the kick before closing admission.
     OGSProcessManualKickOnEvent();
+    OGSProcessRoomPrivacyOnEvent();
     if (__atomic_load_n(&gOGS.speedDirty, __ATOMIC_ACQUIRE))
         OGSProcessSpeed();
 
@@ -2024,6 +2044,8 @@ static void OGSInstallHooks(void) {
     OGSInstallPointerSlotHook(gOffsets.tblSendChatRemote, (void *)&hook_SendChatRemote, (void **)&orig_SendChatRemote);
     OGSInstallPointerSlotHook(gOffsets.tblOnDisconnect, (void *)&hook_OnPhotonPlayerDisconnected, (void **)&orig_OnDisconnect);
     OGSInstallPointerSlotHook(gOffsets.tblOnEvent, (void *)&hook_OnEvent, (void **)&orig_OnEvent);
+    OGSInstallPointerSlotHook(kOGSPhotonHandlerUpdateSlot, (void *)&hook_PhotonHandlerUpdate,
+                              (void **)&orig_PhotonHandlerUpdate);
     OGSInstallPointerSlotHook(gOffsets.tblLeaveRoom, (void *)&hook_LeaveRoom, (void **)&orig_LeaveRoom);
     OGSInstallPointerSlotHook(gOffsets.tblType4995LeaveRoom, (void *)&hook_Type4995LeaveRoom, (void **)&orig_Type4995Leave);
     OGSInstallPointerSlotHook(gOffsets.tblOnMasterSwitched1, (void *)&hook_OnMasterSwitched1, (void **)&orig_OnMasterSwitch1);
@@ -2156,7 +2178,7 @@ static void OGSInstallHooks(void) {
         [self.floatingButton addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)]];
         [self.containerView addSubview:self.floatingButton];
 
-        self.menuPanel = [[UIView alloc] initWithFrame:CGRectMake(75, 18, 315, 358)];
+        self.menuPanel = [[UIView alloc] initWithFrame:CGRectMake(75, 18, 315, 394)];
         self.menuPanel.backgroundColor = [UIColor colorWithRed:0.09 green:0.09 blue:0.11 alpha:0.96];
         self.menuPanel.layer.cornerRadius = 14.0;
         self.menuPanel.layer.borderWidth = 2.0f;
@@ -2164,7 +2186,7 @@ static void OGSInstallHooks(void) {
         self.menuPanel.hidden = YES;
 
         self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 5, 260, 18)];
-        self.titleLabel.text = @"OGS Stage 15 | إدارة الروم";
+        self.titleLabel.text = @"OGS Stage 16 | إدارة الروم";
         self.titleLabel.textColor = [UIColor whiteColor];
         self.titleLabel.textAlignment = NSTextAlignmentCenter;
         self.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
@@ -2248,6 +2270,10 @@ static void OGSInstallHooks(void) {
         self.privacyClosedButton = [self makeBtn:CGRectMake(161, 319, 144, 30)
             title:@"خاص ومغلق: إيقاف" bg:darkGray action:@selector(togglePrivacyClosed:)];
         [self.menuPanel addSubview:self.privacyClosedButton];
+
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(10, 354, 295, 30)
+            title:@"طرد وحظر محلي + إخفاء وإغلاق 🔒" bg:banRed
+            action:@selector(kickBanAndCloseSelected:)]];
 
         [self.containerView addSubview:self.menuPanel];
         self.containerView.floatingButton = self.floatingButton;
@@ -2592,6 +2618,12 @@ static void OGSInstallHooks(void) {
         chatHook ? @"مركب" : (chatReadable ? @"غير مركب" : @"غير قابل للقراءة"),
         chatWritable ? @"نعم" : @"لا",
         queued ? @"نعم" : @"لا"];
+    details = [details stringByAppendingFormat:
+        @"\nPhotonHandler.Update calls: %llu | privacy pending=%u | applied=%u | rejected=%u",
+        (unsigned long long)__atomic_load_n(&gOGSPhotonHandlerUpdateCalls, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSPrivacyPending, __ATOMIC_ACQUIRE),
+        __atomic_load_n(&gOGSPrivacyApplied, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSPrivacyRejected, __ATOMIC_RELAXED)];
     details = [details stringByAppendingFormat:@"\nCash calls: %llu | Chat calls: %llu\nNetwork events: %llu | Host switches: %llu",
         (unsigned long long)__atomic_load_n(&gOGSCashHookCalls, __ATOMIC_RELAXED),
         (unsigned long long)__atomic_load_n(&gOGSChatHookCalls, __ATOMIC_RELAXED),
@@ -2767,7 +2799,7 @@ static void OGSInstallHooks(void) {
 }
 
 // UI only queues an intent. The managed Room setters execute on OnEvent.
-- (void)requestPrivacyMode:(uint32_t)mode {
+- (void)requestPrivacyMode:(uint32_t)mode forced:(BOOL)forced {
     uintptr_t room = 0;
     int32_t actor = 0, master = 0;
     bool open = true, visible = true;
@@ -2782,15 +2814,18 @@ static void OGSInstallHooks(void) {
     }
     bool alreadyActive = (mode == 1 && !visible && open) ||
                          (mode == 2 && !visible && !open);
-    uint32_t targetMode = alreadyActive ? 3u : mode;
+    uint32_t targetMode = (!forced && alreadyActive) ? 3u : mode;
     os_unfair_lock_lock(&gStateLock);
     gOGSPrivacyRequestedRoom = room;
     gOGSPrivacyRequestedActor = actor;
     __atomic_store_n(&gOGSPrivacyPending, targetMode, __ATOMIC_RELEASE);
     os_unfair_lock_unlock(&gStateLock);
-    self.statusLabel.text = targetMode == 3 ? @"طلب إظهار الروم وفتحه ينتظر حدث Photon" :
+    self.statusLabel.text = targetMode == 3 ? @"طلب إظهار الروم وفتحه في انتظار تحديث اللعبة" :
         targetMode == 1 ? @"طلب إخفاء الروم مع السماح بالدخول باسمه" :
                           @"طلب إخفاء الروم وإغلاق الانضمام";
+}
+- (void)requestPrivacyMode:(uint32_t)mode {
+    [self requestPrivacyMode:mode forced:NO];
 }
 - (void)togglePrivacyHidden:(UIButton *)sender {
     (void)sender;
@@ -3012,6 +3047,39 @@ static void OGSInstallHooks(void) {
     self.statusLabel.text = [NSString stringWithFormat:
         @"طرد %@: طلب يدوي واحد ينتظر حدث Photon؛ راقب التشخيص",
         pName ?: @"اللاعب"];
+}
+
+// This is a global room close, not user-specific Photon visibility or a
+// permanent server-side account ban. All new joins are blocked while closed.
+- (void)kickBanAndCloseSelected:(UIButton *)sender {
+    (void)sender;
+    OGSRoomSnapshot snapshot = OGSCurrentSnapshot();
+    uint32_t selected = __atomic_load_n(&gOGS.selectedPeer, __ATOMIC_ACQUIRE);
+    uintptr_t room = 0;
+    int32_t me = 0, master = 0;
+    if (!snapshot.inRoom || selected >= snapshot.count ||
+        !OGSReadAutoRoom(&room, &me, &master) ||
+        room != gOGSRosterLastRoom || me != master) {
+        self.statusLabel.text = @"اختر لاعبًا وتأكد أنك الهوست؛ لم يتم إغلاق الروم";
+        return;
+    }
+    OGSPeerSnapshot peer = snapshot.peers[selected];
+    if (peer.actorID <= 0 || peer.actorID == me) {
+        self.statusLabel.text = @"اللاعب المحدد غير صالح؛ لم يتم إغلاق الروم";
+        return;
+    }
+    [self triggerImmediateKick:peer];
+    if (!__atomic_load_n(&gOGSManualKickPending, __ATOMIC_ACQUIRE)) {
+        self.statusLabel.text = @"تعذر تجهيز الطرد؛ لم يتم إغلاق الروم";
+        return;
+    }
+    NSString *name = [NSString stringWithUTF8String:peer.name] ?: @"اللاعب";
+    [self recordHijackerName:OGSNormalizeKey(name) actorID:peer.actorID];
+    // Explicit mode 2 always means CLOSED; never accidentally unhide/open
+    // when the combined button is pressed twice.
+    [self requestPrivacyMode:2u forced:YES];
+    self.statusLabel.text = [NSString stringWithFormat:
+        @"طلب طرد %@ ثم إخفاء وإغلاق الروم عن جميع الداخلين الجدد", name];
 }
 
 - (void)banSelected:(UIButton *)s {
