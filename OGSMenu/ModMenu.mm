@@ -1770,8 +1770,10 @@ static void OGSInstallHooks(void) {
          "Chat hook: %@ | خانة قابلة للكتابة: %@\n"
          "طلب في الانتظار: %@\n"
          "تغير صلاحية المالك لا يثبت إلا من حالة Photon.",
-        snap.inRoom ? @"داخل" : @"خارج",
-        snap.isMaster ? @"أنت" : @"لاعب آخر",
+        age >= 0.0 && age <= 0.5 ? (snap.inRoom ? @"داخل" : @"خارج") :
+            (__atomic_load_n(&gOGSPresenceReadOnly, __ATOMIC_ACQUIRE) == 1 ? @"مرصودة من الذاكرة" :
+             __atomic_load_n(&gOGSPresenceReadOnly, __ATOMIC_ACQUIRE) == 2 ? @"لا توجد غرفة محلياً" : @"غير مؤكدة"),
+        age >= 0.0 && age <= 0.5 ? (snap.isMaster ? @"أنت" : @"لاعب آخر") : @"غير مؤكد",
         age >= 0.0 && age <= 0.5 ? @"نشط" : @"متوقف",
         age >= 0.0 ? [NSString stringWithFormat:@"%.1f ثانية", age] : @"لا يوجد",
         cashHook ? @"مركب" : (cashReadable ? @"غير مركب" : @"غير قابل للقراءة"),
@@ -1784,6 +1786,13 @@ static void OGSInstallHooks(void) {
         (unsigned long long)__atomic_load_n(&gOGSChatHookCalls, __ATOMIC_RELAXED),
         (unsigned long long)__atomic_load_n(&gOGSNetworkEvents, __ATOMIC_RELAXED),
         (unsigned long long)__atomic_load_n(&gOGSMasterSwitchEvents, __ATOMIC_RELAXED)];
+    details = [details stringByAppendingFormat:
+        @"\nRead-only presence: %@ | polls: %u | read failures: %u | local actor: %d",
+        __atomic_load_n(&gOGSPresenceReadOnly, __ATOMIC_ACQUIRE) == 1 ? @"IN" :
+          (__atomic_load_n(&gOGSPresenceReadOnly, __ATOMIC_ACQUIRE) == 2 ? @"OUT" : @"UNKNOWN"),
+        __atomic_load_n(&gOGSPresenceProbeCalls, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSPresenceReadFailures, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSPresenceActorID, __ATOMIC_ACQUIRE)];
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"تشخيص تحديث OGS"
                              message:details preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"نسخ" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
