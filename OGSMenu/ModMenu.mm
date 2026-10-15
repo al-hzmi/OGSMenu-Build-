@@ -1223,9 +1223,53 @@ static void hook_OnEvent(void *self, void *eventData, void *method) {
         __atomic_fetch_add(&gOGSInlineMasterReadFailures, 1u, __ATOMIC_RELAXED);
     }
 
-    // User-triggered one-shot only. Consume before dispatch to avoid
-    // recursion or retries even if the request generates more events.
-    if (__atomic_exchange_n(&gOGSManualRecoveryPending, 0u, __ATOMIC_ACQ_REL)) {
+    // Stage 8: a protected room owner may automatically request a single
+    // recovery only when an incoming event moved MasterClient away from them.
+    // Never auto-claim when joining another person's room.
+    bool autoSent = false;
+    if (masterBefore > 0 && masterAfter > 0 && masterBefore != masterAfter &&
+        __atomic_load_n(&gOGSAutoEnabled, __ATOMIC_ACQUIRE)) {
+        uintptr_t liveRoom = 0;
+        int32_t localID = 0, liveMaster = 0;
+        if (OGSReadAutoRoom(&liveRoom, &localID, &liveMaster)) {
+            bool ready = false, wrongRoom = false;
+            double currentTime = CFAbsoluteTimeGetCurrent();
+            os_unfair_lock_lock(&gStateLock);
+            if (__atomic_load_n(&gOGSAutoEnabled, __ATOMIC_ACQUIRE)) {
+                wrongRoom = gOGSAutoRoom != liveRoom ||
+                            gOGSAutoOwner != localID || localID != 1;
+                if (!wrongRoom && masterBefore == localID &&
+                    masterAfter == liveMaster && liveMaster != localID) {
+                    if (gOGSAutoLastRequestAt > 0. &&
+                        currentTime - gOGSAutoLastRequestAt < 8.) {
+                        __atomic_fetch_add(&gOGSAutoCooldown, 1u, __ATOMIC_RELAXED);
+                    } else {
+                        gOGSAutoLastRequestAt = currentTime;
+                        ready = true;
+                    }
+                } else if (!wrongRoom) {
+                    __atomic_fetch_add(&gOGSAutoGuarded, 1u, __ATOMIC_RELAXED);
+                }
+            }
+            os_unfair_lock_unlock(&gStateLock);
+            if (wrongRoom) OGSDisarmAutoRoom();
+            if (ready) {
+                autoSent = true;
+                __atomic_fetch_add(&gOGSAutoAttempts, 1u, __ATOMIC_RELAXED);
+                if (OGSRequestLocalMasterOnceOnEvent())
+                    __atomic_fetch_add(&gOGSAutoAccepted, 1u, __ATOMIC_RELAXED);
+                else
+                    __atomic_fetch_add(&gOGSAutoFailed, 1u, __ATOMIC_RELAXED);
+            }
+        } else {
+            __atomic_fetch_add(&gOGSAutoGuarded, 1u, __ATOMIC_RELAXED);
+        }
+    }
+
+    // Manual request remains available and uses the same known working API.
+    // If auto already attempted this event, consume but do not send twice.
+    if (__atomic_exchange_n(&gOGSManualRecoveryPending, 0u, __ATOMIC_ACQ_REL) &&
+        !autoSent) {
         __atomic_fetch_add(&gOGSManualRecoveryAttempts, 1u, __ATOMIC_RELAXED);
         if (masterAfter <= 0) {
             __atomic_fetch_add(&gOGSManualRecoverySkipped, 1u, __ATOMIC_RELAXED);
