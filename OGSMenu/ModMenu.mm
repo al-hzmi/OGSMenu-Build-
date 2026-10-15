@@ -1062,6 +1062,9 @@ static void hook_OnEvent(void *self, void *eventData, void *method) {
     if (eventData && (uintptr_t)eventData >= 0x100000000ULL) {
         uint8_t eventCode = 0;
         if (OGSReadMemory((uintptr_t)eventData + 0x10, &eventCode, sizeof(uint8_t))) {
+            // Diagnostics only: never mutate packets or call Unity from here.
+            __atomic_fetch_add(&gOGSEventCodes[eventCode], 1u, __ATOMIC_RELAXED);
+            __atomic_store_n(&gOGSLastEventCode, (uint32_t)eventCode, __ATOMIC_RELEASE);
             if (eventCode == 203) {
                 os_unfair_lock_lock(&gStateLock);
                 gOGS.lastThreatTime = now;
@@ -1074,6 +1077,8 @@ static void hook_OnEvent(void *self, void *eventData, void *method) {
                 gOGS.lastThreatTime = now;
                 os_unfair_lock_unlock(&gStateLock);
             }
+        } else {
+            __atomic_fetch_add(&gOGSEventCodeReadFailures, 1u, __ATOMIC_RELAXED);
         }
     }
 
@@ -1298,6 +1303,15 @@ static volatile int32_t gOGSLocalMasterActorID = 0; // zero means unknown
 static volatile uint32_t gOGSLocalMasterSamples = 0;
 static volatile uint32_t gOGSLocalMasterReadFailures = 0;
 static volatile uint32_t gOGSLocalMasterChanges = 0;
+// The last trustworthy room/master sample survives transient VM read errors;
+// the displayed current MasterClient remains UNKNOWN during those errors.
+static uintptr_t gOGSLastReliableRoomAddress = 0; // UIKit timer thread only
+static int32_t gOGSLastReliableMasterActor = 0;    // UIKit timer thread only
+static volatile int32_t gOGSLastMasterFromActor = 0;
+static volatile int32_t gOGSLastMasterToActor = 0;
+static volatile uint32_t gOGSEventCodes[256] = {0};
+static volatile uint32_t gOGSEventCodeReadFailures = 0;
+static volatile uint32_t gOGSLastEventCode = 0;
 static uint32_t gOGSPresenceNoRoomStreak = 0;
 
 static void OGSRefreshReadOnlyPresence(void) {
@@ -1334,10 +1348,19 @@ static void OGSRefreshReadOnlyPresence(void) {
         int32_t observedMaster = 0;
         bool validMaster = OGSReadMemory(room + 0x48, &observedMaster, sizeof(observedMaster)) &&
             observedMaster > 0 && observedMaster < 1000000;
+        if (gOGSLastReliableRoomAddress != room) {
+            gOGSLastReliableRoomAddress = room;
+            gOGSLastReliableMasterActor = 0;
+        }
         if (validMaster) {
-            int32_t previous = __atomic_exchange_n(&gOGSLocalMasterActorID, observedMaster, __ATOMIC_ACQ_REL);
-            if (previous > 0 && previous != observedMaster)
+            int32_t previous = gOGSLastReliableMasterActor;
+            gOGSLastReliableMasterActor = observedMaster;
+            __atomic_store_n(&gOGSLocalMasterActorID, observedMaster, __ATOMIC_RELEASE);
+            if (previous > 0 && previous != observedMaster) {
+                __atomic_store_n(&gOGSLastMasterFromActor, previous, __ATOMIC_RELEASE);
+                __atomic_store_n(&gOGSLastMasterToActor, observedMaster, __ATOMIC_RELEASE);
                 __atomic_fetch_add(&gOGSLocalMasterChanges, 1u, __ATOMIC_RELAXED);
+            }
             __atomic_fetch_add(&gOGSLocalMasterSamples, 1u, __ATOMIC_RELAXED);
         } else {
             __atomic_store_n(&gOGSLocalMasterActorID, 0, __ATOMIC_RELEASE);
@@ -1351,6 +1374,8 @@ static void OGSRefreshReadOnlyPresence(void) {
         os_unfair_lock_unlock(&gStateLock);
     } else if (room == 0 && ++gOGSPresenceNoRoomStreak >= 4) {
         __atomic_store_n(&gOGSPresenceReadOnly, 2, __ATOMIC_RELEASE);
+        gOGSLastReliableRoomAddress = 0;
+        gOGSLastReliableMasterActor = 0;
         __atomic_store_n(&gOGSPresenceActorID, 0, __ATOMIC_RELEASE);
         __atomic_store_n(&gOGSLocalMasterActorID, 0, __ATOMIC_RELEASE);
         __atomic_store_n(&gOGS.inRoom, false, __ATOMIC_RELEASE);
@@ -1712,8 +1737,15 @@ static void OGSInstallHooks(void) {
     BOOL hookActive = lastUpdate > 0.0 && (CFAbsoluteTimeGetCurrent() - lastUpdate) <= 0.5;
     int32_t pending = __atomic_load_n(&gOGS.forceHostReq, __ATOMIC_ACQUIRE);
     // UNKNOWN is safer than falsely declaring room ownership with a stale tick.
-    NSString *masterStatus = !hookActive ? @"غير مؤكد" :
-        (!snapshot.inRoom ? @"خارج" : (snapshot.isMaster ? @"أنت" : @"غيرك"));
+    int32_t readPresence = __atomic_load_n(&gOGSPresenceReadOnly, __ATOMIC_ACQUIRE);
+    int32_t localActor = __atomic_load_n(&gOGSPresenceActorID, __ATOMIC_ACQUIRE);
+    int32_t localMaster = __atomic_load_n(&gOGSLocalMasterActorID, __ATOMIC_ACQUIRE);
+    NSString *masterStatus = hookActive ?
+        (!snapshot.inRoom ? @"خارج" : (snapshot.isMaster ? @"أنت" : @"غيرك")) :
+        (readPresence == 1 && localMaster > 0 && localActor > 0 ?
+            (localActor == localMaster ? @"أنت (محليًا)" :
+             [NSString stringWithFormat:@"#%d (محليًا)", localMaster]) :
+            @"غير مؤكد");
     self.titleLabel.text = [NSString stringWithFormat:@"OGS | هوست:%@ | تحديث:%@ | طلب:%@", masterStatus, hookActive ? @"نشط" : @"متوقف", pending ? @"معلق" : @"لا"];
     uint32_t selected = __atomic_load_n(&gOGS.selectedPeer, __ATOMIC_ACQUIRE);
 
@@ -1763,8 +1795,10 @@ static void OGSInstallHooks(void) {
         int32_t presence = __atomic_load_n(&gOGSPresenceReadOnly, __ATOMIC_ACQUIRE);
         NSString *roomLine = hookActive ?
             (snapshot.inRoom ? (snapshot.isMaster ? @"هوست: أنت 👑" : @"داخل الروم | الهوست لغيرك") : @"خارج الروم") :
-            (presence == 1 ? @"الغرفة مرصودة محلياً | الهوست غير مؤكد" :
-             presence == 2 ? @"لا توجد غرفة في الذاكرة المحلية" : @"حالة الروم غير مؤكدة");
+            (presence == 1 && localMaster > 0 && localActor > 0 ?
+                (localMaster == localActor ? @"داخل الروم | أنت الهوست محليًا" :
+                 [NSString stringWithFormat:@"داخل الروم | الهوست محليًا #%d", localMaster]) :
+             presence == 2 ? @"لا توجد غرفة في الذاكرة المحلية" : @"حالة الروم أو الهوست غير مؤكدة");
         self.statusLabel.text = [NSString stringWithFormat:@"%@ | صد طرد: %u 🛡️",
                                  roomLine, blocked];
     }
@@ -1831,6 +1865,19 @@ static void OGSInstallHooks(void) {
         __atomic_load_n(&gOGSLocalMasterSamples, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSLocalMasterReadFailures, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSLocalMasterChanges, __ATOMIC_RELAXED)];
+    details = [details stringByAppendingFormat:
+        @"\nLast local master transition: %d -> %d | changes: %u"
+         "\nNetwork code samples: 203=%u, 208=%u, 253=%u, 254=%u, 255=%u | last=%u | unreadable=%u",
+        __atomic_load_n(&gOGSLastMasterFromActor, __ATOMIC_ACQUIRE),
+        __atomic_load_n(&gOGSLastMasterToActor, __ATOMIC_ACQUIRE),
+        __atomic_load_n(&gOGSLocalMasterChanges, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSEventCodes[203], __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSEventCodes[208], __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSEventCodes[253], __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSEventCodes[254], __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSEventCodes[255], __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSLastEventCode, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSEventCodeReadFailures, __ATOMIC_RELAXED)];
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"تشخيص تحديث OGS"
                              message:details preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"نسخ" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
