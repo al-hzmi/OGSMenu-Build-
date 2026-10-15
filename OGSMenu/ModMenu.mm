@@ -676,6 +676,15 @@ static volatile uint32_t gOGSManualRecoveryAttempts = 0;
 static volatile uint32_t gOGSManualRecoveryAccepted = 0;
 static volatile uint32_t gOGSManualRecoveryFailed = 0;
 static volatile uint32_t gOGSManualRecoverySkipped = 0;
+// Stage 11: defensive accounting only. A locally filtered event is not
+// proof that Photon server-side disconnects or hostile clients were stopped.
+static volatile uint32_t gOGSFilteredEvent203 = 0;
+static volatile uint32_t gOGSEvent203NearRecovery = 0;
+static volatile uint32_t gOGSLastEvent203ProximityMs = 0;
+static double gOGSLastRecoveryAttemptAt = 0.0; // guarded by gStateLock
+static volatile uint32_t gOGSBanEvaluations = 0;
+static volatile uint32_t gOGSBanMatches = 0;
+static volatile uint32_t gOGSBanKickLocalAccepted = 0;
 // Room-scoped automatic recovery; disabled until the room owner opts in.
 static volatile uint32_t gOGSAutoEnabled = 0;
 static uintptr_t gOGSAutoRoom = 0;             // gStateLock
@@ -749,6 +758,11 @@ static bool OGSRequestLocalMasterOnceOnEvent(void) {
     void *candidate = NULL;
     if (!slot || !OGSReadPointer(slot, &candidate) || !candidate ||
         !OGSIsExecutableGameAddress((uintptr_t)candidate)) return false;
+    // Capture the moment before submission so a rapid incoming 203 cannot
+    // outrun the telemetry. Timestamp means attempted, not accepted/authorized.
+    os_unfair_lock_lock(&gStateLock);
+    gOGSLastRecoveryAttemptAt = CFAbsoluteTimeGetCurrent();
+    os_unfair_lock_unlock(&gStateLock);
     // A true return means the local API accepted the request for submission.
     // Only a later Photon room read can confirm actual MasterClient status.
     return ((PeerAction1Fn)candidate)((void *)localPlayer, NULL);
@@ -1001,7 +1015,8 @@ static void OGSUpdateRoomSnapshot(bool passive = false) {
 
         if (!passive && roomSettled && master && [menu shouldAutoKickPeerWithName:normName actorID:peerSnap.actorID]) {
             if (OGSIsAutoKickAllowedForActor(peerSnap.actorID, now)) {
-                OGSKickPeerReal(players[i], false);
+                if (OGSKickPeerReal(players[i], false))
+                    __atomic_fetch_add(&gOGSBanKickLocalAccepted, 1u, __ATOMIC_RELAXED);
             }
         }
     }
@@ -1200,9 +1215,21 @@ static void hook_OnEvent(void *self, void *eventData, void *method) {
             ++gOGSNetTrailWrites;
             os_unfair_lock_unlock(&gStateLock);
             if (eventCode == 203) {
+                double lastRecoveryAt = 0.0;
                 os_unfair_lock_lock(&gStateLock);
                 gOGS.lastThreatTime = now;
+                lastRecoveryAt = gOGSLastRecoveryAttemptAt;
                 os_unfair_lock_unlock(&gStateLock);
+                __atomic_fetch_add(&gOGSFilteredEvent203, 1u, __ATOMIC_RELAXED);
+                if (lastRecoveryAt > 0.0 && now >= lastRecoveryAt &&
+                    now - lastRecoveryAt <= 5.0) {
+                    __atomic_fetch_add(&gOGSEvent203NearRecovery, 1u, __ATOMIC_RELAXED);
+                    __atomic_store_n(&gOGSLastEvent203ProximityMs,
+                                     (uint32_t)((now - lastRecoveryAt) * 1000.0),
+                                     __ATOMIC_RELEASE);
+                }
+                // Existing local filter retained, with explicit telemetry.
+                // It cannot override Photon server-side removal.
                 __atomic_fetch_add(&gOGS.blockedKicksCount, 1, __ATOMIC_RELAXED);
                 return;
             }
@@ -1700,12 +1727,14 @@ static void OGSInstallHooks(void) {
 }
 
 - (BOOL)shouldAutoKickPeerWithName:(NSString *)normName actorID:(int32_t)actID {
+    __atomic_fetch_add(&gOGSBanEvaluations, 1u, __ATOMIC_RELAXED);
     BOOL res = NO;
     os_unfair_lock_lock(&gBanSetLock);
     if (normName.length > 0 && [self.bannedNames containsObject:normName]) res = YES;
     else if (actID > 0 && [self.bannedActorIDs containsObject:@(actID)]) res = YES;
     else if (self.roomLockActive && normName.length > 0 && ![self.allowedNamesWhenLocked containsObject:normName]) res = YES;
     os_unfair_lock_unlock(&gBanSetLock);
+    if (res) __atomic_fetch_add(&gOGSBanMatches, 1u, __ATOMIC_RELAXED);
     return res;
 }
 
@@ -1847,7 +1876,7 @@ static void OGSInstallHooks(void) {
         self.unbanButton = [self makeBtn:CGRectMake(10, 214, 90, 30) title:@"فك الحظر (0)" bg:darkGray action:@selector(clearBanList:)];
         [self.menuPanel addSubview:self.unbanButton];
 
-        self.lockButton = [self makeBtn:CGRectMake(205, 214, 100, 30) title:@"قفل الروم: مفتوح" bg:darkGray action:@selector(toggleRoomLock:)];
+        self.lockButton = [self makeBtn:CGRectMake(205, 214, 100, 30) title:@"حظر محلي: إيقاف" bg:darkGray action:@selector(toggleRoomLock:)];
         [self.menuPanel addSubview:self.lockButton];
 
         [self.menuPanel addSubview:[self makeBtn:CGRectMake(10, 249, 55, 30) title:@"سرعة -" bg:darkGray action:@selector(speedDown:)]];
@@ -2189,6 +2218,17 @@ static void OGSInstallHooks(void) {
         @"\nRejoin approvals=%u | local actor may differ from first entrant"
          "\nA rejoin request must be explicitly approved; it does not prove server ownership.",
         __atomic_load_n(&gOGSAutoRejoinApprovals, __ATOMIC_RELAXED)];
+    details = [details stringByAppendingFormat:
+        @"\nKick event 203: locally filtered=%u | within 5s of host request=%u | last proximity=%ums"
+         "\nBan processing: evaluations=%u | matched=%u | local kick API accepted=%u"
+         "\nBan enforcement engine tick: %@. Local filters cannot provide server-wide account bans.",
+        __atomic_load_n(&gOGSFilteredEvent203, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSEvent203NearRecovery, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSLastEvent203ProximityMs, __ATOMIC_ACQUIRE),
+        __atomic_load_n(&gOGSBanEvaluations, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSBanMatches, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSBanKickLocalAccepted, __ATOMIC_RELAXED),
+        age >= 0.0 && age <= 0.5 ? @"ACTIVE" : @"INACTIVE"];
     char eventTrailCopy[sizeof(gOGSLastTransitionEventTrail)] = {0};
     os_unfair_lock_lock(&gStateLock);
     memcpy(eventTrailCopy, gOGSLastTransitionEventTrail, sizeof(eventTrailCopy));
@@ -2461,7 +2501,9 @@ static void OGSInstallHooks(void) {
     OGSPeerSnapshot peer = snapshot.peers[selected];
     NSString *pName = [NSString stringWithUTF8String:peer.name];
     [self triggerImmediateKick:peer];
-    self.statusLabel.text = [NSString stringWithFormat:@"تم طرد: %@", pName ?: @"اللاعب"];
+    self.statusLabel.text = [NSString stringWithFormat:
+        @"تم تسجيل طلب طرد %@ محليًا؛ التنفيذ يحتاج تحديث Unity وتأكيد Photon",
+        pName ?: @"اللاعب"];
 }
 
 - (void)banSelected:(UIButton *)s {
@@ -2477,7 +2519,9 @@ static void OGSInstallHooks(void) {
     [self recordHijackerName:normName actorID:peer.actorID];
     [self triggerImmediateKick:peer];
     [self refreshUI];
-    self.statusLabel.text = [NSString stringWithFormat:@"تم طرد وحظر: %@", pName ?: @"اللاعب"];
+    self.statusLabel.text = [NSString stringWithFormat:
+        @"تم حفظ حظر %@ محليًا؛ تنفيذ الطرد غير مؤكد ويحتاج تحديث Unity",
+        pName ?: @"اللاعب"];
 }
 
 - (void)toggleRoomLock:(UIButton *)s {
@@ -2500,13 +2544,16 @@ static void OGSInstallHooks(void) {
 
     if (isLocked) {
         __atomic_store_n(&gOGS.forceHostReq, 1, __ATOMIC_RELEASE);
-        [s setTitle:@"قفل الروم: مقفل 🔒" forState:UIControlStateNormal];
+        [s setTitle:@"حظر محلي: مفعّل" forState:UIControlStateNormal];
         s.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
     } else {
-        [s setTitle:@"قفل الروم: مفتوح" forState:UIControlStateNormal];
+        [s setTitle:@"حظر محلي: إيقاف" forState:UIControlStateNormal];
         s.backgroundColor = [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
     }
     [self refreshUI];
+    self.statusLabel.text = isLocked ?
+        @"الحظر محلي ويعتمد على تحديث Unity؛ ليس قفل دخول على الخادم" :
+        @"تم إيقاف الحظر المحلي";
 }
 
 - (void)clearBanList:(UIButton *)s {
