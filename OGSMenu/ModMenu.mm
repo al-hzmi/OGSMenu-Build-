@@ -1057,6 +1057,14 @@ static volatile int32_t gOGSHostMonitorOn = 1;
 static volatile uint32_t gOGSEventCodes[256] = {0};
 static volatile uint32_t gOGSEventCodeReadFailures = 0;
 static volatile uint32_t gOGSLastEventCode = 0;
+// Observations inside the already-active Photon event callback.
+// These are not proof that an incoming packet requested the switch.
+static volatile uint32_t gOGSInlineMasterObservations = 0;
+static volatile uint32_t gOGSInlineMasterReadFailures = 0;
+static volatile uint32_t gOGSInlineMasterTransitions = 0;
+static volatile uint32_t gOGSInlineMasterChangeCode = 0;
+static volatile int32_t gOGSInlineMasterFrom = 0;
+static volatile int32_t gOGSInlineMasterTo = 0;
 // Diagnostic-only bounded timeline of incoming codes (no packet payloads).
 #define OGS_NET_TRAIL_CAPACITY 16
 static uint8_t gOGSNetTrailCodes[OGS_NET_TRAIL_CAPACITY] = {0};
@@ -1064,9 +1072,31 @@ static double gOGSNetTrailTimes[OGS_NET_TRAIL_CAPACITY] = {0};
 static uint64_t gOGSNetTrailWrites = 0;
 static char gOGSLastTransitionEventTrail[192] = {0}; // guarded by gStateLock
 
+// Stage 6: non-invasive pre/post callback snapshot. Pure Mach VM reads:
+// no Photon methods, memory writes, or actor/room enumeration.
+static int32_t OGSReadMasterForEventObservation(void) {
+    uintptr_t typeSlot = OGSResolveRVA(RVA_PHOTON_NET_TYPEINFO);
+    void *typeInfo = NULL, *fields = NULL, *netPeer = NULL;
+    uintptr_t room = 0;
+    int32_t actor = 0;
+    if (!typeSlot ||
+        !OGSReadPointer(typeSlot, &typeInfo) ||
+        !OGSReadPointer((uintptr_t)typeInfo + 0xB8, &fields) ||
+        !OGSReadPointer((uintptr_t)fields + 0x10, &netPeer) ||
+        !OGSReadMemory((uintptr_t)netPeer + 0x158, &room, sizeof(room)) ||
+        room < 0x100000000ULL ||
+        !OGSReadMemory(room + 0x48, &actor, sizeof(actor)) ||
+        actor <= 0 || actor >= 1000000) {
+        return 0;
+    }
+    return actor;
+}
+
 static void hook_OnEvent(void *self, void *eventData, void *method) {
     __atomic_fetch_add(&gOGSNetworkEvents, 1ULL, __ATOMIC_RELAXED);
     double now = CFAbsoluteTimeGetCurrent();
+    uint32_t observedEventCode = 0; // zero = unknown / unreadable
+    // No original Unity/Photon calls from the UIKit timer.
 
     // حماية مطلقة 100%: حظر حزمة الطرد (203 CloseConnection) فوراً ودائماً تحت أي ظرف
     if (eventData && (uintptr_t)eventData >= 0x100000000ULL) {
@@ -1075,6 +1105,7 @@ static void hook_OnEvent(void *self, void *eventData, void *method) {
             // Diagnostics only: never mutate packets or call Unity from here.
             __atomic_fetch_add(&gOGSEventCodes[eventCode], 1u, __ATOMIC_RELAXED);
             __atomic_store_n(&gOGSLastEventCode, (uint32_t)eventCode, __ATOMIC_RELEASE);
+            observedEventCode = (uint32_t)eventCode;
             os_unfair_lock_lock(&gStateLock);
             size_t ringSlot = (size_t)(gOGSNetTrailWrites % OGS_NET_TRAIL_CAPACITY);
             gOGSNetTrailCodes[ringSlot] = eventCode;
@@ -1098,11 +1129,26 @@ static void hook_OnEvent(void *self, void *eventData, void *method) {
         }
     }
 
+    // Compare room MasterClient only across original dispatch execution.
+    // This never tries to restore master or suppress the event.
+    int32_t masterBefore = OGSReadMasterForEventObservation();
     __atomic_fetch_add(&gOGS.insideNetworkEvent, 1, __ATOMIC_ACQ_REL);
     if (orig_OnEvent) {
         orig_OnEvent(self, eventData, method);
     }
     __atomic_fetch_sub(&gOGS.insideNetworkEvent, 1, __ATOMIC_ACQ_REL);
+    int32_t masterAfter = OGSReadMasterForEventObservation();
+    if (masterBefore > 0 && masterAfter > 0) {
+        __atomic_fetch_add(&gOGSInlineMasterObservations, 1u, __ATOMIC_RELAXED);
+        if (masterBefore != masterAfter) {
+            __atomic_store_n(&gOGSInlineMasterFrom, masterBefore, __ATOMIC_RELEASE);
+            __atomic_store_n(&gOGSInlineMasterTo, masterAfter, __ATOMIC_RELEASE);
+            __atomic_store_n(&gOGSInlineMasterChangeCode, observedEventCode, __ATOMIC_RELEASE);
+            __atomic_fetch_add(&gOGSInlineMasterTransitions, 1u, __ATOMIC_RELAXED);
+        }
+    } else {
+        __atomic_fetch_add(&gOGSInlineMasterReadFailures, 1u, __ATOMIC_RELAXED);
+    }
 }
 
 static bool hook_LeaveRoom(int32_t becomeInactive, void *method) {
@@ -1908,6 +1954,16 @@ static void OGSInstallHooks(void) {
         __atomic_load_n(&gOGSEventCodes[255], __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSLastEventCode, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSEventCodeReadFailures, __ATOMIC_RELAXED)];
+    details = [details stringByAppendingFormat:
+        @"\nEvent callback master observations: %u | incomplete: %u"
+         "\nMaster changed during callback: %u | code: %u | %d -> %d"
+         "\nCallback correlation is not proof of server-side authorization.",
+        __atomic_load_n(&gOGSInlineMasterObservations, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSInlineMasterReadFailures, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSInlineMasterTransitions, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSInlineMasterChangeCode, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSInlineMasterFrom, __ATOMIC_ACQUIRE),
+        __atomic_load_n(&gOGSInlineMasterTo, __ATOMIC_ACQUIRE)];
     char eventTrailCopy[sizeof(gOGSLastTransitionEventTrail)] = {0};
     os_unfair_lock_lock(&gStateLock);
     memcpy(eventTrailCopy, gOGSLastTransitionEventTrail, sizeof(eventTrailCopy));
