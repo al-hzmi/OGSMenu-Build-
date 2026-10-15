@@ -216,7 +216,7 @@ static OGSRuntimeState gOGS = {
     1.0f,  // gameSpeed
     false, // speedDirty
     0,     // readFailures
-    1,     // autoHostOn
+    0,     // autoHostOn (legacy Unity tick path unused)
     0,     // aimbotOn
     0,     // godModeOn
     0,     // magicBulletOn
@@ -676,6 +676,46 @@ static volatile uint32_t gOGSManualRecoveryAttempts = 0;
 static volatile uint32_t gOGSManualRecoveryAccepted = 0;
 static volatile uint32_t gOGSManualRecoveryFailed = 0;
 static volatile uint32_t gOGSManualRecoverySkipped = 0;
+// Room-scoped automatic recovery; disabled until the room owner opts in.
+static volatile uint32_t gOGSAutoEnabled = 0;
+static uintptr_t gOGSAutoRoom = 0;             // gStateLock
+static int32_t gOGSAutoOwner = 0;               // gStateLock
+static double gOGSAutoLastRequestAt = 0.;      // gStateLock
+static volatile uint32_t gOGSAutoAttempts = 0;
+static volatile uint32_t gOGSAutoAccepted = 0;
+static volatile uint32_t gOGSAutoFailed = 0;
+static volatile uint32_t gOGSAutoCooldown = 0;
+static volatile uint32_t gOGSAutoGuarded = 0;
+static volatile uint32_t gOGSAutoDisarmed = 0;
+
+// Verified room + local actor + master are read using Mach VM only.
+static bool OGSReadAutoRoom(uintptr_t *roomOut, int32_t *localOut, int32_t *masterOut) {
+    void *peer = OGSGetNetworkingPeerSafe();
+    uintptr_t room = 0, localPtr = 0;
+    int32_t localID = 0, masterID = 0;
+    if (!peer ||
+        !OGSReadMemory((uintptr_t)peer + 0x158, &room, sizeof(room)) ||
+        !OGSReadMemory((uintptr_t)peer + 0x160, &localPtr, sizeof(localPtr)) ||
+        room < 0x100000000ULL || localPtr < 0x100000000ULL ||
+        !OGSReadMemory(localPtr + 0x10, &localID, sizeof(localID)) ||
+        !OGSReadMemory(room + 0x48, &masterID, sizeof(masterID)) ||
+        localID < 1 || localID >= 1000000 ||
+        masterID < 1 || masterID >= 1000000) return false;
+    if (roomOut) *roomOut = room;
+    if (localOut) *localOut = localID;
+    if (masterOut) *masterOut = masterID;
+    return true;
+}
+
+static void OGSDisarmAutoRoom(void) {
+    os_unfair_lock_lock(&gStateLock);
+    if (__atomic_exchange_n(&gOGSAutoEnabled, 0u, __ATOMIC_ACQ_REL))
+        __atomic_fetch_add(&gOGSAutoDisarmed, 1u, __ATOMIC_RELAXED);
+    gOGSAutoRoom = 0;
+    gOGSAutoOwner = 0;
+    gOGSAutoLastRequestAt = 0.;
+    os_unfair_lock_unlock(&gStateLock);
+}
 
 static bool OGSRequestLocalMasterOnceOnEvent(void) {
     void *netPeer = OGSGetNetworkingPeerSafe();
