@@ -721,6 +721,7 @@ static int32_t gOGSAutoWindowActor = 0;            // gStateLock
 static double gOGSAutoWindowStartedAt = 0.;       // gStateLock
 static bool gOGSAutoWindowPauseCounted = false;   // gStateLock
 static bool gOGSAutoAttemptedPending = false;     // gStateLock
+static bool gOGSAutoSawOwnedMaster = false;        // gStateLock
 static const uint32_t kOGSAutoWindowAttemptLimit = 6;
 static const double kOGSAutoWindowSeconds = 60.0;
 static const double kOGSAutoCooldownSeconds = 0.65; // first counter after a confirmed loss can be immediate
@@ -759,6 +760,7 @@ static void OGSDisarmAutoRoom(void) {
     if (__atomic_exchange_n(&gOGSAutoPendingLoss, 0u, __ATOMIC_ACQ_REL))
         __atomic_fetch_add(&gOGSAutoDeferredCancelled, 1u, __ATOMIC_RELAXED);
     gOGSAutoAttemptedPending = false;
+    gOGSAutoSawOwnedMaster = false;
     os_unfair_lock_unlock(&gStateLock);
 }
 
@@ -780,6 +782,7 @@ static void OGSArmAutoRoomBounded(uintptr_t room, int32_t actor, int32_t master)
     gOGSAutoRoom = room;
     gOGSAutoOwner = actor;
     gOGSAutoAttemptedPending = false;
+    gOGSAutoSawOwnedMaster = (master == actor);
     __atomic_store_n(&gOGSAutoPendingLoss, master != actor ? 1u : 0u,
                      __ATOMIC_RELEASE);
     __atomic_store_n(&gOGSAutoEnabled, 1u, __ATOMIC_RELEASE);
@@ -1546,7 +1549,11 @@ static void hook_OnEvent(void *self, void *eventData, void *method) {
                     bool lostThisEvent = masterBefore == localID &&
                         masterAfter == liveMaster && masterAfter != localID &&
                         masterBefore != masterAfter && observedEventCode == 253;
-                    if (lostThisEvent &&
+                    // Stage 17: do not miss host loss if the exact 253
+                    // transition fell outside our hooked callback. A later
+                    // validated room-state read can still detect the loss.
+                    bool lostSinceOwned = gOGSAutoSawOwnedMaster && liveMaster != localID;
+                    if ((lostThisEvent || lostSinceOwned) &&
                         !__atomic_load_n(&gOGSAutoPendingLoss, __ATOMIC_RELAXED)) {
                         __atomic_store_n(&gOGSAutoPendingLoss, 1u, __ATOMIC_RELEASE);
                         gOGSAutoAttemptedPending = false;
@@ -1557,6 +1564,7 @@ static void hook_OnEvent(void *self, void *eventData, void *method) {
                         }
                     }
                     if (liveMaster == localID) {
+                        gOGSAutoSawOwnedMaster = true;
                         if (__atomic_exchange_n(&gOGSAutoPendingLoss, 0u, __ATOMIC_ACQ_REL))
                             __atomic_fetch_add(&gOGSAutoDeferredCancelled, 1u, __ATOMIC_RELAXED);
                         gOGSAutoAttemptedPending = false;
@@ -1565,7 +1573,11 @@ static void hook_OnEvent(void *self, void *eventData, void *method) {
                         // this same Photon callback; only the shared bounded
                         // limiter decides when another request is permitted.
                         // The pending loss stays queued during token refill.
-                        if (OGSReserveMasterRequestLocked(liveRoom, localID, currentTime)) {
+                        // An explicit manual request takes precedence on
+                        // this callback, using the SAME bounded quota.
+                        // Do not consume its slot and discard the tap.
+                        if (!__atomic_load_n(&gOGSManualRecoveryPending, __ATOMIC_ACQUIRE) &&
+                            OGSReserveMasterRequestLocked(liveRoom, localID, currentTime)) {
                             ready = true;
                             if (gOGSAutoAttemptedPending)
                                 __atomic_fetch_add(&gOGSAutoRetriesWhileLost, 1u,
@@ -1594,14 +1606,14 @@ static void hook_OnEvent(void *self, void *eventData, void *method) {
     }
 
     // Execute queued room actions after the original Photon callback.
-    // When combining kick+close, issue the kick before closing admission.
     OGSProcessManualKickOnEvent();
     OGSProcessRoomPrivacyOnEvent();
     if (__atomic_load_n(&gOGS.speedDirty, __ATOMIC_ACQUIRE))
         OGSProcessSpeed();
 
-    // One manual request uses the same bounded quota as auto. An auto
-    // attempt in this callback takes precedence; no double submission.
+    // One manual request uses the same bounded quota as auto.
+    // A user tap takes precedence over auto in this callback, but cannot
+    // override any cooldown, room validity check or request budget.
     if (__atomic_exchange_n(&gOGSManualRecoveryPending, 0u, __ATOMIC_ACQ_REL)) {
         if (autoSent || masterAfter <= 0) {
             __atomic_fetch_add(&gOGSManualRecoverySkipped, 1u, __ATOMIC_RELAXED);
