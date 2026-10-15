@@ -1736,10 +1736,13 @@ static void OGSInstallHooks(void) {
         NSString *hj = [NSString stringWithUTF8String:hjBuf];
         self.statusLabel.text = [NSString stringWithFormat:@"آخر سارق: %@ | صد طرد: %u 🛡️", hj ?: @"", blocked];
     } else {
-        self.statusLabel.text = [NSString stringWithFormat:@"%@ | بالروم: %u | صد طرد: %u 🛡️",
-                                 snapshot.inRoom ? (snapshot.isMaster ? @"الهوست الفعلي: أنت 👑" : @"متصل (بانتظار الهوست)") : @"غير متصل",
-                                 count,
-                                 blocked];
+        int32_t presence = __atomic_load_n(&gOGSPresenceReadOnly, __ATOMIC_ACQUIRE);
+        NSString *roomLine = hookActive ?
+            (snapshot.inRoom ? (snapshot.isMaster ? @"هوست: أنت 👑" : @"داخل الروم | الهوست لغيرك") : @"خارج الروم") :
+            (presence == 1 ? @"الغرفة مرصودة محلياً | الهوست غير مؤكد" :
+             presence == 2 ? @"لا توجد غرفة في الذاكرة المحلية" : @"حالة الروم غير مؤكدة");
+        self.statusLabel.text = [NSString stringWithFormat:@"%@ | صد طرد: %u 🛡️",
+                                 roomLine, blocked];
     }
     [self.unbanButton setTitle:[NSString stringWithFormat:@"فك الحظر (%lu)", (unsigned long)[self bannedCountSafe]] forState:UIControlStateNormal];
 }
