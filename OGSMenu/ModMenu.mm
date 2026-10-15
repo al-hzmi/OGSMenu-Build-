@@ -678,6 +678,14 @@ static volatile uint32_t gOGSManualRecoveryFailed = 0;
 static volatile uint32_t gOGSManualRecoverySkipped = 0;
 // Stage 11: defensive accounting only. A locally filtered event is not
 // proof that Photon server-side disconnects or hostile clients were stopped.
+// User-initiated, one-shot peer management request, scoped to current room.
+static volatile uint32_t gOGSManualKickPending = 0;
+static int32_t gOGSManualKickActor = 0; // gStateLock
+static uintptr_t gOGSManualKickRoom = 0; // gStateLock
+static double gOGSManualKickQueuedAt = 0.; // gStateLock
+static volatile uint32_t gOGSManualKickSubmitted = 0;
+static volatile uint32_t gOGSManualKickRejected = 0;
+static volatile uint32_t gOGSManualKickExpired = 0;
 static volatile uint32_t gOGSFilteredEvent203 = 0;
 static volatile uint32_t gOGSEvent203NearRecovery = 0;
 static volatile uint32_t gOGSLastEvent203ProximityMs = 0;
@@ -849,16 +857,28 @@ static void OGSApplyTimescaleNow(float speed) {
 static void OGSRequestSpeed(float speed) {
     if (!isfinite(speed)) return;
     speed = fmaxf(0.1f, fminf(speed, 20.0f));
+    os_unfair_lock_lock(&gStateLock);
     gOGS.gameSpeed = speed;
+    os_unfair_lock_unlock(&gStateLock);
     __atomic_store_n(&gOGS.speedDirty, true, __ATOMIC_RELEASE);
 }
-
+static volatile uint32_t gOGSSpeedApplied = 0;
+static volatile uint32_t gOGSSpeedDeferred = 0;
 static void OGSProcessSpeed(void) {
-    bool dirty = __atomic_exchange_n(&gOGS.speedDirty, false, __ATOMIC_ACQ_REL);
-    float speed = gOGS.gameSpeed;
-    if (dirty || fabsf(speed - 1.0f) > 0.01f) {
-        OGSApplyTimescaleNow(speed);
+    // Only when a new speed value is requested; no every-frame updates.
+    if (!__atomic_exchange_n(&gOGS.speedDirty, false, __ATOMIC_ACQ_REL)) return;
+    float speed = 1.0f;
+    os_unfair_lock_lock(&gStateLock);
+    speed = gOGS.gameSpeed;
+    os_unfair_lock_unlock(&gStateLock);
+    uintptr_t setter = OGSResolveRVA(gOffsets.rvaSetTimescale);
+    if (!setter || !OGSIsExecutableGameAddress(setter)) {
+        __atomic_store_n(&gOGS.speedDirty, true, __ATOMIC_RELEASE);
+        __atomic_fetch_add(&gOGSSpeedDeferred, 1u, __ATOMIC_RELAXED);
+        return;
     }
+    ((SetTime1Fn)setter)(speed, NULL);
+    __atomic_fetch_add(&gOGSSpeedApplied, 1u, __ATOMIC_RELAXED);
 }
 
 // ============================================================
@@ -1230,6 +1250,62 @@ static int32_t OGSReadMasterForEventObservation(void) {
     return actor;
 }
 
+
+/* Stage 13: one manual request, consumed on Photon callback.
+ * Never reuse managed player pointers previously observed by UIKit. */
+static void OGSProcessManualKickOnEvent(void) {
+    if (!__atomic_load_n(&gOGSManualKickPending, __ATOMIC_ACQUIRE)) return;
+    uintptr_t wantedRoom = 0;
+    int32_t wantedActor = 0;
+    double queuedAt = 0.;
+    os_unfair_lock_lock(&gStateLock);
+    if (__atomic_exchange_n(&gOGSManualKickPending, 0u, __ATOMIC_ACQ_REL)) {
+        wantedRoom = gOGSManualKickRoom;
+        wantedActor = gOGSManualKickActor;
+        queuedAt = gOGSManualKickQueuedAt;
+    }
+    os_unfair_lock_unlock(&gStateLock);
+    if (wantedRoom == 0 || wantedActor <= 0) return;
+    if (CFAbsoluteTimeGetCurrent() - queuedAt > 12.) {
+        __atomic_fetch_add(&gOGSManualKickExpired, 1u, __ATOMIC_RELAXED);
+        return;
+    }
+    void *netPeer = OGSGetNetworkingPeerSafe();
+    uintptr_t room = 0, others = 0, local = 0;
+    int32_t me = 0, master = 0;
+    if (!netPeer ||
+        !OGSReadMemory((uintptr_t)netPeer + 0x158, &room, sizeof(room)) ||
+        !OGSReadMemory((uintptr_t)netPeer + 0x160, &local, sizeof(local)) ||
+        !OGSReadMemory((uintptr_t)netPeer + 0x1B0, &others, sizeof(others)) ||
+        room != wantedRoom || others < 0x100000000ULL ||
+        local < 0x100000000ULL ||
+        !OGSReadMemory(local + 0x10, &me, sizeof(me)) ||
+        !OGSReadMemory(room + 0x48, &master, sizeof(master)) ||
+        master != me || me <= 0 || wantedActor == me) {
+        __atomic_fetch_add(&gOGSManualKickRejected, 1u, __ATOMIC_RELAXED);
+        return;
+    }
+    uintptr_t count = 0;
+    if (!OGSReadMemory(others + 0x18, &count, sizeof(count)) ||
+        count > OGS_MAX_PEERS) {
+        __atomic_fetch_add(&gOGSManualKickRejected, 1u, __ATOMIC_RELAXED);
+        return;
+    }
+    for (uintptr_t i = 0; i < count; ++i) {
+        void *player = NULL;
+        int32_t id = 0;
+        if (!OGSReadPointer(others + 0x20 + i * sizeof(void *), &player) ||
+            !OGSReadMemory((uintptr_t)player + 0x10, &id, sizeof(id)) ||
+            id != wantedActor) continue;
+        if (OGSKickPeerReal(player, false))
+            __atomic_fetch_add(&gOGSManualKickSubmitted, 1u, __ATOMIC_RELAXED);
+        else
+            __atomic_fetch_add(&gOGSManualKickRejected, 1u, __ATOMIC_RELAXED);
+        return;
+    }
+    __atomic_fetch_add(&gOGSManualKickRejected, 1u, __ATOMIC_RELAXED);
+}
+
 static void hook_OnEvent(void *self, void *eventData, void *method) {
     __atomic_fetch_add(&gOGSNetworkEvents, 1ULL, __ATOMIC_RELAXED);
     double now = CFAbsoluteTimeGetCurrent();
@@ -1384,6 +1460,11 @@ static void hook_OnEvent(void *self, void *eventData, void *method) {
             __atomic_fetch_add(&gOGSAutoGuarded, 1u, __ATOMIC_RELAXED);
         }
     }
+
+    // Process explicit user actions only after the game's Photon handler.
+    OGSProcessManualKickOnEvent();
+    if (__atomic_load_n(&gOGS.speedDirty, __ATOMIC_ACQUIRE))
+        OGSProcessSpeed();
 
     // Manual request remains available and uses the same known working API.
     // If auto already attempted this event, consume but do not send twice.
@@ -1692,7 +1773,8 @@ static void OGSRefreshReadOnlyRoster(void) {
     uintptr_t roomAfter = 0;
     if (!OGSReadMemory((uintptr_t)netPeer + 0x158, &roomAfter, sizeof(roomAfter)) ||
         roomAfter != room) {
-        OGSPublishSnapshotValue(&(OGSRoomSnapshot){});
+        OGSRoomSnapshot emptyRoster = {};
+        OGSPublishSnapshotValue(&emptyRoster);
         __atomic_fetch_add(&gOGSRosterReadFail, 1u, __ATOMIC_RELAXED);
         return;
     }
@@ -1954,7 +2036,7 @@ static void OGSInstallHooks(void) {
         self.menuPanel.hidden = YES;
 
         self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 5, 260, 18)];
-        self.titleLabel.text = @"OGS v14.5: هجوم ودفاع خارق 💥🛡️";
+        self.titleLabel.text = @"OGS Stage 13 | إدارة الروم";
         self.titleLabel.textColor = [UIColor whiteColor];
         self.titleLabel.textAlignment = NSTextAlignmentCenter;
         self.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
@@ -2361,6 +2443,16 @@ static void OGSInstallHooks(void) {
         (unsigned long long)__atomic_load_n(&gOGSNetworkEvents, __ATOMIC_RELAXED),
         (unsigned long long)__atomic_load_n(&gOGSMasterSwitchEvents, __ATOMIC_RELAXED)];
     details = [details stringByAppendingFormat:
+        @"\nManual kick: pending=%u | local API accepted=%u | rejected=%u | expired=%u"
+         "\nSpeed setter: applied=%u | pending=%u | deferred=%u",
+        __atomic_load_n(&gOGSManualKickPending, __ATOMIC_ACQUIRE),
+        __atomic_load_n(&gOGSManualKickSubmitted, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSManualKickRejected, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSManualKickExpired, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSSpeedApplied, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGS.speedDirty, __ATOMIC_ACQUIRE),
+        __atomic_load_n(&gOGSSpeedDeferred, __ATOMIC_RELAXED)];
+    details = [details stringByAppendingFormat:
         @"\nRead-only roster: active=%u | list=%u | failures=%u | names tracked=%lu",
         __atomic_load_n(&gOGSRosterReadOK, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSRosterLastCount, __ATOMIC_ACQUIRE),
@@ -2686,6 +2778,12 @@ static void OGSInstallHooks(void) {
 }
 
 - (void)triggerImmediateKick:(OGSPeerSnapshot)peer {
+    if (gOGSRosterLastRoom == 0 ||
+        __atomic_load_n(&gOGSPresenceActorID, __ATOMIC_ACQUIRE) !=
+        __atomic_load_n(&gOGSLocalMasterActorID, __ATOMIC_ACQUIRE)) {
+        self.statusLabel.text = @"لا يمكن طلب الطرد قبل التحقق أنك الهوست وأن القائمة حديثة";
+        return;
+    }
     NSString *pName = [NSString stringWithUTF8String:peer.name];
     NSString *normName = OGSNormalizeKey(pName);
     const char *utf8 = normName.UTF8String;
@@ -2698,10 +2796,11 @@ static void OGSInstallHooks(void) {
     if (utf8) {
         snprintf(gOGS.kickTargetName, sizeof(gOGS.kickTargetName), "%s", utf8);
     }
-    gOGS.kickRetries = 8;
+    gOGSManualKickRoom = gOGSRosterLastRoom;
+    gOGSManualKickActor = peer.actorID;
+    gOGSManualKickQueuedAt = CFAbsoluteTimeGetCurrent();
     os_unfair_lock_unlock(&gStateLock);
-
-    __atomic_store_n(&gOGS.forceHostReq, 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&gOGSManualKickPending, 1u, __ATOMIC_RELEASE);
 }
 
 - (void)kickSelected:(UIButton *)s {
@@ -2714,7 +2813,7 @@ static void OGSInstallHooks(void) {
     NSString *pName = [NSString stringWithUTF8String:peer.name];
     [self triggerImmediateKick:peer];
     self.statusLabel.text = [NSString stringWithFormat:
-        @"تم تسجيل طلب طرد %@ محليًا؛ التنفيذ يحتاج تحديث Unity وتأكيد Photon",
+        @"طرد %@: طلب يدوي واحد ينتظر حدث Photon؛ راقب التشخيص",
         pName ?: @"اللاعب"];
 }
 
@@ -2732,7 +2831,7 @@ static void OGSInstallHooks(void) {
     [self triggerImmediateKick:peer];
     [self refreshUI];
     self.statusLabel.text = [NSString stringWithFormat:
-        @"تم حفظ حظر %@ محليًا؛ تنفيذ الطرد غير مؤكد ويحتاج تحديث Unity",
+        @"حفظ اسم %@ محليًا؛ طلب الطرد اليدوي لا يثبت خروجه",
         pName ?: @"اللاعب"];
 }
 
@@ -2788,9 +2887,7 @@ static void OGSInstallHooks(void) {
 
 - (void)applySpeed:(float)value {
     OGSRequestSpeed(value);
-    if (OGSFindGameImage()) {
-        OGSProcessSpeed();
-    }
+    // Defer managed setter; UIKit only stores the request.
     float actual = gOGS.gameSpeed;
     [self.speedSetButton setTitle:[NSString stringWithFormat:@"السرعة: %.1fx (اضغط للكتابة)", actual]
                          forState:UIControlStateNormal];
