@@ -1057,6 +1057,12 @@ static volatile int32_t gOGSHostMonitorOn = 1;
 static volatile uint32_t gOGSEventCodes[256] = {0};
 static volatile uint32_t gOGSEventCodeReadFailures = 0;
 static volatile uint32_t gOGSLastEventCode = 0;
+// Diagnostic-only bounded timeline of incoming codes (no packet payloads).
+#define OGS_NET_TRAIL_CAPACITY 16
+static uint8_t gOGSNetTrailCodes[OGS_NET_TRAIL_CAPACITY] = {0};
+static double gOGSNetTrailTimes[OGS_NET_TRAIL_CAPACITY] = {0};
+static uint64_t gOGSNetTrailWrites = 0;
+static char gOGSLastTransitionEventTrail[192] = {0}; // guarded by gStateLock
 
 static void hook_OnEvent(void *self, void *eventData, void *method) {
     __atomic_fetch_add(&gOGSNetworkEvents, 1ULL, __ATOMIC_RELAXED);
@@ -1069,6 +1075,12 @@ static void hook_OnEvent(void *self, void *eventData, void *method) {
             // Diagnostics only: never mutate packets or call Unity from here.
             __atomic_fetch_add(&gOGSEventCodes[eventCode], 1u, __ATOMIC_RELAXED);
             __atomic_store_n(&gOGSLastEventCode, (uint32_t)eventCode, __ATOMIC_RELEASE);
+            os_unfair_lock_lock(&gStateLock);
+            size_t ringSlot = (size_t)(gOGSNetTrailWrites % OGS_NET_TRAIL_CAPACITY);
+            gOGSNetTrailCodes[ringSlot] = eventCode;
+            gOGSNetTrailTimes[ringSlot] = now;
+            ++gOGSNetTrailWrites;
+            os_unfair_lock_unlock(&gStateLock);
             if (eventCode == 203) {
                 os_unfair_lock_lock(&gStateLock);
                 gOGS.lastThreatTime = now;
@@ -1360,6 +1372,23 @@ static void OGSRefreshReadOnlyPresence(void) {
             if (previous > 0 && previous != observedMaster) {
                 __atomic_store_n(&gOGSLastMasterFromActor, previous, __ATOMIC_RELEASE);
                 __atomic_store_n(&gOGSLastMasterToActor, observedMaster, __ATOMIC_RELEASE);
+                // Events preceding detection are correlation clues, not
+                // proof of which client or packet caused the transfer.
+                double observedAt = CFAbsoluteTimeGetCurrent();
+                os_unfair_lock_lock(&gStateLock);
+                gOGSLastTransitionEventTrail[0] = '\0';
+                for (uint64_t i = 0; i < 6 && i < gOGSNetTrailWrites; ++i) {
+                    size_t slotIndex = (size_t)((gOGSNetTrailWrites - 1 - i) % OGS_NET_TRAIL_CAPACITY);
+                    double millis = (observedAt - gOGSNetTrailTimes[slotIndex]) * 1000.0;
+                    if (millis < 0.0 || millis > 5000.0) continue;
+                    size_t used = strlen(gOGSLastTransitionEventTrail);
+                    if (used + 24 >= sizeof(gOGSLastTransitionEventTrail)) break;
+                    snprintf(gOGSLastTransitionEventTrail + used,
+                             sizeof(gOGSLastTransitionEventTrail) - used,
+                             "%s%u@%.0fms", used ? ", " : "",
+                             (unsigned)gOGSNetTrailCodes[slotIndex], millis);
+                }
+                os_unfair_lock_unlock(&gStateLock);
                 __atomic_fetch_add(&gOGSLocalMasterChanges, 1u, __ATOMIC_RELAXED);
             }
             __atomic_fetch_add(&gOGSLocalMasterSamples, 1u, __ATOMIC_RELAXED);
@@ -1879,6 +1908,16 @@ static void OGSInstallHooks(void) {
         __atomic_load_n(&gOGSEventCodes[255], __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSLastEventCode, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSEventCodeReadFailures, __ATOMIC_RELAXED)];
+    char eventTrailCopy[sizeof(gOGSLastTransitionEventTrail)] = {0};
+    os_unfair_lock_lock(&gStateLock);
+    memcpy(eventTrailCopy, gOGSLastTransitionEventTrail, sizeof(eventTrailCopy));
+    os_unfair_lock_unlock(&gStateLock);
+    details = [details stringByAppendingFormat:
+        @"\nNetwork event 201 count: %u"
+         "\nEvents before observed master transfer (newest first): %s"
+         "\nTiming indicates proximity only, not causation.",
+        __atomic_load_n(&gOGSEventCodes[201], __ATOMIC_RELAXED),
+        eventTrailCopy[0] ? eventTrailCopy : "none within 5s"];
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"تشخيص تحديث OGS"
                              message:details preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"نسخ" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
