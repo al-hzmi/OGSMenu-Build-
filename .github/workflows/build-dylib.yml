@@ -13,7 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Record run ID for artifact retrieval
-        if: github.run_attempt == 1
+        if: github.run_attempt == 1 && github.ref == 'refs/heads/main'
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
