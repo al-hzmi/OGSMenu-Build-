@@ -1094,7 +1094,8 @@ static void OGSProcessClosedGuardOnPhotonCallback(void) {
     os_unfair_lock_lock(&gStateLock);
     if (__atomic_load_n(&gOGSClosedGuardEnabled, __ATOMIC_ACQUIRE) &&
         gOGSClosedGuardRoom == liveRoom &&
-        gOGSClosedGuardActor == liveActor) {
+        gOGSClosedGuardActor == liveActor &&
+        !__atomic_load_n(&gOGSPrivacyPending, __ATOMIC_ACQUIRE)) {
         if (gOGSClosedGuardWindowStart <= 0. ||
             now - gOGSClosedGuardWindowStart >= 60.0) {
             gOGSClosedGuardWindowStart = now;
@@ -3078,7 +3079,7 @@ static void OGSInstallHooks(void) {
             @"حراسة الدخول: مفعلة" : @"حراسة الدخول: انتظار") :
             (closedActive ? @"خاص ومغلق: يدوي" : @"حراسة الدخول: إيقاف");
         [self.privacyClosedButton setTitle:guardTitle forState:UIControlStateNormal];
-        self.privacyClosedButton.backgroundColor = guardArmed || closedActive ? privacyGreen : privacyGray;
+        self.privacyClosedButton.backgroundColor = closedActive ? privacyGreen : privacyGray;
     }
     NSString *autoTitle = autoArmed ? @"استعادة تلقائية: مفعلة 👑" : @"استعادة تلقائية: إيقاف";
     if (self.hostLockButton && ![self.hostLockButton.currentTitle isEqualToString:autoTitle]) {
