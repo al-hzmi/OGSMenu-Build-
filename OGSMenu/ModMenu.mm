@@ -156,6 +156,7 @@ static Update0Fn        orig_ChatUpdate      = NULL;
 static SendChatRemoteFn orig_SendChatRemote  = NULL;
 static OnDisconnectFn   orig_OnDisconnect    = NULL;
 static OnEventFn        orig_OnEvent         = NULL;
+static OnEventFn        orig_OnOperationResponse = NULL;
 static Update0Fn        orig_PhotonHandlerUpdate = NULL;
 static LeaveRoomFn      orig_LeaveRoom       = NULL;
 static Type4995LeaveFn  orig_Type4995Leave   = NULL;
@@ -174,6 +175,7 @@ static DamageRemoteFn orig_DamageRemote = NULL;
 static os_unfair_lock gBanSetLock   = OS_UNFAIR_LOCK_INIT;
 static os_unfair_lock gStateLock    = OS_UNFAIR_LOCK_INIT;
 static os_unfair_lock gSnapshotLock = OS_UNFAIR_LOCK_INIT;
+static os_unfair_lock gHookInstallLock = OS_UNFAIR_LOCK_INIT; // serialize installer only
 
 typedef struct {
     volatile bool     inRoom;
@@ -932,6 +934,21 @@ static double gOGSRecoveryLastUpdateProbeAt = 0.; // gStateLock
 static volatile uint32_t gOGSRecoveryUpdateProbes = 0;
 static volatile uint32_t gOGSRecoveryEventProbes = 0;
 static const uintptr_t kOGSPhotonHandlerUpdateSlot = 0x023905F0;
+// Verified MD31284 / MI28551: NetworkingPeer.OnOperationResponse(OperationResponse).
+// 0x02358400 + MI*8 = 0x02390038 in fps 3.4.0 ARM64 metadata table.
+static const uintptr_t kOGSOnOperationResponseSlot = 0x02390038;
+static const uintptr_t kOGSOnOperationResponseEntry = 0x013B0F3C;
+static volatile uint32_t gOGSResponseHookStatus = 0; // 0 pending, 1 installed, 2 slot mismatch, 3 unavailable
+static volatile uint64_t gOGSResponseEntryCalls = 0;
+static volatile uint64_t gOGSResponseExitCalls = 0;
+static volatile uint64_t gOGSSetProps252Replies = 0;
+static volatile uint64_t gOGSSetProps252ZeroReturn = 0;
+static volatile uint64_t gOGSSetProps252NonzeroReturn = 0;
+static volatile uint32_t gOGSSetProps252ParseErrors = 0;
+static volatile int32_t gOGSSetProps252LastReturnCode = 2147483647;
+static volatile uint32_t gOGSOnEventInstallFailures = 0;
+static volatile uint32_t gOGSPhotonUpdateInstallFailures = 0;
+static volatile uint64_t gOGSPhotonHandlerUpdateExitCalls = 0;
 // Verified against fps 3.4.0 IL2CPP metadata: PhotonHandler.Update method
 // index 28734 maps to the ARM64 entry at RVA 0x013C8400 via this slot.
 
@@ -1673,9 +1690,12 @@ static void OGSProcessRecoveryOnPhotonCallback(uint32_t observedEventCode,
 // Executed on the game's Unity/PUN Update thread, never from the UIKit
 // menu timer. Makes standalone room privacy possible with zero other players.
 static void hook_PhotonHandlerUpdate(void *self, void *method) {
+    // Count entry before the original to distinguish hook reachability
+    // from a non-returning/exceptional original managed call.
+    __atomic_fetch_add(&gOGSPhotonHandlerUpdateCalls, 1ULL, __ATOMIC_RELAXED);
     if (orig_PhotonHandlerUpdate)
         orig_PhotonHandlerUpdate(self, method);
-    __atomic_fetch_add(&gOGSPhotonHandlerUpdateCalls, 1ULL, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&gOGSPhotonHandlerUpdateExitCalls, 1ULL, __ATOMIC_RELAXED);
     // Both callbacks may run on the same frame. Pending actions are atomically
     // consumed only once; kick executes before optional room close.
     if (__atomic_load_n(&gOGSManualKickPending, __ATOMIC_ACQUIRE))
@@ -1701,6 +1721,33 @@ static void hook_PhotonHandlerUpdate(void *self, void *method) {
             OGSProcessRecoveryOnPhotonCallback(0u, 0, 0, true);
         }
     }
+}
+
+// Read-only response telemetry. OpCode 252 can represent MANY room-property
+// updates; it must NOT be attributed to a SetMasterClient request on its own.
+static void hook_OnOperationResponse(void *self, void *response, void *method) {
+    __atomic_fetch_add(&gOGSResponseEntryCalls, 1ULL, __ATOMIC_RELAXED);
+    if (response) {
+        uint8_t opCode = 0;
+        if (OGSReadMemory((uintptr_t)response + 0x10, &opCode, sizeof(opCode)) &&
+            opCode == 252) {
+            int16_t returnCode = 0;
+            __atomic_fetch_add(&gOGSSetProps252Replies, 1ULL, __ATOMIC_RELAXED);
+            if (OGSReadMemory((uintptr_t)response + 0x12, &returnCode, sizeof(returnCode))) {
+                __atomic_store_n(&gOGSSetProps252LastReturnCode, (int32_t)returnCode,
+                                 __ATOMIC_RELEASE);
+                if (returnCode == 0)
+                    __atomic_fetch_add(&gOGSSetProps252ZeroReturn, 1ULL, __ATOMIC_RELAXED);
+                else
+                    __atomic_fetch_add(&gOGSSetProps252NonzeroReturn, 1ULL, __ATOMIC_RELAXED);
+            } else {
+                __atomic_fetch_add(&gOGSSetProps252ParseErrors, 1u, __ATOMIC_RELAXED);
+            }
+        }
+    }
+    OnEventFn original = __atomic_load_n(&orig_OnOperationResponse, __ATOMIC_ACQUIRE);
+    if (original) original(self, response, method);
+    __atomic_fetch_add(&gOGSResponseExitCalls, 1ULL, __ATOMIC_RELAXED);
 }
 
 static void hook_OnEvent(void *self, void *eventData, void *method) {
@@ -1973,18 +2020,34 @@ static bool OGSIsWritableMappedSlot(uintptr_t address) {
 }
 
 static bool OGSInstallPointerSlotHook(uintptr_t rva, void *replacement, void **outOriginal) {
-    uintptr_t addr = OGSResolveRVA(rva);
-    if (!addr || !OGSIsWritableMappedSlot(addr)) return false;
-    void *prior = NULL;
-    if (!OGSReadPointer(addr, &prior)) return false;
-    if (prior == replacement) return true;
-    if (!OGSIsExecutableGameAddress((uintptr_t)prior)) return false;
-
-    uintptr_t expected = (uintptr_t)prior;
-    if (!__atomic_compare_exchange_n((uintptr_t *)addr, &expected, (uintptr_t)replacement,
-                                     false, __ATOMIC_RELEASE, __ATOMIC_RELAXED)) return false;
-    if (outOriginal) *outOriginal = prior;
-    return true;
+    // Synchronize re-entrant installer calls (UIKit retry and delayed setup).
+    // Crucially publish the original callback BEFORE the replacement pointer
+    // becomes callable by another thread.
+    os_unfair_lock_lock(&gHookInstallLock);
+    bool installed = false;
+    do {
+        uintptr_t addr = OGSResolveRVA(rva);
+        if (!addr || !replacement || !outOriginal || !OGSIsWritableMappedSlot(addr))
+            break;
+        void *prior = NULL;
+        if (!OGSReadPointer(addr, &prior)) break;
+        void *storedOriginal = __atomic_load_n(outOriginal, __ATOMIC_ACQUIRE);
+        if (prior == replacement) {
+            installed = storedOriginal != NULL &&
+                        OGSIsExecutableGameAddress((uintptr_t)storedOriginal);
+            break;
+        }
+        if (!OGSIsExecutableGameAddress((uintptr_t)prior)) break;
+        // Never overwrite a previously captured original with another hook
+        // or an unrelated target; fail safely instead.
+        if (storedOriginal && storedOriginal != prior) break;
+        __atomic_store_n(outOriginal, prior, __ATOMIC_RELEASE);
+        uintptr_t expected = (uintptr_t)prior;
+        installed = __atomic_compare_exchange_n((uintptr_t *)addr, &expected,
+            (uintptr_t)replacement, false, __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+    } while (false);
+    os_unfair_lock_unlock(&gHookInstallLock);
+    return installed;
 }
 
 // Stage 2: read-only Photon presence. No IL2CPP/Photon function calls
@@ -2199,12 +2262,35 @@ static void OGSRefreshReadOnlyPresence(void) {
 static void OGSInstallHooks(void) {
     if (!OGSFindGameImage()) return;
     OGSInstallPointerSlotHook(gOffsets.tblCashUpdate, (void *)&hook_CashUpdate, (void **)&orig_CashUpdate);
-    OGSInstallPointerSlotHook(gOffsets.tblChatUpdate, (void *)&hook_ChatUpdate, (void **)&orig_ChatUpdate);
-    OGSInstallPointerSlotHook(gOffsets.tblSendChatRemote, (void *)&hook_SendChatRemote, (void **)&orig_SendChatRemote);
+    // Stage 22: DO NOT hook the former "chat" slots! For this exact iOS
+    // executable they are NamePickGui..ctor() and NetworkCharacter..ctor(),
+    // NOT Chat.Update / SendChatRemote. No unverified replacement offset.
+    __atomic_store_n(&gOGS.chatMode, 0, __ATOMIC_RELEASE);
     OGSInstallPointerSlotHook(gOffsets.tblOnDisconnect, (void *)&hook_OnPhotonPlayerDisconnected, (void **)&orig_OnDisconnect);
-    OGSInstallPointerSlotHook(gOffsets.tblOnEvent, (void *)&hook_OnEvent, (void **)&orig_OnEvent);
-    OGSInstallPointerSlotHook(kOGSPhotonHandlerUpdateSlot, (void *)&hook_PhotonHandlerUpdate,
-                              (void **)&orig_PhotonHandlerUpdate);
+    if (!OGSInstallPointerSlotHook(gOffsets.tblOnEvent, (void *)&hook_OnEvent,
+                                    (void **)&orig_OnEvent))
+        __atomic_fetch_add(&gOGSOnEventInstallFailures, 1u, __ATOMIC_RELAXED);
+    if (!OGSInstallPointerSlotHook(kOGSPhotonHandlerUpdateSlot,
+                                    (void *)&hook_PhotonHandlerUpdate,
+                                    (void **)&orig_PhotonHandlerUpdate))
+        __atomic_fetch_add(&gOGSPhotonUpdateInstallFailures, 1u, __ATOMIC_RELAXED);
+
+    // Strictly identify the original method ENTRY before hooking its slot.
+    // A mismatch must leave the game's dispatch table untouched.
+    uintptr_t responseSlot = OGSResolveRVA(kOGSOnOperationResponseSlot);
+    uintptr_t responseEntry = OGSResolveRVA(kOGSOnOperationResponseEntry);
+    void *actual = NULL;
+    if (responseSlot && responseEntry &&
+        OGSReadPointer(responseSlot, &actual) &&
+        (actual == (void *)responseEntry || actual == (void *)&hook_OnOperationResponse)) {
+        bool ok = OGSInstallPointerSlotHook(kOGSOnOperationResponseSlot,
+                                            (void *)&hook_OnOperationResponse,
+                                            (void **)&orig_OnOperationResponse);
+        __atomic_store_n(&gOGSResponseHookStatus, ok ? 1u : 3u, __ATOMIC_RELEASE);
+    } else {
+        __atomic_store_n(&gOGSResponseHookStatus,
+                          actual ? 2u : 3u, __ATOMIC_RELEASE);
+    }
     OGSInstallPointerSlotHook(gOffsets.tblLeaveRoom, (void *)&hook_LeaveRoom, (void **)&orig_LeaveRoom);
     OGSInstallPointerSlotHook(gOffsets.tblType4995LeaveRoom, (void *)&hook_Type4995LeaveRoom, (void **)&orig_Type4995Leave);
     OGSInstallPointerSlotHook(gOffsets.tblOnMasterSwitched1, (void *)&hook_OnMasterSwitched1, (void **)&orig_OnMasterSwitch1);
@@ -2363,7 +2449,7 @@ static void OGSInstallHooks(void) {
         self.menuPanel.hidden = YES;
 
         self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 5, 260, 18)];
-        self.titleLabel.text = @"OGS Stage 20 | إدارة الروم";
+        self.titleLabel.text = @"OGS Stage 22 LAB | إدارة الروم";
         self.titleLabel.textColor = [UIColor whiteColor];
         self.titleLabel.textAlignment = NSTextAlignmentCenter;
         self.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
@@ -2421,7 +2507,7 @@ static void OGSInstallHooks(void) {
         self.magicBulletButton = [self makeBtn:CGRectMake(10, 179, 140, 30) title:@"طلقة سحرية: متوقف 🔫" bg:darkGray action:@selector(toggleMagicBullet:)];
         [self.menuPanel addSubview:self.magicBulletButton];
 
-        self.muteChatButton = [self makeBtn:CGRectMake(105, 214, 95, 30) title:@"الشات: مفتوح" bg:darkGray action:@selector(cycleChatMode:)];
+        self.muteChatButton = [self makeBtn:CGRectMake(105, 214, 95, 30) title:@"الشات: معطل مؤقتًا" bg:darkGray action:@selector(cycleChatMode:)];
         [self.menuPanel addSubview:self.muteChatButton];
 
         self.unbanButton = [self makeBtn:CGRectMake(10, 214, 90, 30) title:@"فك الحظر (0)" bg:darkGray action:@selector(clearBanList:)];
@@ -2792,8 +2878,26 @@ static void OGSInstallHooks(void) {
         chatWritable ? @"نعم" : @"لا",
         queued ? @"نعم" : @"لا"];
     details = [details stringByAppendingFormat:
-        @"\nPhotonHandler.Update calls: %llu | privacy pending=%u | applied=%u | rejected=%u",
+        @"\nStage22: legacy chat hooks DISABLED (wrong constructor slots)"
+         "\nOnEvent install failures=%u | Update install failures=%u"
+         "\nPhoton responses hook status=%u (1=installed,2=bad slot,3=unavailable)"
+         "\nOpResponse entry=%llu exit=%llu | Op252 replies=%llu"
+         "\nOp252 return 0=%llu nonzero=%llu parsefail=%u lastReturn=%d"
+         "\nOp252 includes ALL room properties; not proof of Master authority.",
+        __atomic_load_n(&gOGSOnEventInstallFailures, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSPhotonUpdateInstallFailures, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSResponseHookStatus, __ATOMIC_ACQUIRE),
+        (unsigned long long)__atomic_load_n(&gOGSResponseEntryCalls, __ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&gOGSResponseExitCalls, __ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&gOGSSetProps252Replies, __ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&gOGSSetProps252ZeroReturn, __ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&gOGSSetProps252NonzeroReturn, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSSetProps252ParseErrors, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSSetProps252LastReturnCode, __ATOMIC_ACQUIRE)];
+    details = [details stringByAppendingFormat:
+        @"\nPhotonHandler.Update entry=%llu exit=%llu | privacy pending=%u | applied=%u | rejected=%u",
         (unsigned long long)__atomic_load_n(&gOGSPhotonHandlerUpdateCalls, __ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&gOGSPhotonHandlerUpdateExitCalls, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSPrivacyPending, __ATOMIC_ACQUIRE),
         __atomic_load_n(&gOGSPrivacyApplied, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSPrivacyRejected, __ATOMIC_RELAXED)];
@@ -3220,17 +3324,11 @@ static void OGSInstallHooks(void) {
 }
 
 - (void)cycleChatMode:(UIButton *)s {
-    gOGS.chatMode = (gOGS.chatMode + 1) % 3;
-    if (gOGS.chatMode == 1) {
-        [s setTitle:@"الشات: كتم 🔇" forState:UIControlStateNormal];
-        s.backgroundColor = [UIColor colorWithRed:0.80 green:0.35 blue:0.10 alpha:1.0];
-    } else if (gOGS.chatMode == 2) {
-        [s setTitle:@"الشات: طرد 🚫" forState:UIControlStateNormal];
-        s.backgroundColor = [UIColor colorWithRed:0.70 green:0.12 blue:0.15 alpha:1.0];
-    } else {
-        [s setTitle:@"الشات: مفتوح" forState:UIControlStateNormal];
-        s.backgroundColor = [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
-    }
+    // The legacy chat hooks targeted two unrelated constructors.
+    // Leave the feature unavailable until the exact iOS method indices are verified.
+    __atomic_store_n(&gOGS.chatMode, 0, __ATOMIC_RELEASE);
+    [s setTitle:@"الشات: معطل مؤقتًا" forState:UIControlStateNormal];
+    self.statusLabel.text = @"Stage22: تم تعطيل Hooks الشات الخاطئة لحماية الاستقرار";
 }
 
 - (void)triggerImmediateKick:(OGSPeerSnapshot)peer {
