@@ -680,6 +680,7 @@ static volatile uint32_t gOGSManualRecoveryPending = 0;
 static volatile uint32_t gOGSManualRecoveryAttempts = 0;
 static volatile uint32_t gOGSManualRecoveryAccepted = 0;
 static volatile uint32_t gOGSManualRecoveryFailed = 0;
+static volatile uint32_t gOGSRecoveryScopeRejected = 0; // local context mismatch, not server denial
 static volatile uint32_t gOGSManualRecoverySkipped = 0;
 // Stage 18: preserve a room-bound manual intent behind the shared limiter.
 static uintptr_t gOGSManualRecoveryRoom = 0;        // gStateLock
@@ -1021,7 +1022,7 @@ static void OGSProcessRoomPrivacyOnEvent(void) {
     __atomic_fetch_add(&gOGSPrivacyApplied, 1u, __ATOMIC_RELAXED);
 }
 
-static bool OGSRequestLocalMasterOnceOnEvent(void) {
+static bool OGSRequestLocalMasterOnceOnEvent(uintptr_t expectedRoom, int32_t expectedActor) {
     void *netPeer = OGSGetNetworkingPeerSafe();
     if (!netPeer) return false;
     uintptr_t room = 0, localPlayer = 0;
@@ -1034,6 +1035,11 @@ static bool OGSRequestLocalMasterOnceOnEvent(void) {
         localActor <= 0 || localActor >= 1000000 ||
         roomMaster <= 0 || roomMaster >= 1000000 ||
         localActor == roomMaster) return false;
+    // A reservation in room A must not be submitted from room B after a rejoin.
+    if (room != expectedRoom || localActor != expectedActor) {
+        __atomic_fetch_add(&gOGSRecoveryScopeRejected, 1u, __ATOMIC_RELAXED);
+        return false;
+    }
 
     uintptr_t slot = OGSResolveRVA(gOffsets.tblSetMaster);
     void *candidate = NULL;
@@ -1649,7 +1655,7 @@ static void OGSProcessRecoveryOnPhotonCallback(uint32_t observedEventCode,
             if (wrongRoom) OGSDisarmAutoRoom();
             if (ready && __atomic_load_n(&gOGSAutoEnabled, __ATOMIC_ACQUIRE)) {
                 __atomic_fetch_add(&gOGSAutoAttempts, 1u, __ATOMIC_RELAXED);
-                if (OGSRequestLocalMasterOnceOnEvent())
+                if (OGSRequestLocalMasterOnceOnEvent(liveRoom, localID))
                     __atomic_fetch_add(&gOGSAutoAccepted, 1u, __ATOMIC_RELAXED);
                 else
                     __atomic_fetch_add(&gOGSAutoFailed, 1u, __ATOMIC_RELAXED);
@@ -1693,7 +1699,7 @@ static void OGSProcessRecoveryOnPhotonCallback(uint32_t observedEventCode,
         os_unfair_lock_unlock(&gStateLock);
         if (permitted) {
             __atomic_fetch_add(&gOGSManualRecoveryAttempts, 1u, __ATOMIC_RELAXED);
-            if (OGSRequestLocalMasterOnceOnEvent())
+            if (OGSRequestLocalMasterOnceOnEvent(liveRoom, localID))
                 __atomic_fetch_add(&gOGSManualRecoveryAccepted, 1u, __ATOMIC_RELAXED);
             else
                 __atomic_fetch_add(&gOGSManualRecoveryFailed, 1u, __ATOMIC_RELAXED);
