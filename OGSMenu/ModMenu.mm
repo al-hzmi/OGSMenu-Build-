@@ -165,6 +165,8 @@ static OnMasterSwitchFn orig_OnMasterSwitch2 = NULL;
 static OnMasterSwitchFn orig_OnMasterSwitch3 = NULL;
 static OnMasterSwitchFn orig_OnMasterSwitch4 = NULL;
 static OnMasterSwitchFn orig_OnMasterSwitch5 = NULL;
+// MD31058: GameLogic.OnMasterClientSwitched() has NO PhotonPlayer argument.
+static void (*orig_GameLogicMasterSwitch)(void *, void *) = NULL;
 
 static ApplyDamageFn  orig_ApplyDamage = NULL;
 static DamageRemoteFn orig_DamageRemote = NULL;
@@ -1463,6 +1465,11 @@ static volatile uint64_t gOGSCashHookCalls = 0;
 static volatile uint64_t gOGSChatHookCalls = 0;
 static volatile uint64_t gOGSNetworkEvents = 0;
 static volatile uint64_t gOGSMasterSwitchEvents = 0;
+// Stage24: callback entries are NOT unique transfers. Index 5 = GameLogic.
+static volatile uint64_t gOGSMasterReceiverEntries[6] = {0};
+static volatile uint32_t gOGSMasterCacheStatus[6] = {0};
+static volatile uint32_t gOGSMasterCacheRounds = 0;
+static volatile uint64_t gOGSMasterRepairFrameTicks = 0;
 static volatile int32_t gOGSHostMonitorOn = 1;
 // Photon network event diagnostics. Defined before hook_OnEvent uses them.
 static volatile uint32_t gOGSEventCodes[256] = {0};
@@ -1694,6 +1701,8 @@ static void OGSProcessRecoveryOnPhotonCallback(uint32_t observedEventCode,
     }
 }
 
+static void OGSRepairMasterReceiverCaches(void);
+
 // Executed on the game's Unity/PUN Update thread, never from the UIKit
 // menu timer. Makes standalone room privacy possible with zero other players.
 static void hook_PhotonHandlerUpdate(void *self, void *method) {
@@ -1703,6 +1712,12 @@ static void hook_PhotonHandlerUpdate(void *self, void *method) {
     if (orig_PhotonHandlerUpdate)
         orig_PhotonHandlerUpdate(self, method);
     __atomic_fetch_add(&gOGSPhotonHandlerUpdateExitCalls, 1ULL, __ATOMIC_RELAXED);
+    // Late-loaded scene classes may not exist during the first installation.
+    // Repair only once per ~120 reached Update frames, never on each frame.
+    uint64_t repairFrame = __atomic_add_fetch(&gOGSMasterRepairFrameTicks,
+                                               1ULL, __ATOMIC_RELAXED);
+    if (repairFrame == 1ULL || repairFrame % 120ULL == 0ULL)
+        OGSRepairMasterReceiverCaches();
     // Both callbacks may run on the same frame. Pending actions are atomically
     // consumed only once; kick executes before optional room close.
     if (__atomic_load_n(&gOGSManualKickPending, __ATOMIC_ACQUIRE))
@@ -1900,11 +1915,44 @@ static void OGSHandleMasterSwitchIntercept(void *newMasterPlayer) {
     }
 }
 
-static void hook_OnMasterSwitched1(void *self, void *p, void *m) { if (orig_OnMasterSwitch1) orig_OnMasterSwitch1(self, p, m); OGSHandleMasterSwitchIntercept(p); }
-static void hook_OnMasterSwitched2(void *self, void *p, void *m) { if (orig_OnMasterSwitch2) orig_OnMasterSwitch2(self, p, m); OGSHandleMasterSwitchIntercept(p); }
-static void hook_OnMasterSwitched3(void *self, void *p, void *m) { if (orig_OnMasterSwitch3) orig_OnMasterSwitch3(self, p, m); OGSHandleMasterSwitchIntercept(p); }
-static void hook_OnMasterSwitched4(void *self, void *p, void *m) { if (orig_OnMasterSwitch4) orig_OnMasterSwitch4(self, p, m); OGSHandleMasterSwitchIntercept(p); }
-static void hook_OnMasterSwitched5(void *self, void *p, void *m) { if (orig_OnMasterSwitch5) orig_OnMasterSwitch5(self, p, m); OGSHandleMasterSwitchIntercept(p); }
+// Count BEFORE the original method; Unity SendMessage receivers can be
+// independent, and one property update can invoke multiple receivers.
+static void hook_OnMasterSwitched1(void *self, void *p, void *m) {
+    __atomic_fetch_add(&gOGSMasterReceiverEntries[0], 1ULL, __ATOMIC_RELAXED);
+    auto original = __atomic_load_n(&orig_OnMasterSwitch1, __ATOMIC_ACQUIRE);
+    if (original) original(self, p, m);
+    OGSHandleMasterSwitchIntercept(p);
+}
+static void hook_OnMasterSwitched2(void *self, void *p, void *m) {
+    __atomic_fetch_add(&gOGSMasterReceiverEntries[1], 1ULL, __ATOMIC_RELAXED);
+    auto original = __atomic_load_n(&orig_OnMasterSwitch2, __ATOMIC_ACQUIRE);
+    if (original) original(self, p, m);
+    OGSHandleMasterSwitchIntercept(p);
+}
+static void hook_OnMasterSwitched3(void *self, void *p, void *m) {
+    __atomic_fetch_add(&gOGSMasterReceiverEntries[2], 1ULL, __ATOMIC_RELAXED);
+    auto original = __atomic_load_n(&orig_OnMasterSwitch3, __ATOMIC_ACQUIRE);
+    if (original) original(self, p, m);
+    OGSHandleMasterSwitchIntercept(p);
+}
+static void hook_OnMasterSwitched4(void *self, void *p, void *m) {
+    __atomic_fetch_add(&gOGSMasterReceiverEntries[3], 1ULL, __ATOMIC_RELAXED);
+    auto original = __atomic_load_n(&orig_OnMasterSwitch4, __ATOMIC_ACQUIRE);
+    if (original) original(self, p, m);
+    OGSHandleMasterSwitchIntercept(p);
+}
+static void hook_OnMasterSwitched5(void *self, void *p, void *m) {
+    __atomic_fetch_add(&gOGSMasterReceiverEntries[4], 1ULL, __ATOMIC_RELAXED);
+    auto original = __atomic_load_n(&orig_OnMasterSwitch5, __ATOMIC_ACQUIRE);
+    if (original) original(self, p, m);
+    OGSHandleMasterSwitchIntercept(p);
+}
+static void hook_GameLogicMasterSwitch(void *self, void *method) {
+    __atomic_fetch_add(&gOGSMasterReceiverEntries[5], 1ULL, __ATOMIC_RELAXED);
+    auto original = __atomic_load_n(&orig_GameLogicMasterSwitch, __ATOMIC_ACQUIRE);
+    if (original) original(self, method);
+    OGSHandleMasterSwitchIntercept(NULL);
+}
 
 static void hook_OnPhotonPlayerDisconnected(void *self, void *player, void *method) {
     // Forward disconnect without writing to objects that may be destroyed
@@ -2129,6 +2177,91 @@ static void OGSRepairPhotonHandlerUpdateCache(void) {
         return;
     }
     __atomic_store_n(&gOGSCachedUpdateStatus, 4u, __ATOMIC_RELEASE);
+}
+
+// Stage24: six verified OnMasterClientSwitched receivers; five have a
+// PhotonPlayer argument, GameLogic has none. Class.methods may be lazily
+// instantiated, so Update retries bounded scans. Never invoke a Unity API
+// or change Room.MasterClient fields here.
+static void OGSRepairMasterReceiverCacheOne(uint32_t index, uint32_t typeIndex,
+        uint32_t definitionIndex, uint32_t token, uint8_t parameterCount,
+        uintptr_t entryRVA, void *replacement, void **outOriginal) {
+    uint32_t status = 3u; // cache unavailable / class not yet initialized
+    uintptr_t cache = 0, klass = 0, methods = 0, metadata = 0, header = 0;
+    uint16_t count = 0;
+    uint32_t methodsOffset = 0;
+    if (!OGSReadMemory(OGSResolveRVA(0x02813CE8), &cache, sizeof(cache)) ||
+        !cache ||
+        !OGSReadMemory(cache + (uintptr_t)typeIndex * sizeof(void *),
+                       &klass, sizeof(klass)) || !klass ||
+        !OGSReadMemory(klass + 0x98, &methods, sizeof(methods)) || !methods ||
+        !OGSReadMemory(klass + 0x110, &count, sizeof(count)) ||
+        count == 0 || count > 1024 ||
+        !OGSReadMemory(OGSResolveRVA(0x02813CD0), &metadata, sizeof(metadata)) ||
+        !metadata ||
+        !OGSReadMemory(OGSResolveRVA(0x02813CD8), &header, sizeof(header)) ||
+        !header ||
+        !OGSReadMemory(header + 0x30, &methodsOffset, sizeof(methodsOffset))) {
+        __atomic_store_n(&gOGSMasterCacheStatus[index], status, __ATOMIC_RELEASE);
+        return;
+    }
+    uintptr_t expectedEntry = OGSResolveRVA(entryRVA);
+    uintptr_t expectedDefinition = metadata + methodsOffset +
+                                   (uintptr_t)definitionIndex * 52u;
+    if (!expectedEntry) {
+        status = 5u;
+    } else {
+        status = 4u; // initialized, matching MethodInfo not found
+        for (uint16_t i = 0; i < count; ++i) {
+            uintptr_t info = 0, owner = 0, definition = 0;
+            uint32_t foundToken = 0;
+            uint8_t foundCount = 255;
+            if (!OGSReadMemory(methods + (uintptr_t)i * sizeof(void *),
+                               &info, sizeof(info)) || !info ||
+                !OGSReadMemory(info + 0x18, &owner, sizeof(owner)) ||
+                !OGSReadMemory(info + 0x30, &definition, sizeof(definition)) ||
+                !OGSReadMemory(info + 0x40, &foundToken, sizeof(foundToken)) ||
+                !OGSReadMemory(info + 0x4A, &foundCount, sizeof(foundCount)) ||
+                owner != klass || definition != expectedDefinition ||
+                foundToken != token || foundCount != parameterCount) continue;
+            status = 5u; // matched identity, check writable mapping
+            if (!OGSIsWritableMappedSlot(info)) break;
+            os_unfair_lock_lock(&gHookInstallLock);
+            void *prior = __atomic_load_n((void **)info, __ATOMIC_ACQUIRE);
+            void *original = __atomic_load_n(outOriginal, __ATOMIC_ACQUIRE);
+            if (original == (void *)expectedEntry && prior == replacement) {
+                status = 1u; // already hooked
+            } else if (original == (void *)expectedEntry &&
+                       prior == (void *)expectedEntry) {
+                void *expected = prior;
+                bool ok = __atomic_compare_exchange_n((void **)info, &expected,
+                    replacement, false, __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+                status = ok ? 2u : 6u; // repaired or unsafe competing change
+            } else {
+                status = 6u; // foreign pointer / original mismatch
+            }
+            os_unfair_lock_unlock(&gHookInstallLock);
+            break;
+        }
+    }
+    __atomic_store_n(&gOGSMasterCacheStatus[index], status, __ATOMIC_RELEASE);
+}
+
+static void OGSRepairMasterReceiverCaches(void) {
+    __atomic_fetch_add(&gOGSMasterCacheRounds, 1u, __ATOMIC_RELAXED);
+    OGSRepairMasterReceiverCacheOne(0, 4821, 31022, 0x060002DAu, 1,
+        0x0142800Cu, (void *)&hook_OnMasterSwitched1, (void **)&orig_OnMasterSwitch1);
+    OGSRepairMasterReceiverCacheOne(1, 4894, 31665, 0x0600054Bu, 1,
+        0x013DCE14u, (void *)&hook_OnMasterSwitched2, (void **)&orig_OnMasterSwitch2);
+    OGSRepairMasterReceiverCacheOne(2, 4935, 31901, 0x06000623u, 1,
+        0x0138E214u, (void *)&hook_OnMasterSwitched3, (void **)&orig_OnMasterSwitch3);
+    OGSRepairMasterReceiverCacheOne(3, 4967, 32043, 0x060006ABu, 1,
+        0x013C5ADCu, (void *)&hook_OnMasterSwitched4, (void **)&orig_OnMasterSwitch4);
+    OGSRepairMasterReceiverCacheOne(4, 4968, 32078, 0x060006CEu, 1,
+        0x013795F0u, (void *)&hook_OnMasterSwitched5, (void **)&orig_OnMasterSwitch5);
+    OGSRepairMasterReceiverCacheOne(5, 4825, 31058, 0x060002FEu, 0,
+        0x0138881Cu, (void *)&hook_GameLogicMasterSwitch,
+        (void **)&orig_GameLogicMasterSwitch);
 }
 
 // Stage 2: read-only Photon presence. No IL2CPP/Photon function calls
@@ -2381,6 +2514,12 @@ static void OGSInstallHooks(void) {
     OGSInstallPointerSlotHook(gOffsets.tblOnMasterSwitched3, (void *)&hook_OnMasterSwitched3, (void **)&orig_OnMasterSwitch3);
     OGSInstallPointerSlotHook(gOffsets.tblOnMasterSwitched4, (void *)&hook_OnMasterSwitched4, (void **)&orig_OnMasterSwitch4);
     OGSInstallPointerSlotHook(gOffsets.tblOnMasterSwitched5, (void *)&hook_OnMasterSwitched5, (void **)&orig_OnMasterSwitch5);
+    // Sixth receiver has ABI (self, MethodInfo*), without PhotonPlayer*.
+    OGSInstallPointerSlotHook(0x0238EEA8u, (void *)&hook_GameLogicMasterSwitch,
+                              (void **)&orig_GameLogicMasterSwitch);
+    // Stage23 already repaired cached PhotonHandler.Update. Repair only the
+    // six MasterClient notification receivers without touching Event203.
+    OGSRepairMasterReceiverCaches();
 }
 
 // ============================================================
@@ -2532,7 +2671,7 @@ static void OGSInstallHooks(void) {
         self.menuPanel.hidden = YES;
 
         self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 5, 260, 18)];
-        self.titleLabel.text = @"OGS Stage 23 LAB | إدارة الروم";
+        self.titleLabel.text = @"OGS Stage 24 LAB | إدارة الروم";
         self.titleLabel.textColor = [UIColor whiteColor];
         self.titleLabel.textAlignment = NSTextAlignmentCenter;
         self.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
@@ -2986,6 +3125,25 @@ static void OGSInstallHooks(void) {
         __atomic_load_n(&gOGSCachedUpdateEntryMatched, __ATOMIC_RELAXED),
         (unsigned long long)__atomic_load_n(&gOGSCachedUpdateObservedEntry,
                                               __ATOMIC_ACQUIRE)];
+    details = [details stringByAppendingFormat:
+        @"\nStage24 Master receiver cache status W/P/T/PB/I/G=%u/%u/%u/%u/%u/%u"
+         "\nStatus: 1=already,2=repaired,3=not ready,4=identity,5=memory,6=mismatch"
+         "\nMaster receiver entries W/P/T/PB/I/G=%llu/%llu/%llu/%llu/%llu/%llu"
+         "\nRepair scans=%u | receiver entries are NOT unique host transfers."
+         "\nEvent203 and host request quotas are unchanged.",
+        __atomic_load_n(&gOGSMasterCacheStatus[0], __ATOMIC_ACQUIRE),
+        __atomic_load_n(&gOGSMasterCacheStatus[1], __ATOMIC_ACQUIRE),
+        __atomic_load_n(&gOGSMasterCacheStatus[2], __ATOMIC_ACQUIRE),
+        __atomic_load_n(&gOGSMasterCacheStatus[3], __ATOMIC_ACQUIRE),
+        __atomic_load_n(&gOGSMasterCacheStatus[4], __ATOMIC_ACQUIRE),
+        __atomic_load_n(&gOGSMasterCacheStatus[5], __ATOMIC_ACQUIRE),
+        (unsigned long long)__atomic_load_n(&gOGSMasterReceiverEntries[0], __ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&gOGSMasterReceiverEntries[1], __ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&gOGSMasterReceiverEntries[2], __ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&gOGSMasterReceiverEntries[3], __ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&gOGSMasterReceiverEntries[4], __ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&gOGSMasterReceiverEntries[5], __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSMasterCacheRounds, __ATOMIC_RELAXED)];
     details = [details stringByAppendingFormat:
         @"\nPhotonHandler.Update entry=%llu exit=%llu | privacy pending=%u | applied=%u | rejected=%u",
         (unsigned long long)__atomic_load_n(&gOGSPhotonHandlerUpdateCalls, __ATOMIC_RELAXED),
