@@ -934,6 +934,13 @@ static double gOGSRecoveryLastUpdateProbeAt = 0.; // gStateLock
 static volatile uint32_t gOGSRecoveryUpdateProbes = 0;
 static volatile uint32_t gOGSRecoveryEventProbes = 0;
 static const uintptr_t kOGSPhotonHandlerUpdateSlot = 0x023905F0;
+// Stage23 isolated repair: cached Unity Update MethodInfo only.
+// Status: 0 pending, 1 already hooked, 2 repaired, 3 cache unavailable,
+// 4 identity mismatch, 5 unsafe memory, 6 original pointer mismatch.
+static volatile uint32_t gOGSCachedUpdateStatus = 0;
+static volatile uint32_t gOGSCachedUpdateAttempts = 0;
+static volatile uint32_t gOGSCachedUpdateEntryMatched = 0;
+static volatile uintptr_t gOGSCachedUpdateObservedEntry = 0;
 // Verified MD31284 / MI28551: NetworkingPeer.OnOperationResponse(OperationResponse).
 // 0x02358400 + MI*8 = 0x02390038 in fps 3.4.0 ARM64 metadata table.
 static const uintptr_t kOGSOnOperationResponseSlot = 0x02390038;
@@ -2050,6 +2057,80 @@ static bool OGSInstallPointerSlotHook(uintptr_t rva, void *replacement, void **o
     return installed;
 }
 
+// Stage23: repair only PhotonHandler.Update MethodInfo methodPointer after
+// matching type, declaration address, token, ABI arity and expected original.
+// Unity's cached MethodInfo may bypass edits to global methodPointers.
+// Repeated calls are idempotent; no Unity methods are invoked from this helper.
+static void OGSRepairPhotonHandlerUpdateCache(void) {
+    __atomic_fetch_add(&gOGSCachedUpdateAttempts, 1u, __ATOMIC_RELAXED);
+    static const uint32_t kTypeIndex = 4880u, kDefinitionIndex = 31414u;
+    static const uint32_t kExpectedToken = 0x06000460u;
+    static const uintptr_t kEntryRVA = 0x013C8400u;
+    uintptr_t cache = 0, klass = 0, methods = 0, metadata = 0, header = 0;
+    uint32_t methodsOffset = 0;
+    uint16_t count = 0;
+    if (!OGSReadMemory(OGSResolveRVA(0x02813CE8), &cache, sizeof(cache)) || !cache ||
+        !OGSReadMemory(cache + (uintptr_t)kTypeIndex * sizeof(void *),
+                       &klass, sizeof(klass)) || !klass ||
+        !OGSReadMemory(klass + 0x98, &methods, sizeof(methods)) || !methods ||
+        !OGSReadMemory(klass + 0x110, &count, sizeof(count)) ||
+        count == 0 || count > 1024 ||
+        !OGSReadMemory(OGSResolveRVA(0x02813CD0), &metadata, sizeof(metadata)) || !metadata ||
+        !OGSReadMemory(OGSResolveRVA(0x02813CD8), &header, sizeof(header)) || !header ||
+        !OGSReadMemory(header + 0x30, &methodsOffset, sizeof(methodsOffset))) {
+        __atomic_store_n(&gOGSCachedUpdateStatus, 3u, __ATOMIC_RELEASE);
+        return;
+    }
+    uintptr_t expectedDefinition = metadata + methodsOffset +
+        (uintptr_t)kDefinitionIndex * 52u;
+    uintptr_t expectedEntry = OGSResolveRVA(kEntryRVA);
+    if (!expectedEntry) {
+        __atomic_store_n(&gOGSCachedUpdateStatus, 5u, __ATOMIC_RELEASE);
+        return;
+    }
+    for (uint16_t i = 0; i < count; ++i) {
+        uintptr_t info = 0, owner = 0, definition = 0;
+        uint32_t token = 0;
+        uint8_t arity = 255;
+        if (!OGSReadMemory(methods + (uintptr_t)i * sizeof(void *), &info, sizeof(info)) ||
+            !info ||
+            !OGSReadMemory(info + 0x18, &owner, sizeof(owner)) ||
+            !OGSReadMemory(info + 0x30, &definition, sizeof(definition)) ||
+            !OGSReadMemory(info + 0x40, &token, sizeof(token)) ||
+            !OGSReadMemory(info + 0x4A, &arity, sizeof(arity)) ||
+            owner != klass || definition != expectedDefinition ||
+            token != kExpectedToken || arity != 0) continue;
+        __atomic_fetch_add(&gOGSCachedUpdateEntryMatched, 1u, __ATOMIC_RELAXED);
+        if (!OGSIsWritableMappedSlot(info)) {
+            __atomic_store_n(&gOGSCachedUpdateStatus, 5u, __ATOMIC_RELEASE);
+            return;
+        }
+        os_unfair_lock_lock(&gHookInstallLock);
+        void *prior = __atomic_load_n((void **)info, __ATOMIC_ACQUIRE);
+        __atomic_store_n(&gOGSCachedUpdateObservedEntry, (uintptr_t)prior,
+                         __ATOMIC_RELEASE);
+        void *original = __atomic_load_n((void **)&orig_PhotonHandlerUpdate,
+                                         __ATOMIC_ACQUIRE);
+        if (prior == (void *)&hook_PhotonHandlerUpdate &&
+            original == (void *)expectedEntry) {
+            __atomic_store_n(&gOGSCachedUpdateStatus, 1u, __ATOMIC_RELEASE);
+        } else if (prior == (void *)expectedEntry &&
+                   original == (void *)expectedEntry) {
+            void *expected = prior;
+            bool ok = __atomic_compare_exchange_n((void **)info, &expected,
+                  (void *)&hook_PhotonHandlerUpdate, false,
+                  __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+            __atomic_store_n(&gOGSCachedUpdateStatus,
+                             ok ? 2u : 6u, __ATOMIC_RELEASE);
+        } else {
+            __atomic_store_n(&gOGSCachedUpdateStatus, 6u, __ATOMIC_RELEASE);
+        }
+        os_unfair_lock_unlock(&gHookInstallLock);
+        return;
+    }
+    __atomic_store_n(&gOGSCachedUpdateStatus, 4u, __ATOMIC_RELEASE);
+}
+
 // Stage 2: read-only Photon presence. No IL2CPP/Photon function calls
 // from the UIKit timer. Verified fps 3.4.0 offsets:
 // typeInfo->staticFields +0xB8 -> networkPeer +0x10;
@@ -2274,6 +2355,8 @@ static void OGSInstallHooks(void) {
                                     (void *)&hook_PhotonHandlerUpdate,
                                     (void **)&orig_PhotonHandlerUpdate))
         __atomic_fetch_add(&gOGSPhotonUpdateInstallFailures, 1u, __ATOMIC_RELAXED);
+    else
+        OGSRepairPhotonHandlerUpdateCache();
 
     // Strictly identify the original method ENTRY before hooking its slot.
     // A mismatch must leave the game's dispatch table untouched.
@@ -2449,7 +2532,7 @@ static void OGSInstallHooks(void) {
         self.menuPanel.hidden = YES;
 
         self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 5, 260, 18)];
-        self.titleLabel.text = @"OGS Stage 22 LAB | إدارة الروم";
+        self.titleLabel.text = @"OGS Stage 23 LAB | إدارة الروم";
         self.titleLabel.textColor = [UIColor whiteColor];
         self.titleLabel.textAlignment = NSTextAlignmentCenter;
         self.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
@@ -2894,6 +2977,15 @@ static void OGSInstallHooks(void) {
         (unsigned long long)__atomic_load_n(&gOGSSetProps252NonzeroReturn, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSSetProps252ParseErrors, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSSetProps252LastReturnCode, __ATOMIC_ACQUIRE)];
+    details = [details stringByAppendingFormat:
+        @"\nStage23 cached Update: status=%u (1=already,2=repaired,3=not ready,4=identity,5=memory,6=mismatch)"
+         "\nCache repair attempts=%u | matched=%u | last pointer=0x%llx"
+         "\nDoes NOT change Event203, host rate limits, or other method caches.",
+        __atomic_load_n(&gOGSCachedUpdateStatus, __ATOMIC_ACQUIRE),
+        __atomic_load_n(&gOGSCachedUpdateAttempts, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSCachedUpdateEntryMatched, __ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&gOGSCachedUpdateObservedEntry,
+                                              __ATOMIC_ACQUIRE)];
     details = [details stringByAppendingFormat:
         @"\nPhotonHandler.Update entry=%llu exit=%llu | privacy pending=%u | applied=%u | rejected=%u",
         (unsigned long long)__atomic_load_n(&gOGSPhotonHandlerUpdateCalls, __ATOMIC_RELAXED),
