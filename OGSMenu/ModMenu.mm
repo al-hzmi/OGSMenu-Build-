@@ -930,6 +930,23 @@ static uintptr_t gOGSPrivacyRequestedRoom = 0; // gStateLock
 static int32_t gOGSPrivacyRequestedActor = 0; // gStateLock
 static volatile uint32_t gOGSPrivacyApplied = 0;
 static volatile uint32_t gOGSPrivacyRejected = 0;
+// Stage26: explicit, room/actor-bound entry guard. Only enforces the user's
+// existing "closed and hidden" room setting. Never writes MasterClient.
+static volatile uint32_t gOGSClosedGuardEnabled = 0;
+static uintptr_t gOGSClosedGuardRoom = 0; // gStateLock
+static int32_t gOGSClosedGuardActor = 0;   // gStateLock
+static double gOGSClosedGuardLastScan = 0.;  // gStateLock
+static double gOGSClosedGuardLastRequest = 0.; // gStateLock
+static double gOGSClosedGuardWindowStart = 0.; // gStateLock
+static uint32_t gOGSClosedGuardWindowRequests = 0; // gStateLock
+static const double kOGSClosedGuardScanSeconds = 1.0;
+static const double kOGSClosedGuardRetrySeconds = 5.0;
+static const uint32_t kOGSClosedGuardWindowLimit = 6;
+static volatile uint32_t gOGSClosedGuardQueued = 0;
+static volatile uint32_t gOGSClosedGuardClosedObserved = 0;
+static volatile uint32_t gOGSClosedGuardNoAuthority = 0;
+static volatile uint32_t gOGSClosedGuardRateLimited = 0;
+static volatile uint32_t gOGSClosedGuardDisarmed = 0;
 // Independent Unity/PUN frame callback handles queued actions even when
 // a private room has no incoming Photon OnEvent callbacks.
 static volatile uint64_t gOGSPhotonHandlerUpdateCalls = 0;
@@ -1021,6 +1038,82 @@ static void OGSProcessRoomPrivacyOnEvent(void) {
     if (targetVisible && !isVisible)
         ((OGSRoomBoolSetterFn)visibleSetter)((void *)room, true, NULL);
     __atomic_fetch_add(&gOGSPrivacyApplied, 1u, __ATOMIC_RELAXED);
+}
+
+// Poll at most once per second from PhotonHandler.Update only.
+// A fresh snapshot must match the explicitly guarded room AND actor.
+// Never submit room settings while another player is MasterClient.
+// "Closed" is observed locally; an independent join test is needed for
+// server-side confirmation.
+static void OGSProcessClosedGuardOnPhotonCallback(void) {
+    if (!__atomic_load_n(&gOGSClosedGuardEnabled, __ATOMIC_ACQUIRE)) return;
+    double now = CFAbsoluteTimeGetCurrent();
+    uintptr_t wantedRoom = 0;
+    int32_t wantedActor = 0;
+    os_unfair_lock_lock(&gStateLock);
+    if (!__atomic_load_n(&gOGSClosedGuardEnabled, __ATOMIC_ACQUIRE) ||
+        (gOGSClosedGuardLastScan > 0. &&
+         now - gOGSClosedGuardLastScan < kOGSClosedGuardScanSeconds)) {
+        os_unfair_lock_unlock(&gStateLock);
+        return;
+    }
+    gOGSClosedGuardLastScan = now;
+    wantedRoom = gOGSClosedGuardRoom;
+    wantedActor = gOGSClosedGuardActor;
+    os_unfair_lock_unlock(&gStateLock);
+
+    uintptr_t liveRoom = 0;
+    int32_t liveActor = 0, liveMaster = 0;
+    if (!OGSReadAutoRoom(&liveRoom, &liveActor, &liveMaster)) return;
+    if (liveRoom != wantedRoom || liveActor != wantedActor) {
+        os_unfair_lock_lock(&gStateLock);
+        if (gOGSClosedGuardRoom == wantedRoom &&
+            gOGSClosedGuardActor == wantedActor &&
+            __atomic_exchange_n(&gOGSClosedGuardEnabled, 0u,
+                                __ATOMIC_ACQ_REL))
+            __atomic_fetch_add(&gOGSClosedGuardDisarmed, 1u,
+                               __ATOMIC_RELAXED);
+        os_unfair_lock_unlock(&gStateLock);
+        return;
+    }
+    if (liveMaster != liveActor) {
+        __atomic_fetch_add(&gOGSClosedGuardNoAuthority, 1u,
+                           __ATOMIC_RELAXED);
+        return;
+    }
+    bool open = true, visible = true;
+    if (!OGSReadRoomPrivacy(liveRoom, &open, &visible)) return;
+    if (!open && !visible) {
+        __atomic_fetch_add(&gOGSClosedGuardClosedObserved, 1u,
+                           __ATOMIC_RELAXED);
+        return;
+    }
+    // A queued explicit user privacy action always takes precedence.
+    if (__atomic_load_n(&gOGSPrivacyPending, __ATOMIC_ACQUIRE)) return;
+
+    os_unfair_lock_lock(&gStateLock);
+    if (__atomic_load_n(&gOGSClosedGuardEnabled, __ATOMIC_ACQUIRE) &&
+        gOGSClosedGuardRoom == liveRoom &&
+        gOGSClosedGuardActor == liveActor) {
+        if (gOGSClosedGuardWindowStart <= 0. ||
+            now - gOGSClosedGuardWindowStart >= 60.0) {
+            gOGSClosedGuardWindowStart = now;
+            gOGSClosedGuardWindowRequests = 0;
+        }
+        if (gOGSClosedGuardWindowRequests >= kOGSClosedGuardWindowLimit) {
+            __atomic_fetch_add(&gOGSClosedGuardRateLimited, 1u,
+                               __ATOMIC_RELAXED);
+        } else if (gOGSClosedGuardLastRequest <= 0. ||
+                   now - gOGSClosedGuardLastRequest >= kOGSClosedGuardRetrySeconds) {
+            gOGSPrivacyRequestedRoom = liveRoom;
+            gOGSPrivacyRequestedActor = liveActor;
+            __atomic_store_n(&gOGSPrivacyPending, 2u, __ATOMIC_RELEASE);
+            gOGSClosedGuardLastRequest = now;
+            ++gOGSClosedGuardWindowRequests;
+            __atomic_fetch_add(&gOGSClosedGuardQueued, 1u, __ATOMIC_RELAXED);
+        }
+    }
+    os_unfair_lock_unlock(&gStateLock);
 }
 
 static bool OGSRequestLocalMasterOnceOnEvent(uintptr_t expectedRoom, int32_t expectedActor) {
@@ -1729,6 +1822,7 @@ static void hook_PhotonHandlerUpdate(void *self, void *method) {
     // consumed only once; kick executes before optional room close.
     if (__atomic_load_n(&gOGSManualKickPending, __ATOMIC_ACQUIRE))
         OGSProcessManualKickOnEvent();
+    OGSProcessClosedGuardOnPhotonCallback();
     if (__atomic_load_n(&gOGSPrivacyPending, __ATOMIC_ACQUIRE))
         OGSProcessRoomPrivacyOnEvent();
 
@@ -2678,7 +2772,7 @@ static void OGSInstallHooks(void) {
         self.menuPanel.hidden = YES;
 
         self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 5, 260, 18)];
-        self.titleLabel.text = @"OGS Stage 25 LAB | إدارة الروم";
+        self.titleLabel.text = @"OGS Stage 26 LAB | إدارة الروم";
         self.titleLabel.textColor = [UIColor whiteColor];
         self.titleLabel.textAlignment = NSTextAlignmentCenter;
         self.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
@@ -2979,8 +3073,12 @@ static void OGSInstallHooks(void) {
         self.privacyHiddenButton.backgroundColor = hiddenActive ? privacyGreen : privacyGray;
     }
     if (self.privacyClosedButton) {
-        [self.privacyClosedButton setTitle:(closedActive ? @"خاص ومغلق: مفعّل" : @"خاص ومغلق: إيقاف") forState:UIControlStateNormal];
-        self.privacyClosedButton.backgroundColor = closedActive ? privacyGreen : privacyGray;
+        BOOL guardArmed = __atomic_load_n(&gOGSClosedGuardEnabled, __ATOMIC_ACQUIRE) != 0;
+        NSString *guardTitle = guardArmed ? (closedActive ?
+            @"حراسة الدخول: مفعلة" : @"حراسة الدخول: انتظار") :
+            (closedActive ? @"خاص ومغلق: يدوي" : @"حراسة الدخول: إيقاف");
+        [self.privacyClosedButton setTitle:guardTitle forState:UIControlStateNormal];
+        self.privacyClosedButton.backgroundColor = guardArmed || closedActive ? privacyGreen : privacyGray;
     }
     NSString *autoTitle = autoArmed ? @"استعادة تلقائية: مفعلة 👑" : @"استعادة تلقائية: إيقاف";
     if (self.hostLockButton && ![self.hostLockButton.currentTitle isEqualToString:autoTitle]) {
@@ -3151,6 +3249,16 @@ static void OGSInstallHooks(void) {
         (unsigned long long)__atomic_load_n(&gOGSMasterReceiverEntries[4], __ATOMIC_RELAXED),
         (unsigned long long)__atomic_load_n(&gOGSMasterReceiverEntries[5], __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSMasterCacheRounds, __ATOMIC_RELAXED)];
+    details = [details stringByAppendingFormat:
+        @"\nStage26 EntryGuard armed=%u | reclose queued=%u | local closed samples=%u"
+         "\nEntryGuard no-master=%u | rate-limited=%u | changed-room disarms=%u"
+         "\nRoom close only blocks NEW joins when server accepts it; not an anti-host takeover guarantee.",
+        __atomic_load_n(&gOGSClosedGuardEnabled, __ATOMIC_ACQUIRE),
+        __atomic_load_n(&gOGSClosedGuardQueued, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSClosedGuardClosedObserved, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSClosedGuardNoAuthority, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSClosedGuardRateLimited, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSClosedGuardDisarmed, __ATOMIC_RELAXED)];
     details = [details stringByAppendingFormat:
         @"\nPhotonHandler.Update entry=%llu exit=%llu | privacy pending=%u | applied=%u | rejected=%u",
         (unsigned long long)__atomic_load_n(&gOGSPhotonHandlerUpdateCalls, __ATOMIC_RELAXED),
@@ -3404,11 +3512,49 @@ static void OGSInstallHooks(void) {
 }
 - (void)togglePrivacyHidden:(UIButton *)sender {
     (void)sender;
+    // Explicitly choosing hidden-but-open disables closed-room enforcement.
+    os_unfair_lock_lock(&gStateLock);
+    __atomic_store_n(&gOGSClosedGuardEnabled, 0u, __ATOMIC_RELEASE);
+    os_unfair_lock_unlock(&gStateLock);
     [self requestPrivacyMode:1u];
 }
 - (void)togglePrivacyClosed:(UIButton *)sender {
     (void)sender;
-    [self requestPrivacyMode:2u];
+    uintptr_t room = 0;
+    int32_t actor = 0, master = 0;
+    bool open = true, visible = true;
+    bool valid = OGSReadAutoRoom(&room, &actor, &master) &&
+                 OGSReadRoomPrivacy(room, &open, &visible);
+    os_unfair_lock_lock(&gStateLock);
+    bool sameArmed = __atomic_load_n(&gOGSClosedGuardEnabled, __ATOMIC_ACQUIRE) &&
+                     (!valid ||
+                      (gOGSClosedGuardRoom == room && gOGSClosedGuardActor == actor));
+    if (sameArmed)
+        __atomic_store_n(&gOGSClosedGuardEnabled, 0u, __ATOMIC_RELEASE);
+    os_unfair_lock_unlock(&gStateLock);
+    if (sameArmed) {
+        // Never reopen another room or after losing local MasterClient.
+        if (valid && actor == master)
+            [self requestPrivacyMode:3u forced:YES];
+        else
+            self.statusLabel.text = @"توقفت الحراسة؛ لم يتم فتح الروم بسبب غياب صلاحية الهوست";
+        return;
+    }
+    if (!valid || actor != master) {
+        self.statusLabel.text = @"الحراسة تحتاج غرفة ثابتة وأن تكون أنت الهوست محليًا";
+        return;
+    }
+    os_unfair_lock_lock(&gStateLock);
+    gOGSClosedGuardRoom = room;
+    gOGSClosedGuardActor = actor;
+    gOGSClosedGuardLastScan = 0.;
+    gOGSClosedGuardLastRequest = 0.;
+    gOGSClosedGuardWindowStart = 0.;
+    gOGSClosedGuardWindowRequests = 0;
+    __atomic_store_n(&gOGSClosedGuardEnabled, 1u, __ATOMIC_RELEASE);
+    os_unfair_lock_unlock(&gStateLock);
+    [self requestPrivacyMode:2u forced:YES];
+    self.statusLabel.text = @"حراسة الدخول مفعلة لهذه الغرفة؛ لا تمنع الموجودين من تبديل الهوست";
 }
 
 - (void)claimHostNow:(UIButton *)sender {
