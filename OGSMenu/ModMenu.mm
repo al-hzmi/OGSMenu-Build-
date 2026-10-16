@@ -700,6 +700,7 @@ static int32_t gOGSManualKickActor = 0; // gStateLock
 static uintptr_t gOGSManualKickRoom = 0; // gStateLock
 static double gOGSManualKickQueuedAt = 0.; // gStateLock
 static volatile uint32_t gOGSManualKickSubmitted = 0;
+static volatile uint32_t gOGSManualKickPreflightDenied = 0;
 static volatile uint32_t gOGSManualKickRejected = 0;
 static volatile uint32_t gOGSManualKickExpired = 0;
 static volatile uint32_t gOGSFilteredEvent203 = 0;
@@ -2677,7 +2678,7 @@ static void OGSInstallHooks(void) {
         self.menuPanel.hidden = YES;
 
         self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 5, 260, 18)];
-        self.titleLabel.text = @"OGS Stage 24 LAB | إدارة الروم";
+        self.titleLabel.text = @"OGS Stage 25 LAB | إدارة الروم";
         self.titleLabel.textColor = [UIColor whiteColor];
         self.titleLabel.textAlignment = NSTextAlignmentCenter;
         self.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
@@ -3164,11 +3165,14 @@ static void OGSInstallHooks(void) {
         (unsigned long long)__atomic_load_n(&gOGSMasterSwitchEvents, __ATOMIC_RELAXED)];
     details = [details stringByAppendingFormat:
         @"\nManual kick: pending=%u | local API accepted=%u | rejected=%u | expired=%u"
+         "\nStage25 kick UI denied=%u | wrong room/actor=%u"
          "\nSpeed setter: applied=%u | pending=%u | deferred=%u",
         __atomic_load_n(&gOGSManualKickPending, __ATOMIC_ACQUIRE),
         __atomic_load_n(&gOGSManualKickSubmitted, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSManualKickRejected, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSManualKickExpired, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSManualKickPreflightDenied, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSRecoveryScopeRejected, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSSpeedApplied, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGS.speedDirty, __ATOMIC_ACQUIRE),
         __atomic_load_n(&gOGSSpeedDeferred, __ATOMIC_RELAXED)];
@@ -3587,12 +3591,18 @@ static void OGSInstallHooks(void) {
     self.statusLabel.text = @"Stage22: تم تعطيل Hooks الشات الخاطئة لحماية الاستقرار";
 }
 
-- (void)triggerImmediateKick:(OGSPeerSnapshot)peer {
+- (BOOL)triggerImmediateKick:(OGSPeerSnapshot)peer {
+    int32_t local = __atomic_load_n(&gOGSPresenceActorID, __ATOMIC_ACQUIRE);
+    int32_t master = __atomic_load_n(&gOGSLocalMasterActorID, __ATOMIC_ACQUIRE);
     if (gOGSRosterLastRoom == 0 ||
-        __atomic_load_n(&gOGSPresenceActorID, __ATOMIC_ACQUIRE) !=
-        __atomic_load_n(&gOGSLocalMasterActorID, __ATOMIC_ACQUIRE)) {
-        self.statusLabel.text = @"لا يمكن طلب الطرد قبل التحقق أنك الهوست وأن القائمة حديثة";
-        return;
+        __atomic_load_n(&gOGSPresenceReadOnly, __ATOMIC_ACQUIRE) != 1 ||
+        local <= 0 || master <= 0 || local != master ||
+        peer.actorID <= 0 || peer.actorID == local) {
+        __atomic_fetch_add(&gOGSManualKickPreflightDenied, 1u, __ATOMIC_RELAXED);
+        self.statusLabel.text = local > 0 && master > 0 && local != master ?
+            [NSString stringWithFormat:@"لم يُرسل الطرد: الهوست المحلي هو اللاعب %d", master] :
+            @"لم يُرسل الطرد: الغرفة أو اللاعب غير مؤكد";
+        return NO;
     }
     NSString *pName = [NSString stringWithUTF8String:peer.name];
     NSString *normName = OGSNormalizeKey(pName);
@@ -3611,20 +3621,25 @@ static void OGSInstallHooks(void) {
     gOGSManualKickQueuedAt = CFAbsoluteTimeGetCurrent();
     os_unfair_lock_unlock(&gStateLock);
     __atomic_store_n(&gOGSManualKickPending, 1u, __ATOMIC_RELEASE);
+    return YES;
 }
 
 - (void)kickSelected:(UIButton *)s {
     OGSRoomSnapshot snapshot = OGSCurrentSnapshot();
-    if (!snapshot.count) return;
+    if (!snapshot.count) {
+        self.statusLabel.text = @"لم يُرسل الطرد: لا يوجد لاعب محدد بالقائمة";
+        return;
+    }
     uint32_t selected = __atomic_load_n(&gOGS.selectedPeer, __ATOMIC_ACQUIRE);
     if (selected >= snapshot.count) selected = 0;
 
     OGSPeerSnapshot peer = snapshot.peers[selected];
     NSString *pName = [NSString stringWithUTF8String:peer.name];
-    [self triggerImmediateKick:peer];
-    self.statusLabel.text = [NSString stringWithFormat:
-        @"طرد %@: طلب يدوي واحد ينتظر حدث Photon؛ راقب التشخيص",
-        pName ?: @"اللاعب"];
+    BOOL queued = [self triggerImmediateKick:peer];
+    if (queued)
+        self.statusLabel.text = [NSString stringWithFormat:
+            @"طرد %@: الطلب مجهّز محليًا ولم يؤكده الخادم", pName ?: @"اللاعب"];
+    // When the caller is not Master, retain the precise preflight failure.
 }
 
 - (void)banSelected:(UIButton *)s {
@@ -3638,11 +3653,11 @@ static void OGSInstallHooks(void) {
     NSString *normName = OGSNormalizeKey(pName);
 
     [self recordHijackerName:normName actorID:peer.actorID];
-    [self triggerImmediateKick:peer];
+    BOOL queued = [self triggerImmediateKick:peer];
     [self refreshUI];
-    self.statusLabel.text = [NSString stringWithFormat:
-        @"حفظ اسم %@ محليًا؛ طلب الطرد اليدوي لا يثبت خروجه",
-        pName ?: @"اللاعب"];
+    self.statusLabel.text = queued ?
+        [NSString stringWithFormat:@"حُفظ الاسم محليًا؛ طلب طرد %@ مجهّز فقط", pName ?: @"اللاعب"] :
+        [NSString stringWithFormat:@"حُفظ الاسم محليًا؛ لم يُرسل طرد %@", pName ?: @"اللاعب"];
 }
 
 - (void)toggleRoomLock:(UIButton *)s {
