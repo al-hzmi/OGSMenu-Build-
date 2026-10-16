@@ -1365,6 +1365,19 @@ static volatile uint32_t gGodLocalBypasses = 0;
 static volatile uint32_t gGodOtherPlayerPasses = 0;
 static volatile uint32_t gGodUnverifiedPasses = 0;
 
+// Stage 21 practice: observe legitimate hits from a selected peer only.
+// Never modify health, hit damage, killer attribution, currency or Photon RPC.
+static volatile uint32_t gOGSPracticeArmed = 0;
+static volatile int32_t gOGSPracticeShooter = 0;
+static volatile uint32_t gOGSPracticeIncomingHits = 0;
+static volatile uint32_t gOGSPracticeVerifiedHits = 0;
+static volatile uint32_t gOGSPracticeOtherHits = 0;
+static volatile uint32_t gOGSPracticeExpired = 0;
+static double gOGSPracticeStart = 0.;  // protected by gStateLock
+static uintptr_t gOGSPracticeRoom = 0; // protected by gStateLock
+static int32_t gOGSPracticeLocalActor = 0; // protected by gStateLock
+
+
 // Verified in the original fps 3.4.0 ARM64 executable:
 // PlayerNetwork.GetPhotonView RVA 0x13A9964 (self -> PhotonView),
 // PhotonView.ownerId at +0x20,
@@ -1422,6 +1435,35 @@ static void OGSBridgeOutgoingDamage(void *self, void *values, const void *method
 
 static void OGSBridgeIncomingDamage(void *self, void *values, int32_t killerID, const void *method) {
     __atomic_fetch_add(&gGodCallbacks, 1u, __ATOMIC_RELAXED);
+    if (__atomic_load_n(&gOGSPracticeArmed, __ATOMIC_ACQUIRE)) {
+        __atomic_fetch_add(&gOGSPracticeIncomingHits, 1u, __ATOMIC_RELAXED);
+        double started = 0.;
+        uintptr_t expectedRoom = 0;
+        int32_t expectedActor = 0;
+        os_unfair_lock_lock(&gStateLock);
+        started = gOGSPracticeStart;
+        expectedRoom = gOGSPracticeRoom;
+        expectedActor = gOGSPracticeLocalActor;
+        os_unfair_lock_unlock(&gStateLock);
+        double now = CFAbsoluteTimeGetCurrent();
+        if (started <= 0. || now - started > 45.) {
+            if (__atomic_exchange_n(&gOGSPracticeArmed, 0u, __ATOMIC_ACQ_REL))
+                __atomic_fetch_add(&gOGSPracticeExpired, 1u, __ATOMIC_RELAXED);
+        } else {
+            uintptr_t room = 0;
+            int32_t actor = 0, master = 0;
+            bool isVerified = false;
+            bool isSelf = OGSIsDamageToLocalPlayer(self, &isVerified);
+            if (isVerified && isSelf &&
+                OGSReadAutoRoom(&room, &actor, &master) &&
+                room == expectedRoom && actor == expectedActor) {
+                if (killerID == __atomic_load_n(&gOGSPracticeShooter, __ATOMIC_ACQUIRE))
+                    __atomic_fetch_add(&gOGSPracticeVerifiedHits, 1u, __ATOMIC_RELAXED);
+                else
+                    __atomic_fetch_add(&gOGSPracticeOtherHits, 1u, __ATOMIC_RELAXED);
+            }
+        }
+    }
     if (self && __atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE)) {
         bool verified = false;
         bool isLocalOwner = OGSIsDamageToLocalPlayer(self, &verified);
@@ -2352,7 +2394,7 @@ static void OGSInstallHooks(void) {
         CGFloat menuViewportHeight = MIN(358.0, MAX(160.0, CGRectGetHeight(gw.bounds) - 26.0));
         CGFloat menuX = MAX(8.0, MIN(75.0, CGRectGetWidth(gw.bounds) - 323.0));
         self.menuPanel = [[UIScrollView alloc] initWithFrame:CGRectMake(menuX, 18, 315, menuViewportHeight)];
-        self.menuPanel.contentSize = CGSizeMake(315, 358);
+        self.menuPanel.contentSize = CGSizeMake(315, 394);
         self.menuPanel.alwaysBounceVertical = NO;
         self.menuPanel.showsVerticalScrollIndicator = YES;
         self.menuPanel.clipsToBounds = YES;
@@ -2363,7 +2405,7 @@ static void OGSInstallHooks(void) {
         self.menuPanel.hidden = YES;
 
         self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 5, 260, 18)];
-        self.titleLabel.text = @"OGS Stage 20 | إدارة الروم";
+        self.titleLabel.text = @"OGS Stage 21 LAB | إدارة الروم";
         self.titleLabel.textColor = [UIColor whiteColor];
         self.titleLabel.textAlignment = NSTextAlignmentCenter;
         self.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
@@ -2447,6 +2489,9 @@ static void OGSInstallHooks(void) {
         self.privacyClosedButton = [self makeBtn:CGRectMake(161, 319, 144, 30)
             title:@"خاص ومغلق: إيقاف" bg:darkGray action:@selector(togglePrivacyClosed:)];
         [self.menuPanel addSubview:self.privacyClosedButton];
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(10, 354, 295, 30)
+            title:@"اختبار الاستسلام: اللاعب المحدد"
+            bg:hostBlue action:@selector(startPracticeSurrender:)]];
 
         [self.containerView addSubview:self.menuPanel];
         self.containerView.floatingButton = self.floatingButton;
@@ -2803,6 +2848,16 @@ static void OGSInstallHooks(void) {
         (unsigned long long)__atomic_load_n(&gOGSNetworkEvents, __ATOMIC_RELAXED),
         (unsigned long long)__atomic_load_n(&gOGSMasterSwitchEvents, __ATOMIC_RELAXED)];
     details = [details stringByAppendingFormat:
+        @"\nStage21 practice: armed=%u | shooter=%d | incoming=%u"
+         "\nVerified selected hits=%u | other hits=%u | expired=%u"
+         "\nRead-only: damage and rewards are never modified.",
+        __atomic_load_n(&gOGSPracticeArmed, __ATOMIC_ACQUIRE),
+        __atomic_load_n(&gOGSPracticeShooter, __ATOMIC_ACQUIRE),
+        __atomic_load_n(&gOGSPracticeIncomingHits, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSPracticeVerifiedHits, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSPracticeOtherHits, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSPracticeExpired, __ATOMIC_RELAXED)];
+    details = [details stringByAppendingFormat:
         @"\nManual kick: pending=%u | local API accepted=%u | rejected=%u | expired=%u"
          "\nSpeed setter: applied=%u | pending=%u | deferred=%u",
         __atomic_load_n(&gOGSManualKickPending, __ATOMIC_ACQUIRE),
@@ -3147,6 +3202,68 @@ static void OGSInstallHooks(void) {
     self.statusLabel.text = master != localActor ?
         @"الاستعادة التفاعلية تنتظر حدث Photon؛ 3 طلبات سريعة، و6 بكل دقيقة" :
         @"الاستعادة التفاعلية مستمرة؛ تشترك اليدوية والتلقائية في الحد";
+}
+
+- (void)startPracticeSurrender:(UIButton *)sender {
+    (void)sender;
+    if (__atomic_exchange_n(&gOGSPracticeArmed, 0u, __ATOMIC_ACQ_REL)) {
+        self.statusLabel.text = @"أُلغيت تجربة مراقبة الاستسلام";
+        return;
+    }
+    OGSRoomSnapshot snapshot = OGSCurrentSnapshot();
+    uint32_t selection = __atomic_load_n(&gOGS.selectedPeer, __ATOMIC_ACQUIRE);
+    if (!snapshot.inRoom || !snapshot.count || selection >= snapshot.count) {
+        self.statusLabel.text = @"اختر اللاعب الذي تريد التدريب معه أولًا";
+        return;
+    }
+    OGSPeerSnapshot target = snapshot.peers[selection];
+    uintptr_t room = 0;
+    int32_t actor = 0, master = 0;
+    if (!OGSReadAutoRoom(&room, &actor, &master) ||
+        target.actorID <= 0 || target.actorID == actor) {
+        self.statusLabel.text = @"تعذر تأكيد الغرفة واللاعب المحدد";
+        return;
+    }
+    NSString *displayName = [NSString stringWithUTF8String:target.name] ?: @"اللاعب";
+    UIAlertController *confirm = [UIAlertController
+       alertControllerWithTitle:@"اختبار مكافأة قتل حقيقية"
+       message:[NSString stringWithFormat:
+         @"سنوقف الدرع ونراقب ضربات %@ لمدة 45 ثانية. "
+          "اطلب منه إصابتك داخل المباراة بالطريقة المعتادة. "
+          "لا نعدل الضرر أو المكافآت؛ افحص رصيده على جهازه.", displayName]
+       preferredStyle:UIAlertControllerStyleAlert];
+    [confirm addAction:[UIAlertAction actionWithTitle:@"إلغاء"
+        style:UIAlertActionStyleCancel handler:nil]];
+    [confirm addAction:[UIAlertAction actionWithTitle:@"بدء الاختبار"
+        style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+            (void)action;
+            uintptr_t confirmedRoom = 0;
+            int32_t confirmedActor = 0, confirmedMaster = 0;
+            if (!OGSReadAutoRoom(&confirmedRoom, &confirmedActor, &confirmedMaster) ||
+                confirmedRoom != room || confirmedActor != actor) {
+                self.statusLabel.text = @"تغيّرت الغرفة؛ أعد الاختبار";
+                return;
+            }
+            if (!OGSInstallDamageHookOnDemand(true)) {
+                self.statusLabel.text = @"يلزم ملف IPA مجهّز بجسر الضرر قبل التوقيع";
+                return;
+            }
+            if (__atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE))
+                [self toggleGodMode:self.godModeButton];
+            os_unfair_lock_lock(&gStateLock);
+            gOGSPracticeStart = CFAbsoluteTimeGetCurrent();
+            gOGSPracticeRoom = confirmedRoom;
+            gOGSPracticeLocalActor = confirmedActor;
+            __atomic_store_n(&gOGSPracticeShooter, target.actorID, __ATOMIC_RELEASE);
+            __atomic_store_n(&gOGSPracticeArmed, 1u, __ATOMIC_RELEASE);
+            os_unfair_lock_unlock(&gStateLock);
+            self.statusLabel.text = [NSString stringWithFormat:
+                @"مراقبة إصابات %@ لمدة 45 ثانية؛ فلوسه تُقاس على جهازه",
+                displayName];
+        }]];
+    UIViewController *root = [self gameMainWindow].rootViewController;
+    if (root && !root.presentedViewController)
+        [root presentViewController:confirm animated:YES completion:nil];
 }
 
 - (void)toggleGodMode:(UIButton *)s {
