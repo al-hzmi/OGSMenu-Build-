@@ -727,6 +727,13 @@ static volatile uint32_t gOGSAutoRejoinApprovals = 0;
 // token bucket. Never patch local master fields or run engine APIs on UIKit.
 // Manual and automatic recovery share one quota in the same room.
 static volatile uint32_t gOGSAutoPendingLoss = 0;
+// OGS27: a cached MasterClient callback can run outside OnEvent.
+// Wake the already-bounded recovery dispatcher on the NEXT Photon Update,
+// not from the callback or a UIKit timer. Coalesce repeated notifications.
+static volatile uint32_t gOGSHostSwitchWakePending = 0;
+static volatile uint64_t gOGSHostSwitchWakeSignals = 0;
+static volatile uint64_t gOGSHostSwitchFastProbes = 0;
+static volatile uint64_t gOGSHostSwitchManualFastProbes = 0;
 static volatile uint32_t gOGSAutoDeferredQueued = 0;
 static volatile uint32_t gOGSAutoDeferredExecuted = 0;
 static volatile uint32_t gOGSAutoDeferredCancelled = 0;
@@ -841,6 +848,7 @@ static void OGSDisarmAutoRoom(void) {
         __atomic_fetch_add(&gOGSAutoDeferredCancelled, 1u, __ATOMIC_RELAXED);
     gOGSAutoAttemptedPending = false;
     gOGSAutoSawOwnedMaster = false;
+    __atomic_store_n(&gOGSHostSwitchWakePending, 0u, __ATOMIC_RELEASE);
     os_unfair_lock_unlock(&gStateLock);
 }
 
@@ -861,6 +869,7 @@ static void OGSArmAutoRoomBounded(uintptr_t room, int32_t actor, int32_t master)
     }
     gOGSAutoRoom = room;
     gOGSAutoOwner = actor;
+    __atomic_store_n(&gOGSHostSwitchWakePending, 1u, __ATOMIC_RELEASE);
     gOGSAutoAttemptedPending = false;
     gOGSAutoSawOwnedMaster = (master == actor);
     __atomic_store_n(&gOGSAutoPendingLoss, master != actor ? 1u : 0u,
@@ -1839,20 +1848,28 @@ static void hook_PhotonHandlerUpdate(void *self, void *method) {
     if (__atomic_load_n(&gOGSPrivacyPending, __ATOMIC_ACQUIRE))
         OGSProcessRoomPrivacyOnEvent();
 
-    // Still service pending intents when the room has no incoming events
-    // or when event 203 is deliberately filtered by this client.
+    // Fast-path for verified MasterClient callback notifications and manual
+    // recovery taps: sample fresh Photon state on this frame, not after the
+    // normal 120ms fallback. Neither path bypasses the shared request quota.
+    // Coalescing prevents six Unity callbacks for one transfer from causing
+    // six property-change submissions.
     if (__atomic_load_n(&gOGSAutoEnabled, __ATOMIC_ACQUIRE) ||
         __atomic_load_n(&gOGSManualRecoveryPending, __ATOMIC_ACQUIRE)) {
         bool due = false;
+        uint32_t wake = __atomic_exchange_n(&gOGSHostSwitchWakePending, 0u,
+                                             __ATOMIC_ACQ_REL);
         double tick = CFAbsoluteTimeGetCurrent();
         os_unfair_lock_lock(&gStateLock);
-        if (gOGSRecoveryLastUpdateProbeAt <= 0. ||
+        if (wake || gOGSRecoveryLastUpdateProbeAt <= 0. ||
             tick - gOGSRecoveryLastUpdateProbeAt >= 0.12) {
             gOGSRecoveryLastUpdateProbeAt = tick;
             due = true;
         }
         os_unfair_lock_unlock(&gStateLock);
         if (due) {
+            if (wake)
+                __atomic_fetch_add(&gOGSHostSwitchFastProbes, 1ULL,
+                                   __ATOMIC_RELAXED);
             __atomic_fetch_add(&gOGSRecoveryUpdateProbes, 1u, __ATOMIC_RELAXED);
             OGSProcessRecoveryOnPhotonCallback(0u, 0, 0, true);
         }
@@ -2030,9 +2047,23 @@ static void OGSHandleMasterSwitchIntercept(void *newMasterPlayer) {
     double entered = gOGS.roomEnterTime;
     os_unfair_lock_unlock(&gStateLock);
     bool active = __atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE);
-    if (active && entered > 0.0 && (now - entered) > 0.5 &&
-        __atomic_load_n(&gOGS.autoHostOn, __ATOMIC_ACQUIRE)) {
-        __atomic_store_n(&gOGS.forceHostReq, 1, __ATOMIC_RELEASE);
+    if (active && entered > 0.0 && (now - entered) > 0.5) {
+        // OnEvent dispatch already calls recovery after original returns.
+        // Only external Unity SendMessage callbacks need a faster Update wake.
+        bool insideEvent = __atomic_load_n(&gOGS.insideNetworkEvent,
+                                           __ATOMIC_ACQUIRE) > 0;
+        if (!insideEvent &&
+            (__atomic_load_n(&gOGSAutoEnabled, __ATOMIC_ACQUIRE) ||
+             __atomic_load_n(&gOGSManualRecoveryPending, __ATOMIC_ACQUIRE))) {
+            __atomic_store_n(&gOGSHostSwitchWakePending, 1u,
+                             __ATOMIC_RELEASE);
+            __atomic_fetch_add(&gOGSHostSwitchWakeSignals, 1ULL,
+                               __ATOMIC_RELAXED);
+        }
+        // Preserve the disabled legacy monitor behavior without issuing a
+        // SetMasterClient request from the Unity callback itself.
+        if (__atomic_load_n(&gOGS.autoHostOn, __ATOMIC_ACQUIRE))
+            __atomic_store_n(&gOGS.forceHostReq, 1, __ATOMIC_RELEASE);
     }
 }
 
@@ -2816,7 +2847,7 @@ static void OGSInstallHooks(void) {
         self.menuPanel.hidden = YES;
 
         self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 5, 260, 18)];
-        self.titleLabel.text = @"OGS Stage 27 LAB | إدارة الروم";
+        self.titleLabel.text = @"OGS27 | إدارة الروم";
         self.titleLabel.textColor = [UIColor whiteColor];
         self.titleLabel.textAlignment = NSTextAlignmentCenter;
         self.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
@@ -3400,8 +3431,15 @@ static void OGSInstallHooks(void) {
         __atomic_load_n(&gOGSManualRecoveryFailed, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSManualRecoverySkipped, __ATOMIC_RELAXED)];
     details = [details stringByAppendingFormat:
-        @"\nStage 20 recovery probes: Photon Update=%u | OnEvent=%u"
-         "\nUpdate fallback runs at most ~8 times/s (not network sends)."
+        @"\nOGS27 Fast host wake: callback signals=%llu | fast Update probes=%llu | manual wake taps=%llu | pending=%u"
+         "\nFast wake is ONE local ownership check on next Photon frame. It never bypasses request quotas.",
+        (unsigned long long)__atomic_load_n(&gOGSHostSwitchWakeSignals, __ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&gOGSHostSwitchFastProbes, __ATOMIC_RELAXED),
+        (unsigned long long)__atomic_load_n(&gOGSHostSwitchManualFastProbes, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSHostSwitchWakePending, __ATOMIC_ACQUIRE)];
+    details = [details stringByAppendingFormat:
+        @"\nRecovery probes: Photon Update=%u | OnEvent=%u"
+         "\nRoutine fallback is at most ~8 times/s; event/manual fast wakes may be sooner."
          "\nServer-confirmed MasterClient: not measurable by these local-only counters.",
         __atomic_load_n(&gOGSRecoveryUpdateProbes, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSRecoveryEventProbes, __ATOMIC_RELAXED)];
@@ -3650,8 +3688,12 @@ static void OGSInstallHooks(void) {
     gOGSManualRecoveryQueuedAt = now;
     gOGSManualRecoveryDeferredCounted = false;
     __atomic_store_n(&gOGSManualRecoveryPending, 1u, __ATOMIC_RELEASE);
+    // Wake the next Photon frame immediately instead of awaiting up to 120ms.
+    __atomic_store_n(&gOGSHostSwitchWakePending, 1u, __ATOMIC_RELEASE);
+    __atomic_fetch_add(&gOGSHostSwitchManualFastProbes, 1ULL,
+                       __ATOMIC_RELAXED);
     os_unfair_lock_unlock(&gStateLock);
-    self.statusLabel.text = @"طلب يدوي معلّق حتى 12 ثانية؛ ضمن نفس الحد المشترك، وليس إثبات استعادة";
+    self.statusLabel.text = @"طلب استعادة جاهز لأول إطار Photon؛ نجاحه يعتمد على الخادم وحدود المحاولات";
 }
 
 - (void)toggleAutoHost:(UIButton *)s {
@@ -3699,7 +3741,7 @@ static void OGSInstallHooks(void) {
                 [s setTitle:@"استعادة تلقائية: مفعلة 👑" forState:UIControlStateNormal];
                 s.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
                 self.statusLabel.text = verifiedLocal == verifiedMaster ?
-                    @"أنت الهوست الآن؛ تمت حماية الروم الحالي" :
+                    @"أنت الهوست محليًا؛ مراقبة الفقدان مفعلة" :
                     @"الاستعادة التفاعلية مفعلة؛ 3 طلبات سريعة كحد أقصى، و6 بكل دقيقة";
             }]];
         UIViewController *root = [self gameMainWindow].rootViewController;
