@@ -171,8 +171,9 @@ static Update0Fn orig_WorkerInGameDisconnected = NULL;
 
 static ApplyDamageFn  orig_ApplyDamage = NULL;
 static DamageRemoteFn orig_DamageRemote = NULL;
-typedef void (*KnifeShoot28Fn)(void*, Vector3, Vector3, const void*);
-static KnifeShoot28Fn orig_KnifeShoot28 = NULL;
+// FPSWeapon.FireOneShot() instance ABI: self, MethodInfo* (MD30438).
+typedef void (*KnifeFire28Fn)(void*, const void*);
+static KnifeFire28Fn orig_KnifeFire28 = NULL;
 
 // ============================================================
 // MARK: - Thread-Safe Runtime State & Locks
@@ -1504,7 +1505,9 @@ static volatile uint32_t gGodLocalBypasses = 0;
 static volatile uint32_t gGodOtherPlayerPasses = 0;
 static volatile uint32_t gGodUnverifiedPasses = 0;
 static volatile uint32_t gKnife28On = 0, gKnife28Calls = 0, gKnife28Swaps = 0;
-static volatile int32_t gKnife28Old = 0;
+static volatile uint32_t gKnife28OldFloatBits = 0;
+static volatile uint32_t gKnife28PrivateSkipped = 0;
+static volatile uint32_t gKnife28RangeInvalid = 0;
 static uintptr_t gKnife28Room = 0; // gStateLock
 static int32_t gKnife28Actor = 0;   // gStateLock
 
@@ -1563,40 +1566,65 @@ static void OGSBridgeOutgoingDamage(void *self, void *values, const void *method
     if (orig_ApplyDamage) orig_ApplyDamage(self, values, method);
 }
 
-// Game's ShootBullet selects knifeRange at +0x10C for weaponType 4.
-// Temporary client-side raycast range, only in our closed hidden room.
-static void hook_KnifeShoot28(void *self, Vector3 a, Vector3 b, const void *m) {
+// OGS28 PRIVATE TEST. Verified in fps 3.4.0 ARM64:
+// FPSWeapon.FireOneShot() MD30438/MI27851 (RVA 0x137F584),
+// FPSWeapon.bulletRange = float at +0x158,
+// FPSWeapon.knifeRange  = float at +0x15C.
+// Native code passes +/- knifeRange to repeated direction perturbations;
+// it is NOT proven to be a server-authoritative melee reach value.
+// Try only a bounded 2x multiplier around ONE shot in a closed, hidden room.
+static void hook_KnifeFire28(void *self, const void *method) {
     __atomic_fetch_add(&gKnife28Calls, 1u, __ATOMIC_RELAXED);
-    int32_t old=0; bool modified=false;
+    bool patched = false;
+    uintptr_t field = (uintptr_t)self + 0x15Cu;
+    uint32_t originalBits = 0, trialBits = 0;
     if (self && __atomic_load_n(&gKnife28On, __ATOMIC_ACQUIRE)) {
-        uintptr_t room=0,wanted=0,desc=0;
-        int32_t actor=0,master=0,owner=0,kind=0;
-        bool open=true,visible=true;
+        uintptr_t room = 0, wantedRoom = 0;
+        int32_t actor = 0, master = 0, wantedActor = 0;
+        bool open = true, visible = true;
         os_unfair_lock_lock(&gStateLock);
-        wanted=gKnife28Room; owner=gKnife28Actor;
+        wantedRoom = gKnife28Room;
+        wantedActor = gKnife28Actor;
         os_unfair_lock_unlock(&gStateLock);
-        if (OGSReadAutoRoom(&room,&actor,&master) && room==wanted &&
-            actor==owner && actor==master &&
-            OGSReadRoomPrivacy(room,&open,&visible) && !open && !visible &&
-            OGSReadMemory((uintptr_t)self+0xA8,&desc,sizeof(desc)) &&
-            desc>=0x100000000ULL &&
-            OGSReadMemory(desc+0x24,&kind,sizeof(kind)) && kind==4 &&
-            OGSReadMemory((uintptr_t)self+0x10C,&old,sizeof(old)) &&
-            old>=1 && old<=100 &&
-            OGSIsWritableMappedSlot((uintptr_t)self+0x108)) {
-            __atomic_store_n((int32_t*)((uintptr_t)self+0x10C),1000,__ATOMIC_RELEASE);
-            __atomic_store_n(&gKnife28Old,old,__ATOMIC_RELEASE);
-            __atomic_fetch_add(&gKnife28Swaps,1u,__ATOMIC_RELAXED);
-            modified=true;
+        bool privateOwned = OGSReadAutoRoom(&room, &actor, &master) &&
+            room == wantedRoom && actor == wantedActor && master == actor &&
+            OGSReadRoomPrivacy(room, &open, &visible) && !open && !visible;
+        if (!privateOwned) {
+            __atomic_fetch_add(&gKnife28PrivateSkipped, 1u, __ATOMIC_RELAXED);
+        } else {
+            float original = 0.0f;
+            if (OGSReadMemory(field, &original, sizeof(original)) &&
+                isfinite(original) && original > 0.001f &&
+                original < 100.0f && OGSIsWritableMappedSlot(field)) {
+                float trial = fminf(original * 2.0f, 100.0f);
+                memcpy(&originalBits, &original, sizeof(originalBits));
+                memcpy(&trialBits, &trial, sizeof(trialBits));
+                uint32_t expected = originalBits;
+                if (__atomic_compare_exchange_n((uint32_t *)field,
+                    &expected, trialBits, false, __ATOMIC_ACQ_REL,
+                    __ATOMIC_ACQUIRE)) {
+                    patched = true;
+                    __atomic_store_n(&gKnife28OldFloatBits, originalBits,
+                                     __ATOMIC_RELEASE);
+                    __atomic_fetch_add(&gKnife28Swaps, 1u,
+                                       __ATOMIC_RELAXED);
+                }
+            } else {
+                __atomic_fetch_add(&gKnife28RangeInvalid, 1u,
+                                   __ATOMIC_RELAXED);
+            }
         }
     }
-    auto original=__atomic_load_n(&orig_KnifeShoot28,__ATOMIC_ACQUIRE);
-    if(original) original(self,a,b,m);
-    if(modified) {
-        int32_t current=0;
-        uintptr_t addr=(uintptr_t)self+0x10C;
-        if(OGSReadMemory(addr,&current,sizeof(current)) && current==1000)
-            __atomic_store_n((int32_t*)addr,old,__ATOMIC_RELEASE);
+    KnifeFire28Fn original = __atomic_load_n(&orig_KnifeFire28,
+                                             __ATOMIC_ACQUIRE);
+    if (original) original(self, method);
+    // Do not undo legitimate game changes to this field during FireOneShot.
+    // Restore only when the temporary test value is still present.
+    if (patched && OGSIsWritableMappedSlot(field)) {
+        uint32_t expected = trialBits;
+        __atomic_compare_exchange_n((uint32_t *)field, &expected, originalBits,
+                                    false, __ATOMIC_ACQ_REL,
+                                    __ATOMIC_ACQUIRE);
     }
 }
 static void OGSBridgeIncomingDamage(void *self, void *values, int32_t killerID, const void *method) {
@@ -2472,8 +2500,9 @@ static void OGSRepairMasterReceiverCaches(void) {
     OGSRepairMasterReceiverCacheOne(7, 4821, 31024, 0x060002DCu, 0,
         0x01428224u, (void *)&hook_WorkerInGameDisconnected,
         (void **)&orig_WorkerInGameDisconnected);
-    OGSRepairMasterReceiverCacheOne(8,4705,30439,0x06000151u,2,0x01381B50u,
-        (void *)&hook_KnifeShoot28,(void **)&orig_KnifeShoot28);
+    OGSRepairMasterReceiverCacheOne(8, 4705, 30438, 0x06000150u, 0,
+        0x0137F584u, (void *)&hook_KnifeFire28,
+        (void **)&orig_KnifeFire28);
 }
 
 // Stage 2: read-only Photon presence. No IL2CPP/Photon function calls
@@ -2723,8 +2752,9 @@ static void OGSInstallHooks(void) {
                           actual ? 2u : 3u, __ATOMIC_RELEASE);
     }
     OGSInstallPointerSlotHook(gOffsets.tblLeaveRoom, (void *)&hook_LeaveRoom, (void **)&orig_LeaveRoom);
-    OGSInstallPointerSlotHook(0x0238EA60u,(void *)&hook_KnifeShoot28,
-                              (void **)&orig_KnifeShoot28);
+    // FPSWeapon.FireOneShot: MI27851, method pointer slot=0x2358400+MI*8.
+    OGSInstallPointerSlotHook(0x0238EA58u, (void *)&hook_KnifeFire28,
+                              (void **)&orig_KnifeFire28);
     // Verified Unity callback entry: WorkerInGame.OnDisconnectedFromPhoton.
     // Never suppress or mutate network disconnect handling.
     OGSInstallPointerSlotHook(0x02392638u,
@@ -2948,7 +2978,7 @@ static void OGSInstallHooks(void) {
         self.godModeButton = [self makeBtn:CGRectMake(155, 179, 150, 30) title:@"درع الحماية: متوقف 🛡️" bg:darkGray action:@selector(toggleGodMode:)];
         [self.menuPanel addSubview:self.godModeButton];
 
-        self.magicBulletButton = [self makeBtn:CGRectMake(10, 179, 140, 30) title:@"مدى السكين: إيقاف" bg:darkGray action:@selector(toggleKnife28:)];
+        self.magicBulletButton = [self makeBtn:CGRectMake(10, 179, 140, 30) title:@"مختبر السكين: إيقاف" bg:darkGray action:@selector(toggleKnife28:)];
         [self.menuPanel addSubview:self.magicBulletButton];
 
         self.muteChatButton = [self makeBtn:CGRectMake(105, 214, 95, 30) title:@"الشات: معطل مؤقتًا" bg:darkGray action:@selector(cycleChatMode:)];
@@ -3381,13 +3411,16 @@ static void OGSInstallHooks(void) {
         __atomic_load_n(&gOGSClosedGuardRateLimited, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSClosedGuardDisarmed, __ATOMIC_RELAXED)];
     details = [details stringByAppendingFormat:
-        @"\nOGS28 KnifeLab ON=%u | cache=%u | ShootBullet=%u | changed=%u | original range=%d"
-         "\nPrivate, local-only range test; no fabricated network damage.",
-        __atomic_load_n(&gKnife28On,__ATOMIC_ACQUIRE),
-        __atomic_load_n(&gOGSMasterCacheStatus[8],__ATOMIC_ACQUIRE),
-        __atomic_load_n(&gKnife28Calls,__ATOMIC_RELAXED),
-        __atomic_load_n(&gKnife28Swaps,__ATOMIC_RELAXED),
-        __atomic_load_n(&gKnife28Old,__ATOMIC_ACQUIRE)];
+        @"\nOGS28 KnifeLab armed=%u | cache=%u | FireOneShot calls=%u | temporary x2 samples=%u"
+         "\nSkipped (not private/master)=%u | invalid float=%u | last original bits=0x%x"
+         "\nExperimental float direction/spread; NOT proven knife hit distance or server acceptance.",
+        __atomic_load_n(&gKnife28On, __ATOMIC_ACQUIRE),
+        __atomic_load_n(&gOGSMasterCacheStatus[8], __ATOMIC_ACQUIRE),
+        __atomic_load_n(&gKnife28Calls, __ATOMIC_RELAXED),
+        __atomic_load_n(&gKnife28Swaps, __ATOMIC_RELAXED),
+        __atomic_load_n(&gKnife28PrivateSkipped, __ATOMIC_RELAXED),
+        __atomic_load_n(&gKnife28RangeInvalid, __ATOMIC_RELAXED),
+        __atomic_load_n(&gKnife28OldFloatBits, __ATOMIC_ACQUIRE)];
     details = [details stringByAppendingFormat:
         @"\nStage27 LeaveRoom cache=%u | local disconnect cache=%u | strict lock=%u"
          "\nLeaveRoom entry=%u blocked=%u forwarded=%u | DemoLeave entry=%u blocked=%u forwarded=%u"
@@ -3846,7 +3879,7 @@ static void OGSInstallHooks(void) {
 - (void)toggleKnife28:(UIButton *)s {
     if(__atomic_load_n(&gKnife28On,__ATOMIC_ACQUIRE)) {
         __atomic_store_n(&gKnife28On,0u,__ATOMIC_RELEASE);
-        [s setTitle:@"مدى السكين: إيقاف" forState:UIControlStateNormal];
+        [s setTitle:@"مختبر السكين: إيقاف" forState:UIControlStateNormal];
         s.backgroundColor=[UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
         self.statusLabel.text=@"انتهت تجربة مدى السكين";return;
     }
@@ -3865,9 +3898,9 @@ static void OGSInstallHooks(void) {
     gKnife28Room=room;gKnife28Actor=me;
     os_unfair_lock_unlock(&gStateLock);
     __atomic_store_n(&gKnife28On,1u,__ATOMIC_RELEASE);
-    [s setTitle:@"مدى السكين: تجربة" forState:UIControlStateNormal];
+    [s setTitle:@"مختبر السكين: ×2" forState:UIControlStateNormal];
     s.backgroundColor=[UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
-    self.statusLabel.text=@"اختبار مدى السكين محليًا 1000؛ لا يضمن تسجيل القتل";
+    self.statusLabel.text=@"اختبار ×2 لقيمة knifeRange في الروم الخاص؛ قد تؤثر على التشتت لا المسافة";
 }
 - (void)toggleMagicBullet:(UIButton *)s {
     int32_t current = __atomic_load_n(&gOGS.magicBulletOn, __ATOMIC_ACQUIRE);
