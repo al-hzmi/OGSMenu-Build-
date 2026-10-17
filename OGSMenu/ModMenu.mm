@@ -167,6 +167,7 @@ static OnMasterSwitchFn orig_OnMasterSwitch4 = NULL;
 static OnMasterSwitchFn orig_OnMasterSwitch5 = NULL;
 // MD31058: GameLogic.OnMasterClientSwitched() has NO PhotonPlayer argument.
 static void (*orig_GameLogicMasterSwitch)(void *, void *) = NULL;
+static Update0Fn orig_WorkerInGameDisconnected = NULL;
 
 static ApplyDamageFn  orig_ApplyDamage = NULL;
 static DamageRemoteFn orig_DamageRemote = NULL;
@@ -1566,9 +1567,20 @@ static volatile uint64_t gOGSCashHookCalls = 0;
 static volatile uint64_t gOGSChatHookCalls = 0;
 static volatile uint64_t gOGSNetworkEvents = 0;
 static volatile uint64_t gOGSMasterSwitchEvents = 0;
+// Stage27: distinguish local LeaveRoom attempts, suppressed attempts,
+// and separate Unity OnDisconnectedFromPhoton notifications.
+static volatile uint32_t gOGSLeaveRoomHookEntries = 0;
+static volatile uint32_t gOGSLeaveRoomBlocked = 0;
+static volatile uint32_t gOGSLeaveRoomForwarded = 0;
+static volatile uint32_t gOGSDemoLeaveEntries = 0;
+static volatile uint32_t gOGSDemoLeaveBlocked = 0;
+static volatile uint32_t gOGSDemoLeaveForwarded = 0;
+static volatile uint32_t gOGSWorkerPhotonDisconnectNotices = 0;
+static volatile uint32_t gOGSObservedRoomDisappearances = 0;
 // Stage24: callback entries are NOT unique transfers. Index 5 = GameLogic.
 static volatile uint64_t gOGSMasterReceiverEntries[6] = {0};
-static volatile uint32_t gOGSMasterCacheStatus[6] = {0};
+// Index 6 = PhotonNetwork.LeaveRoom, 7 = WorkerInGame.OnDisconnectedFromPhoton.
+static volatile uint32_t gOGSMasterCacheStatus[8] = {0};
 static volatile uint32_t gOGSMasterCacheRounds = 0;
 static volatile uint64_t gOGSMasterRepairFrameTicks = 0;
 static volatile int32_t gOGSHostMonitorOn = 1;
@@ -1960,6 +1972,7 @@ static void hook_OnEvent(void *self, void *eventData, void *method) {
 }
 
 static bool hook_LeaveRoom(int32_t becomeInactive, void *method) {
+    __atomic_fetch_add(&gOGSLeaveRoomHookEntries, 1u, __ATOMIC_RELAXED);
     double now = CFAbsoluteTimeGetCurrent();
     os_unfair_lock_lock(&gStateLock);
     double enterTime = gOGS.roomEnterTime;
@@ -1973,12 +1986,17 @@ static bool hook_LeaveRoom(int32_t becomeInactive, void *method) {
 
     if (inRoomNow && (gOGS.antiKickHardLock || insideNet || (settled && recentThreat))) {
         __atomic_fetch_add(&gOGS.blockedKicksCount, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&gOGSLeaveRoomBlocked, 1u, __ATOMIC_RELAXED);
         return false;
     }
+    __atomic_fetch_add(&gOGSLeaveRoomForwarded, 1u, __ATOMIC_RELAXED);
     return orig_LeaveRoom ? orig_LeaveRoom(becomeInactive, method) : false;
 }
 
 static void hook_Type4995LeaveRoom(void *self, void *method) {
+    // Verified in fps 3.4.0: DemoAnimator.GameManager.LeaveRoom(), not
+    // PhotonNetwork.LeaveRoom. Its entry count is only contextual.
+    __atomic_fetch_add(&gOGSDemoLeaveEntries, 1u, __ATOMIC_RELAXED);
     double now = CFAbsoluteTimeGetCurrent();
     os_unfair_lock_lock(&gStateLock);
     double enterTime = gOGS.roomEnterTime;
@@ -1990,12 +2008,13 @@ static void hook_Type4995LeaveRoom(void *self, void *method) {
     bool insideNet = (__atomic_load_n(&gOGS.insideNetworkEvent, __ATOMIC_ACQUIRE) > 0);
     bool recentThreat = (threatTime > 0.0 && (now - threatTime) < 3.5);
 
-    // منع دالة الطرد الداخلية Type4995LeaveRoom من إخراجك أثناء وجودك بالروم
-    // Auto-host setting must not prevent intentional LeaveRoom.
+    // This is a game demo helper, not evidence of any Photon server kick.
     if (inRoomNow && (gOGS.antiKickHardLock || insideNet || (settled && recentThreat))) {
         __atomic_fetch_add(&gOGS.blockedKicksCount, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&gOGSDemoLeaveBlocked, 1u, __ATOMIC_RELAXED);
         return;
     }
+    __atomic_fetch_add(&gOGSDemoLeaveForwarded, 1u, __ATOMIC_RELAXED);
     if (orig_Type4995Leave) orig_Type4995Leave(self, method);
 }
 
@@ -2057,9 +2076,17 @@ static void hook_GameLogicMasterSwitch(void *self, void *method) {
 }
 
 static void hook_OnPhotonPlayerDisconnected(void *self, void *player, void *method) {
-    // Forward disconnect without writing to objects that may be destroyed
-    // by the original callback.
+    // This slot is RoomController.OnPhotonPlayerDisconnected, i.e. a REMOTE
+    // player's departure, not the local client's disconnected callback.
     if (orig_OnDisconnect) orig_OnDisconnect(self, player, method);
+}
+static void hook_WorkerInGameDisconnected(void *self, void *method) {
+    // Unity notification that THIS client disconnected from Photon.
+    // Observation only: forward to original before any room is destroyed.
+    __atomic_fetch_add(&gOGSWorkerPhotonDisconnectNotices, 1u,
+                       __ATOMIC_RELAXED);
+    if (orig_WorkerInGameDisconnected)
+        orig_WorkerInGameDisconnected(self, method);
 }
 
 static void hook_SendChatRemote(void *self, void *senderStr, void *msgStr, int32_t senderTeam, bool isTeamChat, const void *method) {
@@ -2364,6 +2391,14 @@ static void OGSRepairMasterReceiverCaches(void) {
     OGSRepairMasterReceiverCacheOne(5, 4825, 31058, 0x060002FEu, 0,
         0x0138881Cu, (void *)&hook_GameLogicMasterSwitch,
         (void **)&orig_GameLogicMasterSwitch);
+    // Metadata and native methodPointers verified from the actual fps IPA:
+    // PhotonNetwork.LeaveRoom(bool) MD31543, MI28866, Type4884.
+    OGSRepairMasterReceiverCacheOne(6, 4884, 31543, 0x060004D8u, 1,
+        0x013D0604u, (void *)&hook_LeaveRoom, (void **)&orig_LeaveRoom);
+    // WorkerInGame.OnDisconnectedFromPhoton() MD31024 MI29767 Type4821.
+    OGSRepairMasterReceiverCacheOne(7, 4821, 31024, 0x060002DCu, 0,
+        0x01428224u, (void *)&hook_WorkerInGameDisconnected,
+        (void **)&orig_WorkerInGameDisconnected);
 }
 
 // Stage 2: read-only Photon presence. No IL2CPP/Photon function calls
@@ -2555,6 +2590,9 @@ static void OGSRefreshReadOnlyPresence(void) {
             gOGS.roomEnterTime = CFAbsoluteTimeGetCurrent();
         os_unfair_lock_unlock(&gStateLock);
     } else if (room == 0 && ++gOGSPresenceNoRoomStreak >= 4) {
+        if (__atomic_load_n(&gOGSPresenceReadOnly, __ATOMIC_ACQUIRE) == 1)
+            __atomic_fetch_add(&gOGSObservedRoomDisappearances, 1u,
+                               __ATOMIC_RELAXED);
         OGSDisarmAutoRoom();
         __atomic_store_n(&gOGSPresenceReadOnly, 2, __ATOMIC_RELEASE);
         gOGSLastReliableRoomAddress = 0;
@@ -2610,6 +2648,11 @@ static void OGSInstallHooks(void) {
                           actual ? 2u : 3u, __ATOMIC_RELEASE);
     }
     OGSInstallPointerSlotHook(gOffsets.tblLeaveRoom, (void *)&hook_LeaveRoom, (void **)&orig_LeaveRoom);
+    // Verified Unity callback entry: WorkerInGame.OnDisconnectedFromPhoton.
+    // Never suppress or mutate network disconnect handling.
+    OGSInstallPointerSlotHook(0x02392638u,
+        (void *)&hook_WorkerInGameDisconnected,
+        (void **)&orig_WorkerInGameDisconnected);
     OGSInstallPointerSlotHook(gOffsets.tblType4995LeaveRoom, (void *)&hook_Type4995LeaveRoom, (void **)&orig_Type4995Leave);
     OGSInstallPointerSlotHook(gOffsets.tblOnMasterSwitched1, (void *)&hook_OnMasterSwitched1, (void **)&orig_OnMasterSwitch1);
     OGSInstallPointerSlotHook(gOffsets.tblOnMasterSwitched2, (void *)&hook_OnMasterSwitched2, (void **)&orig_OnMasterSwitch2);
@@ -2773,7 +2816,7 @@ static void OGSInstallHooks(void) {
         self.menuPanel.hidden = YES;
 
         self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 5, 260, 18)];
-        self.titleLabel.text = @"OGS Stage 26 LAB | إدارة الروم";
+        self.titleLabel.text = @"OGS Stage 27 LAB | إدارة الروم";
         self.titleLabel.textColor = [UIColor whiteColor];
         self.titleLabel.textAlignment = NSTextAlignmentCenter;
         self.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
@@ -3260,6 +3303,22 @@ static void OGSInstallHooks(void) {
         __atomic_load_n(&gOGSClosedGuardNoAuthority, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSClosedGuardRateLimited, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSClosedGuardDisarmed, __ATOMIC_RELAXED)];
+    details = [details stringByAppendingFormat:
+        @"\nStage27 LeaveRoom cache=%u | local disconnect cache=%u | strict lock=%u"
+         "\nLeaveRoom entry=%u blocked=%u forwarded=%u | DemoLeave entry=%u blocked=%u forwarded=%u"
+         "\nLocal OnDisconnectedFromPhoton=%u | room vanished=%u"
+         "\nNo Event203 + local disconnect means different Photon exit path, not confirmed attacker action.",
+        __atomic_load_n(&gOGSMasterCacheStatus[6], __ATOMIC_ACQUIRE),
+        __atomic_load_n(&gOGSMasterCacheStatus[7], __ATOMIC_ACQUIRE),
+        __atomic_load_n(&gOGS.antiKickHardLock, __ATOMIC_ACQUIRE) ? 1u : 0u,
+        __atomic_load_n(&gOGSLeaveRoomHookEntries, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSLeaveRoomBlocked, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSLeaveRoomForwarded, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSDemoLeaveEntries, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSDemoLeaveBlocked, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSDemoLeaveForwarded, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSWorkerPhotonDisconnectNotices, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSObservedRoomDisappearances, __ATOMIC_RELAXED)];
     details = [details stringByAppendingFormat:
         @"\nPhotonHandler.Update entry=%llu exit=%llu | privacy pending=%u | applied=%u | rejected=%u",
         (unsigned long long)__atomic_load_n(&gOGSPhotonHandlerUpdateCalls, __ATOMIC_RELAXED),
