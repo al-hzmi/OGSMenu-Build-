@@ -1784,6 +1784,8 @@ static void hook_OGSGrenadeFire2(void *self, const void *method) {
 // PlayerNetwork at +0xD8; local weapon bulletsLeft=int32 at +0x12C.
 // Only touch local weapon with sane ammo in the *same occupied 2/2 room*.
 // No fabricated damage, grenade spawns, Photon events or rapid-fire timers.
+// Backing store at self+0x128 is pointer-aligned and covers the int32
+// ammo field at +0x12C. OGSIsWritableMappedSlot rejects unaligned 0x12C.
 static void hook_OGSGrenadeShoot(void *self, const void *method) {
     __atomic_fetch_add(&gOGSGrenade31ThrowCalls, 1u, __ATOMIC_RELAXED);
     bool eligible = false;
@@ -1825,7 +1827,7 @@ static void hook_OGSGrenadeShoot(void *self, const void *method) {
                                    __ATOMIC_RELAXED);
             } else if (OGSReadMemory(ammoSlot, &before, sizeof(before)) &&
                        before >= 0 && before <= 4 &&
-                       OGSIsWritableMappedSlot(ammoSlot)) {
+                       OGSIsWritableMappedSlot((uintptr_t)self + 0x128u)) {
                 eligible = true;
                 __atomic_store_n(&gOGSGrenade31LastBefore, before,
                                  __ATOMIC_RELAXED);
@@ -1857,7 +1859,7 @@ static void hook_OGSGrenadeShoot(void *self, const void *method) {
     OGSWeaponZeroFn original = __atomic_load_n(&orig_OGSGrenadeShoot,
                                                __ATOMIC_ACQUIRE);
     if (original) original(self, method);
-    if (eligible && OGSIsWritableMappedSlot(ammoSlot)) {
+    if (eligible && OGSIsWritableMappedSlot((uintptr_t)self + 0x128u)) {
         int32_t after = -1;
         if (OGSReadMemory(ammoSlot, &after, sizeof(after)) &&
             after >= 0 && after <= 4) {
