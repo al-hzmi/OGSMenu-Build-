@@ -806,6 +806,31 @@ static bool OGSReadAutoRoom(uintptr_t *roomOut, int32_t *localOut, int32_t *mast
     return true;
 }
 
+// OGS32 verified directly in fps 3.4.0 ARM64 RoomInfo getters:
+// get_MaxPlayers (RVA 0x013FD768) reads BYTE room+0x20;
+// get_PlayerCount (RVA 0x013FD748) reads INT32 room+0x50.
+// Neither visibility nor IsOpen is relevant to this test. The room MUST
+// have exactly two slots, both occupied, and retain the same local actor.
+static bool OGSReadTwoPlayerLabRoom(uintptr_t *roomOut, int32_t *actorOut,
+                                     int32_t *masterOut, uint8_t *maxOut,
+                                     int32_t *countOut) {
+    uintptr_t room = 0;
+    int32_t localActor = 0, masterActor = 0, playerCount = 0;
+    uint8_t maxPlayers = 0;
+    bool ok = OGSReadAutoRoom(&room, &localActor, &masterActor) &&
+        OGSReadMemory(room + 0x20u, &maxPlayers, sizeof(maxPlayers)) &&
+        OGSReadMemory(room + 0x50u, &playerCount, sizeof(playerCount)) &&
+        maxPlayers > 0 && maxPlayers <= 32 &&
+        playerCount >= 0 && playerCount <= maxPlayers;
+    if (!ok) return false;
+    if (roomOut) *roomOut = room;
+    if (actorOut) *actorOut = localActor;
+    if (masterOut) *masterOut = masterActor;
+    if (maxOut) *maxOut = maxPlayers;
+    if (countOut) *countOut = playerCount;
+    return true;
+}
+
 // Never modify or synthesize a Photon event. Capture only cross-callback
 // observations under one lock, resetting baseline whenever room/actor changes.
 static void OGSRecordHostLocalObservation(uintptr_t room, int32_t actor,
@@ -1545,6 +1570,17 @@ static volatile int32_t gOGSGrenade31LastBefore = -1;
 static volatile int32_t gOGSGrenade31LastAfter = -1;
 static uintptr_t gOGSGrenade31Room = 0; // gStateLock
 static int32_t gOGSGrenade31Actor = 0;  // gStateLock
+// OGS32 diagnostics: actual two-person room and restock against the
+// reached GrenadeShootm entry instead of the silent Fire2 entry.
+static volatile uint32_t gOGSGrenade32RoomRejected = 0;
+static volatile uint32_t gOGSGrenade32ThrowValidated = 0;
+static volatile uint32_t gOGSGrenade32Preloaded = 0;
+static volatile uint32_t gOGSGrenade32PostRestocked = 0;
+static volatile uint32_t gOGSGrenade32PreWriteErrors = 0;
+static volatile uint32_t gOGSGrenade32NotType5 = 0;
+static volatile uint32_t gOGSGrenade32LastMax = 0;
+static volatile int32_t gOGSGrenade32LastCount = -1;
+static volatile int32_t gOGSGrenade32LastAfterOriginal = -1;
 
 // Verified in the original fps 3.4.0 ARM64 executable:
 // PlayerNetwork.GetPhotonView RVA 0x13A9964 (self -> PhotonView),
@@ -1732,84 +1768,116 @@ static void hook_KnifeShoot29(void *self, Vector3 origin, Vector3 direction,
             __atomic_fetch_add(&gKnife29Restored, 1u, __ATOMIC_RELAXED);
     }
 }
-// OGS31: fps 3.4.0 ARM64, FPSWeapon.Fire2 MD30430/MI27843,
-// original entry RVA 0x01380B30. A grenade is descriptor.weaponType==5
-// (FPSWeapon+0xA8 => descriptor+0x24). bulletsLeft is int32 at +0x12C;
-// Fire2 decrements it at RVA 0x013809F8.
-// Only replenish AFTER an actual Fire2 call. No extra Photon events,
-// no explosive spawn, no rapid-fire timer or fake server-side confirmation.
+// OGS32: Fire2 entry is kept as PASSIVE diagnostic only.
+// OGS31 measured three GrenadeShootm calls but zero Fire2 calls.
+// Do not adjust ammunition in a callback that does not run in this game path.
 static void hook_OGSGrenadeFire2(void *self, const void *method) {
     __atomic_fetch_add(&gOGSGrenade31Fire2Calls, 1u, __ATOMIC_RELAXED);
-    uintptr_t ammoSlot = (uintptr_t)self + 0x12Cu;
+    OGSWeaponZeroFn original = __atomic_load_n(&orig_OGSGrenadeFire2,
+                                               __ATOMIC_ACQUIRE);
+    if (original) original(self, method);
+}
+
+// OGS32 local grenade restock test. The original throw is ALWAYS called.
+// GrenadeShootm (MD30435/MI27848/RVA 0x01381160) is confirmed executing.
+// FPSWeapon descriptor at +0xA8; weapon type at descriptor+0x24 (type=5);
+// PlayerNetwork at +0xD8; local weapon bulletsLeft=int32 at +0x12C.
+// Only touch local weapon with sane ammo in the *same occupied 2/2 room*.
+// No fabricated damage, grenade spawns, Photon events or rapid-fire timers.
+static void hook_OGSGrenadeShoot(void *self, const void *method) {
+    __atomic_fetch_add(&gOGSGrenade31ThrowCalls, 1u, __ATOMIC_RELAXED);
     bool eligible = false;
-    int32_t ammoBefore = -1;
+    uintptr_t ammoSlot = (uintptr_t)self + 0x12Cu;
+    int32_t before = -1;
     if (self && __atomic_load_n(&gOGSGrenade31Enabled, __ATOMIC_ACQUIRE)) {
-        uintptr_t actualRoom = 0, wantedRoom = 0, desc = 0, ownerObject = 0;
-        int32_t actor = 0, master = 0, wantedActor = 0, type = -1;
-        bool open = true, visible = true;
+        uintptr_t expectedRoom = 0, room = 0, descriptor = 0, owner = 0;
+        int32_t expectedActor = 0, actor = 0, master = 0, players = -1, type = -1;
+        uint8_t capacity = 0;
         os_unfair_lock_lock(&gStateLock);
-        wantedRoom = gOGSGrenade31Room;
-        wantedActor = gOGSGrenade31Actor;
+        expectedRoom = gOGSGrenade31Room;
+        expectedActor = gOGSGrenade31Actor;
         os_unfair_lock_unlock(&gStateLock);
-        const bool privateRoom = wantedRoom && wantedActor > 0 &&
-            OGSReadAutoRoom(&actualRoom, &actor, &master) &&
-            actualRoom == wantedRoom && actor == wantedActor &&
-            OGSReadRoomPrivacy(actualRoom, &open, &visible) && !open && !visible;
-        if (!privateRoom) {
+        bool twoPlayerRoom = expectedRoom != 0 && expectedActor > 0 &&
+            OGSReadTwoPlayerLabRoom(&room, &actor, &master, &capacity, &players) &&
+            room == expectedRoom && actor == expectedActor &&
+            capacity == 2 && players == 2;
+        __atomic_store_n(&gOGSGrenade32LastMax, capacity, __ATOMIC_RELAXED);
+        __atomic_store_n(&gOGSGrenade32LastCount, players, __ATOMIC_RELAXED);
+        if (!twoPlayerRoom) {
             __atomic_store_n(&gOGSGrenade31Enabled, 0u, __ATOMIC_RELEASE);
             __atomic_fetch_add(&gOGSGrenade31RoomDisarms, 1u, __ATOMIC_RELAXED);
-        } else if (OGSReadMemory((uintptr_t)self + 0xA8u, &desc, sizeof(desc)) &&
-                   desc >= 0x100000000ULL &&
-                   OGSReadMemory(desc + 0x24u, &type, sizeof(type)) && type == 5) {
+            __atomic_fetch_add(&gOGSGrenade32RoomRejected, 1u, __ATOMIC_RELAXED);
+        } else if (!OGSReadMemory((uintptr_t)self + 0xA8u, &descriptor,
+                                   sizeof(descriptor)) ||
+                   descriptor < 0x100000000ULL ||
+                   !OGSReadMemory(descriptor + 0x24u, &type, sizeof(type)) ||
+                   type != 5) {
+            __atomic_fetch_add(&gOGSGrenade32NotType5, 1u, __ATOMIC_RELAXED);
+        } else {
             __atomic_fetch_add(&gOGSGrenade31Type5Calls, 1u, __ATOMIC_RELAXED);
             bool verified = false;
-            bool mine = OGSReadMemory((uintptr_t)self + 0xD8u,
-                                       &ownerObject, sizeof(ownerObject)) &&
-                        ownerObject >= 0x100000000ULL &&
-                        OGSIsDamageToLocalPlayer((void *)ownerObject, &verified);
+            bool mine = OGSReadMemory((uintptr_t)self + 0xD8u, &owner,
+                                       sizeof(owner)) &&
+                owner >= 0x100000000ULL &&
+                OGSIsDamageToLocalPlayer((void *)owner, &verified);
             if (!mine || !verified) {
                 __atomic_fetch_add(&gOGSGrenade31LocalOwnerRejects, 1u,
                                    __ATOMIC_RELAXED);
-            } else if (OGSReadMemory(ammoSlot, &ammoBefore, sizeof(ammoBefore)) &&
-                       ammoBefore >= 0 && ammoBefore <= 4 &&
-                       OGSIsWritableMappedSlot((uintptr_t)self + 0x128u)) {
+            } else if (OGSReadMemory(ammoSlot, &before, sizeof(before)) &&
+                       before >= 0 && before <= 4 &&
+                       OGSIsWritableMappedSlot(ammoSlot)) {
                 eligible = true;
-                __atomic_store_n(&gOGSGrenade31LastBefore, ammoBefore,
+                __atomic_store_n(&gOGSGrenade31LastBefore, before,
                                  __ATOMIC_RELAXED);
+                __atomic_fetch_add(&gOGSGrenade32ThrowValidated, 1u,
+                                   __ATOMIC_RELAXED);
+                // The game may consume ammo either before or after this
+                // callback. Keep a bounded spare available in both cases.
+                // Preloading two from 0/1 is local only, not server proof.
+                if (before < 2) {
+                    int32_t expected = before;
+                    if (__atomic_compare_exchange_n((int32_t *)ammoSlot,
+                         &expected, 2, false, __ATOMIC_ACQ_REL,
+                         __ATOMIC_ACQUIRE)) {
+                        __atomic_fetch_add(&gOGSGrenade32Preloaded, 1u,
+                                           __ATOMIC_RELAXED);
+                        __atomic_fetch_add(&gOGSGrenade31Replenished, 1u,
+                                           __ATOMIC_RELAXED);
+                    } else {
+                        __atomic_fetch_add(&gOGSGrenade32PreWriteErrors, 1u,
+                                           __ATOMIC_RELAXED);
+                    }
+                }
             } else {
                 __atomic_fetch_add(&gOGSGrenade31InvalidCount, 1u,
                                    __ATOMIC_RELAXED);
             }
         }
     }
-    OGSWeaponZeroFn original = __atomic_load_n(&orig_OGSGrenadeFire2,
-                                               __ATOMIC_ACQUIRE);
-    if (original) original(self, method);
-    if (eligible && OGSIsWritableMappedSlot((uintptr_t)self + 0x128u)) {
-        int32_t remaining = -1;
-        if (OGSReadMemory(ammoSlot, &remaining, sizeof(remaining)) &&
-            remaining >= 0 && remaining <= 4) {
-            __atomic_store_n(&gOGSGrenade31LastAfter, remaining,
-                             __ATOMIC_RELAXED);
-            // Preserve one grenade locally when the regular game
-            // consumption depleted this weapon. No huge ammo counts.
-            if (remaining == 0 && ammoBefore > 0) {
-                int32_t expected = 0;
-                if (__atomic_compare_exchange_n((int32_t *)ammoSlot,
-                    &expected, 1, false, __ATOMIC_RELEASE, __ATOMIC_RELAXED))
-                    __atomic_fetch_add(&gOGSGrenade31Replenished, 1u,
-                                       __ATOMIC_RELAXED);
-            }
-        }
-    }
-}
-// Independent observation of the actual grenade throw, verified
-// FPSWeapon.GrenadeShootm MD30435/MI27848/RVA 0x01381160.
-static void hook_OGSGrenadeShoot(void *self, const void *method) {
-    __atomic_fetch_add(&gOGSGrenade31ThrowCalls, 1u, __ATOMIC_RELAXED);
     OGSWeaponZeroFn original = __atomic_load_n(&orig_OGSGrenadeShoot,
                                                __ATOMIC_ACQUIRE);
     if (original) original(self, method);
+    if (eligible && OGSIsWritableMappedSlot(ammoSlot)) {
+        int32_t after = -1;
+        if (OGSReadMemory(ammoSlot, &after, sizeof(after)) &&
+            after >= 0 && after <= 4) {
+            __atomic_store_n(&gOGSGrenade32LastAfterOriginal, after,
+                             __ATOMIC_RELAXED);
+            __atomic_store_n(&gOGSGrenade31LastAfter, after,
+                             __ATOMIC_RELAXED);
+            if (after == 0) {
+                int32_t expected = 0;
+                if (__atomic_compare_exchange_n((int32_t *)ammoSlot,
+                    &expected, 1, false, __ATOMIC_RELEASE,
+                    __ATOMIC_RELAXED)) {
+                    __atomic_fetch_add(&gOGSGrenade32PostRestocked, 1u,
+                                       __ATOMIC_RELAXED);
+                    __atomic_fetch_add(&gOGSGrenade31Replenished, 1u,
+                                       __ATOMIC_RELAXED);
+                }
+            }
+        }
+    }
 }
 
 static void OGSBridgeIncomingDamage(void *self, void *values, int32_t killerID, const void *method) {
@@ -3126,7 +3194,7 @@ static void OGSInstallHooks(void) {
         self.menuPanel.hidden = YES;
 
         self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 5, 260, 18)];
-        self.titleLabel.text = @"OGS31 | اختبار القنابل";
+        self.titleLabel.text = @"OGS32 | قنابل غرفة لاعبين";
         self.titleLabel.textColor = [UIColor whiteColor];
         self.titleLabel.textAlignment = NSTextAlignmentCenter;
         self.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
@@ -3639,23 +3707,34 @@ static void OGSInstallHooks(void) {
         __atomic_load_n(&gKnife29LastBaseRange, __ATOMIC_RELAXED),
         __atomic_load_n(&gKnife29LastTrialRange, __ATOMIC_RELAXED)];
     details = [details stringByAppendingFormat:
-        @"\nOGS31 Grenades enabled=%u | Fire2 cache=%u | GrenadeShootm cache=%u"
-         "\nFire2 calls=%u | actual grenade throw calls=%u | type5 checks=%u"
-         "\nReplenished after normal consumption=%u | owner mismatch=%u | invalid count=%u"
-         "\nPrivate-room disarms=%u | last ammo before=%d after=%d"
-         "\nThis only tests bounded local restock; remote/client authority is unconfirmed.",
+        @"\nOGS32 Grenades enabled=%u | Fire2 cache=%u | GrenadeShootm cache=%u"
+         "\nFire2 calls=%u | grenade throw callback=%u | weapon type5=%u | other type=%u"
+         "\nValid local throws=%u | preloaded=%u | post-replenished=%u | total writes=%u"
+         "\nOwner mismatch=%u | invalid ammo=%u | disarmed=%u | rejected rooms=%u"
+         "\nRoom max=%u players=%d (requires 2/2; no hidden/closed requirement)"
+         "\nAmmo original=%d | after original=%d | last recorded=%d | pre-write conflict=%u"
+         "\nLocal inventory only; check second account for actual throwing. Server confirmation unavailable.",
         __atomic_load_n(&gOGSGrenade31Enabled, __ATOMIC_ACQUIRE),
         __atomic_load_n(&gOGSMasterCacheStatus[10], __ATOMIC_ACQUIRE),
         __atomic_load_n(&gOGSMasterCacheStatus[11], __ATOMIC_ACQUIRE),
         __atomic_load_n(&gOGSGrenade31Fire2Calls, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSGrenade31ThrowCalls, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSGrenade31Type5Calls, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSGrenade32NotType5, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSGrenade32ThrowValidated, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSGrenade32Preloaded, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSGrenade32PostRestocked, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSGrenade31Replenished, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSGrenade31LocalOwnerRejects, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSGrenade31InvalidCount, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSGrenade31RoomDisarms, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSGrenade32RoomRejected, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSGrenade32LastMax, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSGrenade32LastCount, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSGrenade31LastBefore, __ATOMIC_RELAXED),
-        __atomic_load_n(&gOGSGrenade31LastAfter, __ATOMIC_RELAXED)];
+        __atomic_load_n(&gOGSGrenade32LastAfterOriginal, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSGrenade31LastAfter, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSGrenade32PreWriteErrors, __ATOMIC_RELAXED)];
     details = [details stringByAppendingFormat:
         @"\nStage27 LeaveRoom cache=%u | local disconnect cache=%u | strict lock=%u"
          "\nLeaveRoom entry=%u blocked=%u forwarded=%u | DemoLeave entry=%u blocked=%u forwarded=%u"
@@ -4113,33 +4192,37 @@ static void OGSInstallHooks(void) {
 
 // OFF -> 10x -> 30x -> OFF. In a private closed/hidden room only.
 // The game may reject hits regardless of client raycast length.
-// OGS31 controlled test: arm only with a valid closed & hidden room,
-// including when the second test account is the MasterClient.
+// OGS32 controlled test: arm in an exactly two-player room (2/2)
+// with no visibility/closed restriction and regardless of host ownership.
 - (void)toggleGrenade31:(UIButton *)button {
     if (__atomic_load_n(&gOGSGrenade31Enabled, __ATOMIC_ACQUIRE)) {
         __atomic_store_n(&gOGSGrenade31Enabled, 0u, __ATOMIC_RELEASE);
         [button setTitle:@"قنابل متجددة: إيقاف" forState:UIControlStateNormal];
         button.backgroundColor = [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
-        self.statusLabel.text = @"OGS31: تم إيقاف اختبار القنابل";
+        self.statusLabel.text = @"OGS32: تم إيقاف اختبار القنابل";
         return;
     }
     uintptr_t room = 0;
-    int32_t actor = 0, master = 0;
-    bool open = true, visible = true;
-    if (!OGSReadAutoRoom(&room, &actor, &master) || actor <= 0) {
-        self.statusLabel.text = @"OGS31: لا توجد غرفة Photon صالحة";
+    int32_t actor = 0, master = 0, count = -1;
+    uint8_t capacity = 0;
+    if (!OGSReadTwoPlayerLabRoom(&room, &actor, &master, &capacity, &count) ||
+        actor <= 0) {
+        self.statusLabel.text = @"OGS32: تعذر قراءة بيانات غرفة Photon";
         return;
     }
-    bool privacyOK = OGSReadRoomPrivacy(room, &open, &visible);
-    if (!privacyOK || open || visible) {
-        self.statusLabel.text = @"OGS31: أغلق وأخفِ الروم بعد دخول الحساب الثاني";
+    __atomic_store_n(&gOGSGrenade32LastMax, capacity, __ATOMIC_RELAXED);
+    __atomic_store_n(&gOGSGrenade32LastCount, count, __ATOMIC_RELAXED);
+    if (capacity != 2 || count != 2) {
+        self.statusLabel.text = [NSString stringWithFormat:
+            @"OGS32: يلزم روم سعتها 2 وموجود بها 2 (حاليًا %d/%u)",
+            count, capacity];
         return;
     }
     uint32_t c1 = __atomic_load_n(&gOGSMasterCacheStatus[10], __ATOMIC_ACQUIRE);
     uint32_t c2 = __atomic_load_n(&gOGSMasterCacheStatus[11], __ATOMIC_ACQUIRE);
     if ((c1 != 1u && c1 != 2u) || (c2 != 1u && c2 != 2u)) {
         self.statusLabel.text = [NSString stringWithFormat:
-            @"OGS31: خطاف القنابل غير جاهز Fire2=%u / Shoot=%u", c1, c2];
+            @"OGS32: خطاف القنابل غير جاهز Fire2=%u / Shoot=%u", c1, c2];
         return;
     }
     os_unfair_lock_lock(&gStateLock);
@@ -4149,7 +4232,7 @@ static void OGSInstallHooks(void) {
     __atomic_store_n(&gOGSGrenade31Enabled, 1u, __ATOMIC_RELEASE);
     [button setTitle:@"قنابل متجددة: اختبار" forState:UIControlStateNormal];
     button.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
-    self.statusLabel.text = @"OGS31: اختبر رمي القنبلة ثم أعد اختيارها؛ راجع العدادات";
+    self.statusLabel.text = @"OGS32: تجربة إعادة القنبلة في روم 2/2؛ لا يلزم الإخفاء";
 }
 - (void)cycleKnife29:(UIButton *)s {
     uint32_t old = __atomic_load_n(&gKnife29Mode, __ATOMIC_ACQUIRE);
