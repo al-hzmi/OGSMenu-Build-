@@ -1668,7 +1668,7 @@ static void hook_KnifeShoot29(void *self, Vector3 origin, Vector3 direction,
         os_unfair_lock_unlock(&gStateLock);
         const bool privateOwned = expectedRoom != 0 && expectedActor > 0 &&
             OGSReadAutoRoom(&room, &actor, &master) &&
-            room == expectedRoom && actor == expectedActor && master == actor &&
+            room == expectedRoom && actor == expectedActor &&
             OGSReadRoomPrivacy(room, &open, &visible) && !open && !visible;
         if (!privateOwned) {
             // Automatically stop if room privacy, master or actor changes.
@@ -1744,8 +1744,8 @@ static volatile uint32_t gOGSWorkerPhotonDisconnectNotices = 0;
 static volatile uint32_t gOGSObservedRoomDisappearances = 0;
 // Stage24: callback entries are NOT unique transfers. Index 5 = GameLogic.
 static volatile uint64_t gOGSMasterReceiverEntries[6] = {0};
-// Index 6 = PhotonNetwork.LeaveRoom, 7 = WorkerInGame.OnDisconnectedFromPhoton.
-static volatile uint32_t gOGSMasterCacheStatus[9] = {0};
+// Index 6=LeaveRoom, 7=disconnect, 8=ShootBullet, 9=FireOneShot.
+static volatile uint32_t gOGSMasterCacheStatus[10] = {0};
 static volatile uint32_t gOGSMasterCacheRounds = 0;
 static volatile uint64_t gOGSMasterRepairFrameTicks = 0;
 static volatile int32_t gOGSHostMonitorOn = 1;
@@ -2590,6 +2590,9 @@ static void OGSRepairMasterReceiverCaches(void) {
     OGSRepairMasterReceiverCacheOne(8, 4705, 30439, 0x06000151u, 2,
         0x01381B50u, (void *)&hook_KnifeShoot29,
         (void **)&orig_KnifeShoot29);
+    OGSRepairMasterReceiverCacheOne(9, 4705, 30438, 0x06000150u, 0,
+        0x0137F584u, (void *)&hook_KnifeFire28,
+        (void **)&orig_KnifeFire28);
 }
 
 // Stage 2: read-only Photon presence. No IL2CPP/Photon function calls
@@ -2842,6 +2845,8 @@ static void OGSInstallHooks(void) {
     // FPSWeapon.ShootBullet: MI27852, method pointer slot = 0x2358400 + MI*8.
     OGSInstallPointerSlotHook(0x0238EA60u, (void *)&hook_KnifeShoot29,
                               (void **)&orig_KnifeShoot29);
+    OGSInstallPointerSlotHook(0x0238EA58u, (void *)&hook_KnifeFire28,
+                              (void **)&orig_KnifeFire28);
     // Verified Unity callback entry: WorkerInGame.OnDisconnectedFromPhoton.
     // Never suppress or mutate network disconnect handling.
     OGSInstallPointerSlotHook(0x02392638u,
@@ -3010,7 +3015,7 @@ static void OGSInstallHooks(void) {
         self.menuPanel.hidden = YES;
 
         self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 5, 260, 18)];
-        self.titleLabel.text = @"OGS29 | مختبر مدى السكين";
+        self.titleLabel.text = @"OGS30 | فحص مدى السكين";
         self.titleLabel.textColor = [UIColor whiteColor];
         self.titleLabel.textAlignment = NSTextAlignmentCenter;
         self.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
@@ -3498,13 +3503,17 @@ static void OGSInstallHooks(void) {
         __atomic_load_n(&gOGSClosedGuardRateLimited, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSClosedGuardDisarmed, __ATOMIC_RELAXED)];
     details = [details stringByAppendingFormat:
-        @"\nOGS29 Melee raycast test mode=%u (0 off,1 x10,2 x30) | cache=%u"
-         "\nShootBullet=%u | knife type4=%u | field changed=%u | restored=%u"
-         "\nPrivate/master disarms=%u | invalid range=%u | last range=%d -> %d"
-         "\nClient raycast distance only. Server hit confirmation NOT measured.",
+        @"\nOGS30 MeleeLab mode=%u | ShootBullet cache=%u | FireOneShot cache=%u"
+         "\nShootBullet=%u | FireOneShot=%u | knife type4=%u"
+         "\nField changed=%u | restored=%u | private-room disarms=%u"
+         "\nInvalid range=%u | range=%d -> %d"
+         "\nNo local-host requirement; requires room open=0 visible=0."
+         "\nThese are local probes, NOT server-confirmed hits.",
         __atomic_load_n(&gKnife29Mode, __ATOMIC_ACQUIRE),
         __atomic_load_n(&gOGSMasterCacheStatus[8], __ATOMIC_ACQUIRE),
+        __atomic_load_n(&gOGSMasterCacheStatus[9], __ATOMIC_ACQUIRE),
         __atomic_load_n(&gKnife29Calls, __ATOMIC_RELAXED),
+        __atomic_load_n(&gKnife28Calls, __ATOMIC_RELAXED),
         __atomic_load_n(&gKnife29KnifeCalls, __ATOMIC_RELAXED),
         __atomic_load_n(&gKnife29Changed, __ATOMIC_RELAXED),
         __atomic_load_n(&gKnife29Restored, __ATOMIC_RELAXED),
@@ -3982,10 +3991,16 @@ static void OGSInstallHooks(void) {
     uintptr_t room = 0;
     int32_t actor = 0, master = 0;
     bool open = true, visible = true;
-    if (!OGSReadAutoRoom(&room, &actor, &master) ||
-        !OGSReadRoomPrivacy(room, &open, &visible) ||
-        actor <= 0 || actor != master || open || visible) {
-        self.statusLabel.text = @"أدخل الحساب الثاني، ثم أغلق وأخفِ الروم وأنت الهوست";
+    if (!OGSReadAutoRoom(&room, &actor, &master) || actor <= 0) {
+        self.statusLabel.text = @"OGS30: الغرفة غير مرصودة؛ ادخل روم الاختبار أولًا";
+        return;
+    }
+    bool privacyOK = OGSReadRoomPrivacy(room, &open, &visible);
+    if (!privacyOK || open || visible) {
+        self.statusLabel.text = [NSString stringWithFormat:
+            @"OGS30: أغلق وأخفِ الروم من حساب الهوست (open=%@ visible=%@)",
+            privacyOK ? (open ? @"1" : @"0") : @"غير معروف",
+            privacyOK ? (visible ? @"1" : @"0") : @"غير معروف"];
         return;
     }
     uint32_t cache = __atomic_load_n(&gOGSMasterCacheStatus[8], __ATOMIC_ACQUIRE);
@@ -4001,7 +4016,7 @@ static void OGSInstallHooks(void) {
     [s setTitle:next == 1u ? @"مدى السكين: ×10" : @"مدى السكين: ×30"
        forState:UIControlStateNormal];
     s.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
-    self.statusLabel.text = @"اختبار تغيير مسافة Raycast فقط؛ قبول الإصابة على الطرف الآخر غير مضمون";
+    self.statusLabel.text = @"OGS30: الاختبار مفعّل في روم مغلق ومخفي؛ لا يلزم أن تكون الهوست";
 }
 - (void)toggleKnife28:(UIButton *)s {
     if(__atomic_load_n(&gKnife28On,__ATOMIC_ACQUIRE)) {
