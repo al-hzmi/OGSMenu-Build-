@@ -1585,6 +1585,17 @@ static volatile int32_t gOGSGrenade32LastAfterOriginal = -1;
 static volatile uint32_t gOGSGrenade33ToggleTaps = 0;
 static volatile uint32_t gOGSGrenade33ArmedCount = 0;
 static volatile uint32_t gOGSGrenade33ThrowsWhenArmed = 0;
+// OGS34 raw ammo diagnostics. OGS33 collapsed these three failure modes
+// into one 'invalid ammo' counter, hiding whether the slot or value failed.
+static volatile uint32_t gOGSGrenade34AmmoReadFailed = 0;
+static volatile uint32_t gOGSGrenade34AmmoOutOfRange = 0;
+static volatile uint32_t gOGSGrenade34AmmoNotWritable = 0;
+static volatile uint32_t gOGSGrenade34AmmoMinusOne = 0;
+static volatile uint32_t gOGSGrenade34Eligible = 0;
+static volatile uint32_t gOGSGrenade34AfterReadFailed = 0;
+static volatile uint32_t gOGSGrenade34AfterOutOfRange = 0;
+static volatile int32_t gOGSGrenade34LastRawAmmo = INT32_MIN;
+static volatile int32_t gOGSGrenade34LastRawAfter = INT32_MIN;
 
 // Verified in the original fps 3.4.0 ARM64 executable:
 // PlayerNetwork.GetPhotonView RVA 0x13A9964 (self -> PhotonView),
@@ -1818,34 +1829,59 @@ static void hook_OGSGrenadeShoot(void *self, const void *method) {
             if (!mine || !verified) {
                 __atomic_fetch_add(&gOGSGrenade31LocalOwnerRejects, 1u,
                                    __ATOMIC_RELAXED);
-            } else if (OGSReadMemory(ammoSlot, &before, sizeof(before)) &&
-                       before >= 0 && before <= 4 &&
-                       OGSIsWritableMappedSlot((uintptr_t)self + 0x128u)) {
-                eligible = true;
-                __atomic_store_n(&gOGSGrenade31LastBefore, before,
-                                 __ATOMIC_RELAXED);
-                __atomic_fetch_add(&gOGSGrenade32ThrowValidated, 1u,
-                                   __ATOMIC_RELAXED);
-                // The game may consume ammo either before or after this
-                // callback. Keep a bounded spare available in both cases.
-                // Preloading two from 0/1 is local only, not server proof.
-                if (before < 2) {
-                    int32_t expected = before;
-                    if (__atomic_compare_exchange_n((int32_t *)ammoSlot,
-                         &expected, 2, false, __ATOMIC_ACQ_REL,
-                         __ATOMIC_ACQUIRE)) {
-                        __atomic_fetch_add(&gOGSGrenade32Preloaded, 1u,
+            } else {
+                bool readOk = OGSReadMemory(ammoSlot, &before, sizeof(before));
+                if (readOk) {
+                    __atomic_store_n(&gOGSGrenade34LastRawAmmo, before,
+                                     __ATOMIC_RELAXED);
+                    if (before == -1)
+                        __atomic_fetch_add(&gOGSGrenade34AmmoMinusOne, 1u,
                                            __ATOMIC_RELAXED);
-                        __atomic_fetch_add(&gOGSGrenade31Replenished, 1u,
-                                           __ATOMIC_RELAXED);
-                    } else {
-                        __atomic_fetch_add(&gOGSGrenade32PreWriteErrors, 1u,
-                                           __ATOMIC_RELAXED);
+                }
+                bool rangeOk = readOk && before >= -1 && before <= 64;
+                // Map probe uses aligned 8-byte backing word at +0x128;
+                // actual 32-bit ammo is at +0x12C. No invalid-pointer writes.
+                bool writable = rangeOk &&
+                    OGSIsWritableMappedSlot((uintptr_t)self + 0x128u);
+                if (!readOk) {
+                    __atomic_fetch_add(&gOGSGrenade34AmmoReadFailed, 1u,
+                                       __ATOMIC_RELAXED);
+                } else if (!rangeOk) {
+                    __atomic_fetch_add(&gOGSGrenade34AmmoOutOfRange, 1u,
+                                       __ATOMIC_RELAXED);
+                } else if (!writable) {
+                    __atomic_fetch_add(&gOGSGrenade34AmmoNotWritable, 1u,
+                                       __ATOMIC_RELAXED);
+                } else {
+                    eligible = true;
+                    __atomic_fetch_add(&gOGSGrenade34Eligible, 1u,
+                                       __ATOMIC_RELAXED);
+                    __atomic_store_n(&gOGSGrenade31LastBefore, before,
+                                     __ATOMIC_RELAXED);
+                    __atomic_fetch_add(&gOGSGrenade32ThrowValidated, 1u,
+                                       __ATOMIC_RELAXED);
+                    // FireOneShot can decrement bulletsLeft before this
+                    // callback; -1 is a plausible one-past-zero sentinel.
+                    // Only restore a *small* local reserve when it is low.
+                    if (before < 2) {
+                        int32_t expected = before;
+                        if (__atomic_compare_exchange_n((int32_t *)ammoSlot,
+                             &expected, 2, false, __ATOMIC_ACQ_REL,
+                             __ATOMIC_ACQUIRE)) {
+                            __atomic_fetch_add(&gOGSGrenade32Preloaded, 1u,
+                                               __ATOMIC_RELAXED);
+                            __atomic_fetch_add(&gOGSGrenade31Replenished, 1u,
+                                               __ATOMIC_RELAXED);
+                        } else {
+                            __atomic_fetch_add(&gOGSGrenade32PreWriteErrors, 1u,
+                                               __ATOMIC_RELAXED);
+                        }
                     }
                 }
-            } else {
-                __atomic_fetch_add(&gOGSGrenade31InvalidCount, 1u,
-                                   __ATOMIC_RELAXED);
+                if (!eligible) {
+                    __atomic_fetch_add(&gOGSGrenade31InvalidCount, 1u,
+                                       __ATOMIC_RELAXED);
+                }
             }
         }
     }
@@ -1854,22 +1890,31 @@ static void hook_OGSGrenadeShoot(void *self, const void *method) {
     if (original) original(self, method);
     if (eligible && OGSIsWritableMappedSlot((uintptr_t)self + 0x128u)) {
         int32_t after = -1;
-        if (OGSReadMemory(ammoSlot, &after, sizeof(after)) &&
-            after >= 0 && after <= 4) {
-            __atomic_store_n(&gOGSGrenade32LastAfterOriginal, after,
+        if (!OGSReadMemory(ammoSlot, &after, sizeof(after))) {
+            __atomic_fetch_add(&gOGSGrenade34AfterReadFailed, 1u,
+                               __ATOMIC_RELAXED);
+        } else {
+            __atomic_store_n(&gOGSGrenade34LastRawAfter, after,
                              __ATOMIC_RELAXED);
-            __atomic_store_n(&gOGSGrenade31LastAfter, after,
-                             __ATOMIC_RELAXED);
-            if (after == 0) {
-                int32_t expected = 0;
-                if (__atomic_compare_exchange_n((int32_t *)ammoSlot,
-                    &expected, 1, false, __ATOMIC_RELEASE,
-                    __ATOMIC_RELAXED)) {
-                    __atomic_fetch_add(&gOGSGrenade32PostRestocked, 1u,
-                                       __ATOMIC_RELAXED);
-                    __atomic_fetch_add(&gOGSGrenade31Replenished, 1u,
-                                       __ATOMIC_RELAXED);
+            if (after >= -1 && after <= 64) {
+                __atomic_store_n(&gOGSGrenade32LastAfterOriginal, after,
+                                 __ATOMIC_RELAXED);
+                __atomic_store_n(&gOGSGrenade31LastAfter, after,
+                                 __ATOMIC_RELAXED);
+                if (after <= 0) {
+                    int32_t expected = after;
+                    if (__atomic_compare_exchange_n((int32_t *)ammoSlot,
+                        &expected, 1, false, __ATOMIC_RELEASE,
+                        __ATOMIC_RELAXED)) {
+                        __atomic_fetch_add(&gOGSGrenade32PostRestocked, 1u,
+                                           __ATOMIC_RELAXED);
+                        __atomic_fetch_add(&gOGSGrenade31Replenished, 1u,
+                                           __ATOMIC_RELAXED);
+                    }
                 }
+            } else {
+                __atomic_fetch_add(&gOGSGrenade34AfterOutOfRange, 1u,
+                                   __ATOMIC_RELAXED);
             }
         }
     }
@@ -3189,7 +3234,7 @@ static void OGSInstallHooks(void) {
         self.menuPanel.hidden = YES;
 
         self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 5, 260, 18)];
-        self.titleLabel.text = @"OGS33 | اختبار القنابل";
+        self.titleLabel.text = @"OGS34 | تشخيص ذخيرة القنابل";
         self.titleLabel.textColor = [UIColor whiteColor];
         self.titleLabel.textAlignment = NSTextAlignmentCenter;
         self.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
@@ -3730,6 +3775,21 @@ static void OGSInstallHooks(void) {
         __atomic_load_n(&gOGSGrenade31LastBefore, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSGrenade32LastAfterOriginal, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSGrenade31LastAfter, __ATOMIC_RELAXED)];
+    details = [details stringByAppendingFormat:
+        @"\nOGS34 Grenade ammo: read fail=%u | out-of-range=%u | not writable=%u"
+         "\nRaw ammo before=%d | minus-one samples=%u | eligible=%u"
+         "\nRaw ammo after=%d | after read fail=%u | after invalid=%u"
+         "\nAllowed raw range -1..64. Local weapon type=5 and owner required."
+         "\nNo room or host gating. Server acknowledgement not measured.",
+        __atomic_load_n(&gOGSGrenade34AmmoReadFailed, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSGrenade34AmmoOutOfRange, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSGrenade34AmmoNotWritable, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSGrenade34LastRawAmmo, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSGrenade34AmmoMinusOne, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSGrenade34Eligible, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSGrenade34LastRawAfter, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSGrenade34AfterReadFailed, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSGrenade34AfterOutOfRange, __ATOMIC_RELAXED)];
     details = [details stringByAppendingFormat:
         @"\nStage27 LeaveRoom cache=%u | local disconnect cache=%u | strict lock=%u"
          "\nLeaveRoom entry=%u blocked=%u forwarded=%u | DemoLeave entry=%u blocked=%u forwarded=%u"
