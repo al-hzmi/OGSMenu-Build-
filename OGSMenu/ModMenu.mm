@@ -984,21 +984,25 @@ static const uintptr_t kOGSRoomSetVisibleSlot = 0x02391768;
 // Room.set_MaxPlayers MD31704 / MI29298, ARM64 RVA 0x013F1AF0.
 // The native implementation clamps the input at 255, sends a Photon room
 // property update, then stores the local one-byte room capacity at +0x20.
-// OGS37 deliberately supports only bounded increases through 32 players.
+// OGS38 supports bounded capacity changes in either direction through 32.
 static const uintptr_t kOGSRoomSetMaxPlayersSlot = 0x02391790;
 static const uintptr_t kOGSRoomSetMaxPlayersEntry = 0x013F1AF0;
 static volatile uint32_t gOGSRoomCapacityPending = 0;
 static uintptr_t gOGSRoomCapacityBoundRoom = 0; // gStateLock
 static int32_t gOGSRoomCapacityBoundActor = 0; // gStateLock
 static uint8_t gOGSRoomCapacityTarget = 0; // gStateLock
+static uint8_t gOGSRoomCapacityExpectedBefore = 0; // gStateLock
 static double gOGSRoomCapacityLastQueuedAt = 0.; // gStateLock
 static volatile uint32_t gOGSRoomCapacityQueued = 0;
 static volatile uint32_t gOGSRoomCapacityAttempted = 0;
 static volatile uint32_t gOGSRoomCapacityLocalApplied = 0;
 static volatile uint32_t gOGSRoomCapacityRejected = 0;
 static volatile uint32_t gOGSRoomCapacityFailed = 0;
+static volatile uint32_t gOGSRoomCapacityBelowOccupancy = 0;
 static volatile uint32_t gOGSRoomCapacityLastBefore = 0;
 static volatile uint32_t gOGSRoomCapacityLastAfter = 0;
+static volatile uint32_t gOGSRoomCapacityLastTarget = 0;
+static volatile uint32_t gOGSRoomCapacityLastOccupancy = 0;
 // 0=no action, 1=hidden & joinable, 2=hidden & closed, 3=public & joinable.
 static volatile uint32_t gOGSPrivacyPending = 0;
 static uintptr_t gOGSPrivacyRequestedRoom = 0; // gStateLock
@@ -2330,16 +2334,18 @@ static void OGSProcessSelfNicknameOnPhotonThread(void) {
     // Read-back is local only; server acceptance is intentionally not claimed.
 }
 
-// Execute one explicitly requested room-capacity increase on Photon Update.
+// Execute one explicitly requested room-capacity change on Photon Update.
 // Never write room memory directly or mutate other players' state. This uses
 // the game's own verified Room.set_MaxPlayers property setter.
 static void OGSProcessRoomCapacityOnPhotonThread(void) {
     uint8_t target = 0;
+    uint8_t expectedBefore = 0;
     uintptr_t boundRoom = 0;
     int32_t boundActor = 0;
     os_unfair_lock_lock(&gStateLock);
     if (__atomic_load_n(&gOGSRoomCapacityPending, __ATOMIC_ACQUIRE)) {
         target = gOGSRoomCapacityTarget;
+        expectedBefore = gOGSRoomCapacityExpectedBefore;
         boundRoom = gOGSRoomCapacityBoundRoom;
         boundActor = gOGSRoomCapacityBoundActor;
         __atomic_store_n(&gOGSRoomCapacityPending, 0u, __ATOMIC_RELEASE);
@@ -2356,12 +2362,23 @@ static void OGSProcessRoomCapacityOnPhotonThread(void) {
         !OGSReadMemory(room + 0x50u, &playerCount, sizeof(playerCount)) ||
         current < 1 || current > 32 ||
         playerCount < 0 || playerCount > current ||
-        !(target == 8 || target == 10 || target == 16 || target == 32) ||
-        target <= current) {
+        target < 2 || target > 32 || target == current ||
+        current != expectedBefore) {
         __atomic_fetch_add(&gOGSRoomCapacityRejected, 1u, __ATOMIC_RELAXED);
         return;
     }
     __atomic_store_n(&gOGSRoomCapacityLastBefore, current, __ATOMIC_RELAXED);
+    __atomic_store_n(&gOGSRoomCapacityLastTarget, target, __ATOMIC_RELAXED);
+    __atomic_store_n(&gOGSRoomCapacityLastOccupancy, playerCount,
+                     __ATOMIC_RELAXED);
+    // A capacity below the number of occupants can leave existing clients in
+    // a contradictory state. The setter is not called for such a request.
+    if ((int32_t)target < playerCount) {
+        __atomic_fetch_add(&gOGSRoomCapacityBelowOccupancy, 1u,
+                           __ATOMIC_RELAXED);
+        __atomic_fetch_add(&gOGSRoomCapacityRejected, 1u, __ATOMIC_RELAXED);
+        return;
+    }
 
     uintptr_t entry = OGSResolveRVA(kOGSRoomSetMaxPlayersEntry);
     uintptr_t slot = OGSResolveRVA(kOGSRoomSetMaxPlayersSlot);
@@ -3437,7 +3454,7 @@ static void OGSInstallHooks(void) {
         self.menuPanel.hidden = YES;
 
         self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 5, 260, 18)];
-        self.titleLabel.text = @"OGS37 | إدارة سعة الروم";
+        self.titleLabel.text = @"OGS38 | سعة الروم والضرر";
         self.titleLabel.textColor = [UIColor whiteColor];
         self.titleLabel.textAlignment = NSTextAlignmentCenter;
         self.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
@@ -3533,7 +3550,7 @@ static void OGSInstallHooks(void) {
             action:@selector(promptSelfNickname:)]];
 
         [self.menuPanel addSubview:[self makeBtn:CGRectMake(10, 424, 295, 30)
-            title:@"زيادة سعة الروم (8 / 10 / 16 / 32)" bg:hostBlue
+            title:@"تحديد سعة الروم (2–32): زيادة أو نقصان" bg:hostBlue
             action:@selector(promptRoomCapacity:)]];
 
         [self.containerView addSubview:self.menuPanel];
@@ -4030,9 +4047,10 @@ static void OGSInstallHooks(void) {
         __atomic_load_n(&gGodOtherPlayerPasses, __ATOMIC_RELAXED),
         __atomic_load_n(&gGodUnverifiedPasses, __ATOMIC_RELAXED)];
     details = [details stringByAppendingFormat:
-        @"\nOGS37 room capacity: pending=%u | queued=%u | attempted=%u"
-         " | local applied=%u | rejected=%u | failed=%u"
-         "\nMaxPlayers before=%u | after=%u | supported increases: 8/10/16/32"
+        @"\nOGS38 room capacity: pending=%u | queued=%u | attempted=%u"
+         " | local applied=%u | rejected=%u | failed=%u | below occupants=%u"
+         "\nMaxPlayers before=%u | requested=%u | after=%u | occupants=%u"
+         "\nSupported capacity changes: any integer 2..32, including reductions."
          "\nLocal room update is NOT server acknowledgement; confirm from another account.",
         __atomic_load_n(&gOGSRoomCapacityPending, __ATOMIC_ACQUIRE),
         __atomic_load_n(&gOGSRoomCapacityQueued, __ATOMIC_RELAXED),
@@ -4040,8 +4058,11 @@ static void OGSInstallHooks(void) {
         __atomic_load_n(&gOGSRoomCapacityLocalApplied, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSRoomCapacityRejected, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSRoomCapacityFailed, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSRoomCapacityBelowOccupancy, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSRoomCapacityLastBefore, __ATOMIC_RELAXED),
-        __atomic_load_n(&gOGSRoomCapacityLastAfter, __ATOMIC_RELAXED)];
+        __atomic_load_n(&gOGSRoomCapacityLastTarget, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSRoomCapacityLastAfter, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSRoomCapacityLastOccupancy, __ATOMIC_RELAXED)];
     details = [details stringByAppendingFormat:
         @"\nStage27 LeaveRoom cache=%u | local disconnect cache=%u | strict lock=%u"
          "\nLeaveRoom entry=%u blocked=%u forwarded=%u | DemoLeave entry=%u blocked=%u forwarded=%u"
@@ -4548,22 +4569,44 @@ static void OGSInstallHooks(void) {
         self.statusLabel.text = @"تغيير سعة الروم يتطلب أن تكون الهوست حاليًا";
         return;
     }
-    if (current >= 32) {
-        self.statusLabel.text = @"الحد التجريبي الحالي 32 لاعبًا؛ لم نعتمد 100 أو 200";
-        return;
-    }
     UIAlertController *dialog = [UIAlertController
-        alertControllerWithTitle:@"زيادة سعة الروم"
+        alertControllerWithTitle:@"تحديد سعة الروم"
         message:[NSString stringWithFormat:
-            @"السعة المرصودة: %u | اللاعبون: %d\nتُرسل الزيادة عبر Photon، والقبول من الخادم غير مضمون.",
+            @"السعة الحالية: %u | الموجودون: %d\nاختر رقمًا من 2 إلى 32، مثل 2 أو 4 أو 6 أو 8. لا يمكن النزول تحت عدد الموجودين.",
             (unsigned)current, playerCount]
         preferredStyle:UIAlertControllerStyleAlert];
-    for (NSNumber *number in @[@8, @10, @16, @32]) {
-        const uint8_t target = (uint8_t)number.unsignedIntValue;
-        if (target <= current) continue;
-        [dialog addAction:[UIAlertAction actionWithTitle:
-            [NSString stringWithFormat:@"زيادة إلى %u لاعبين", (unsigned)target]
-            style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+    [dialog addTextFieldWithConfigurationHandler:^(UITextField *field) {
+        field.placeholder = @"عدد اللاعبين (2–32)";
+        field.text = [NSString stringWithFormat:@"%u", (unsigned)current];
+        field.keyboardType = UIKeyboardTypeNumberPad;
+    }];
+    __weak UITextField *weakInput = dialog.textFields.firstObject;
+    [dialog addAction:[UIAlertAction actionWithTitle:@"إلغاء"
+        style:UIAlertActionStyleCancel handler:nil]];
+    [dialog addAction:[UIAlertAction actionWithTitle:@"تطبيق السعة"
+        style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+            NSString *input = [weakInput.text ?: @""
+                stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            if (input.length == 0 || input.length > 2 ||
+                [input rangeOfCharacterFromSet:
+                    [[NSCharacterSet decimalDigitCharacterSet] invertedSet]].location != NSNotFound) {
+                self.statusLabel.text = @"اكتب رقمًا صحيحًا من 2 إلى 32";
+                return;
+            }
+            NSInteger desired = input.integerValue;
+            if (desired < 2 || desired > 32) {
+                self.statusLabel.text = @"السعة المدعومة حاليًا من 2 إلى 32 فقط";
+                return;
+            }
+            if (desired == current) {
+                self.statusLabel.text = @"السعة بالفعل تساوي الرقم المدخل";
+                return;
+            }
+            if (desired < playerCount) {
+                self.statusLabel.text = @"لا يمكن أن تقل السعة عن عدد اللاعبين الموجودين";
+                return;
+            }
+            const uint8_t target = (uint8_t)desired;
             uintptr_t liveRoom = 0;
             int32_t liveActor = 0, liveMaster = 0;
             if (!OGSReadAutoRoom(&liveRoom, &liveActor, &liveMaster) ||
@@ -4581,6 +4624,7 @@ static void OGSInstallHooks(void) {
                 gOGSRoomCapacityBoundRoom = room;
                 gOGSRoomCapacityBoundActor = actor;
                 gOGSRoomCapacityTarget = target;
+                gOGSRoomCapacityExpectedBefore = current;
                 gOGSRoomCapacityLastQueuedAt = now;
                 __atomic_store_n(&gOGSRoomCapacityPending, 1u, __ATOMIC_RELEASE);
             }
@@ -4591,11 +4635,8 @@ static void OGSInstallHooks(void) {
                 return;
             }
             __atomic_fetch_add(&gOGSRoomCapacityQueued, 1u, __ATOMIC_RELAXED);
-            self.statusLabel.text = @"طلب الزيادة ينتظر Photon؛ راجع التشخيص والتأكيد من حساب آخر";
+            self.statusLabel.text = @"تغيير السعة ينتظر Photon؛ تأكد من حساب آخر";
         }]];
-    }
-    [dialog addAction:[UIAlertAction actionWithTitle:@"إلغاء"
-        style:UIAlertActionStyleCancel handler:nil]];
     UIViewController *root = [self gameMainWindow].rootViewController;
     if (root && !root.presentedViewController)
         [root presentViewController:dialog animated:YES completion:nil];
@@ -4621,9 +4662,9 @@ static void OGSInstallHooks(void) {
         __atomic_store_n(&gGodLocalBypasses, 0u, __ATOMIC_RELAXED);
         __atomic_store_n(&gGodOtherPlayerPasses, 0u, __ATOMIC_RELAXED);
         __atomic_store_n(&gGodUnverifiedPasses, 0u, __ATOMIC_RELAXED);
-        [s setTitle:@"درع الحماية: مسلّح 🛡️" forState:UIControlStateNormal];
+        [s setTitle:@"درع الحماية: تجريبي ⚠️" forState:UIControlStateNormal];
         s.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
-        self.statusLabel.text = @"الدرع جاهز للاختبار؛ تحقق من عدّاد المنع عند وصول ضرر";
+        self.statusLabel.text = @"يعترض DamageRemote فقط؛ لا يضمن منع الموت أو ضرر القنابل";
     } else {
         [s setTitle:@"درع الحماية: متوقف 🛡️" forState:UIControlStateNormal];
         s.backgroundColor = [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
