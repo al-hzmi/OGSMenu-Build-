@@ -1596,6 +1596,15 @@ static volatile uint32_t gOGSGrenade34AfterReadFailed = 0;
 static volatile uint32_t gOGSGrenade34AfterOutOfRange = 0;
 static volatile int32_t gOGSGrenade34LastRawAmmo = INT32_MIN;
 static volatile int32_t gOGSGrenade34LastRawAfter = INT32_MIN;
+// OGS35: observe both phases even when the OGS34 ammo gate rejects a value.
+// These are read-only samples; unknown values are NEVER made write-eligible.
+static volatile uint32_t gOGSGrenade35LocalPhaseSamples = 0;
+static volatile uint32_t gOGSGrenade35AfterReadOk = 0;
+static volatile uint32_t gOGSGrenade35ChangedDuringOriginal = 0;
+static volatile uint32_t gOGSGrenade35AdjacentReadFail = 0;
+static volatile uint32_t gOGSGrenade35MissingOriginal = 0;
+static volatile int32_t gOGSGrenade35BeforeAdjacent = INT32_MIN;
+static volatile int32_t gOGSGrenade35AfterAdjacent = INT32_MIN;
 
 // Verified in the original fps 3.4.0 ARM64 executable:
 // PlayerNetwork.GetPhotonView RVA 0x13A9964 (self -> PhotonView),
@@ -1804,6 +1813,8 @@ static void hook_OGSGrenadeFire2(void *self, const void *method) {
 static void hook_OGSGrenadeShoot(void *self, const void *method) {
     __atomic_fetch_add(&gOGSGrenade31ThrowCalls, 1u, __ATOMIC_RELAXED);
     bool eligible = false;
+    bool localGrenadeObserved = false;
+    bool beforeRead = false;
     uintptr_t ammoSlot = (uintptr_t)self + 0x12Cu;
     int32_t before = -1;
     if (self && __atomic_load_n(&gOGSGrenade31Enabled, __ATOMIC_ACQUIRE)) {
@@ -1830,20 +1841,32 @@ static void hook_OGSGrenadeShoot(void *self, const void *method) {
                 __atomic_fetch_add(&gOGSGrenade31LocalOwnerRejects, 1u,
                                    __ATOMIC_RELAXED);
             } else {
-                bool readOk = OGSReadMemory(ammoSlot, &before, sizeof(before));
-                if (readOk) {
+                localGrenadeObserved = true;
+                __atomic_fetch_add(&gOGSGrenade35LocalPhaseSamples, 1u,
+                                   __ATOMIC_RELAXED);
+                int32_t adjacent = INT32_MIN;
+                if (OGSReadMemory((uintptr_t)self + 0x130u,
+                                  &adjacent, sizeof(adjacent))) {
+                    __atomic_store_n(&gOGSGrenade35BeforeAdjacent, adjacent,
+                                     __ATOMIC_RELAXED);
+                } else {
+                    __atomic_fetch_add(&gOGSGrenade35AdjacentReadFail, 1u,
+                                       __ATOMIC_RELAXED);
+                }
+                beforeRead = OGSReadMemory(ammoSlot, &before, sizeof(before));
+                if (beforeRead) {
                     __atomic_store_n(&gOGSGrenade34LastRawAmmo, before,
                                      __ATOMIC_RELAXED);
                     if (before == -1)
                         __atomic_fetch_add(&gOGSGrenade34AmmoMinusOne, 1u,
                                            __ATOMIC_RELAXED);
                 }
-                bool rangeOk = readOk && before >= -1 && before <= 64;
+                bool rangeOk = beforeRead && before >= -1 && before <= 64;
                 // Map probe uses aligned 8-byte backing word at +0x128;
                 // actual 32-bit ammo is at +0x12C. No invalid-pointer writes.
                 bool writable = rangeOk &&
                     OGSIsWritableMappedSlot((uintptr_t)self + 0x128u);
-                if (!readOk) {
+                if (!beforeRead) {
                     __atomic_fetch_add(&gOGSGrenade34AmmoReadFailed, 1u,
                                        __ATOMIC_RELAXED);
                 } else if (!rangeOk) {
@@ -1888,14 +1911,38 @@ static void hook_OGSGrenadeShoot(void *self, const void *method) {
     OGSWeaponZeroFn original = __atomic_load_n(&orig_OGSGrenadeShoot,
                                                __ATOMIC_ACQUIRE);
     if (original) original(self, method);
-    if (eligible && OGSIsWritableMappedSlot((uintptr_t)self + 0x128u)) {
-        int32_t after = -1;
-        if (!OGSReadMemory(ammoSlot, &after, sizeof(after))) {
+    else __atomic_fetch_add(&gOGSGrenade35MissingOriginal, 1u,
+                            __ATOMIC_RELAXED);
+    // The original may be the only code that reveals the true consumption
+    // phase. Sample it even when the pre-call value was out of range.
+    int32_t after = INT32_MIN;
+    bool afterRead = false;
+    if (localGrenadeObserved) {
+        afterRead = OGSReadMemory(ammoSlot, &after, sizeof(after));
+        if (!afterRead) {
             __atomic_fetch_add(&gOGSGrenade34AfterReadFailed, 1u,
                                __ATOMIC_RELAXED);
         } else {
+            __atomic_fetch_add(&gOGSGrenade35AfterReadOk, 1u,
+                               __ATOMIC_RELAXED);
             __atomic_store_n(&gOGSGrenade34LastRawAfter, after,
                              __ATOMIC_RELAXED);
+            if (beforeRead && before != after)
+                __atomic_fetch_add(&gOGSGrenade35ChangedDuringOriginal, 1u,
+                                   __ATOMIC_RELAXED);
+        }
+        int32_t adjacent = INT32_MIN;
+        if (OGSReadMemory((uintptr_t)self + 0x130u,
+                          &adjacent, sizeof(adjacent))) {
+            __atomic_store_n(&gOGSGrenade35AfterAdjacent, adjacent,
+                             __ATOMIC_RELAXED);
+        } else {
+            __atomic_fetch_add(&gOGSGrenade35AdjacentReadFail, 1u,
+                               __ATOMIC_RELAXED);
+        }
+    }
+    if (eligible && afterRead &&
+        OGSIsWritableMappedSlot((uintptr_t)self + 0x128u)) {
             if (after >= -1 && after <= 64) {
                 __atomic_store_n(&gOGSGrenade32LastAfterOriginal, after,
                                  __ATOMIC_RELAXED);
@@ -1916,7 +1963,6 @@ static void hook_OGSGrenadeShoot(void *self, const void *method) {
                 __atomic_fetch_add(&gOGSGrenade34AfterOutOfRange, 1u,
                                    __ATOMIC_RELAXED);
             }
-        }
     }
 }
 
@@ -3234,7 +3280,7 @@ static void OGSInstallHooks(void) {
         self.menuPanel.hidden = YES;
 
         self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 5, 260, 18)];
-        self.titleLabel.text = @"OGS34 | تشخيص ذخيرة القنابل";
+        self.titleLabel.text = @"OGS35 | تشخيص مراحل رمي القنابل";
         self.titleLabel.textColor = [UIColor whiteColor];
         self.titleLabel.textAlignment = NSTextAlignmentCenter;
         self.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
@@ -3790,6 +3836,19 @@ static void OGSInstallHooks(void) {
         __atomic_load_n(&gOGSGrenade34LastRawAfter, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSGrenade34AfterReadFailed, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSGrenade34AfterOutOfRange, __ATOMIC_RELAXED)];
+    details = [details stringByAppendingFormat:
+        @"\nOGS35 grenade phases: verified local=%u | post-original reads=%u"
+         "\nRaw +0x12C changed during GrenadeShootm=%u | original missing=%u"
+         "\nAdjacent +0x130 before=%d | after=%d | read failures=%u"
+         "\nPOST samples now run even when the OGS34 range gate rejects."
+         "\nAdjacent values are observations only; never modified.",
+        __atomic_load_n(&gOGSGrenade35LocalPhaseSamples, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSGrenade35AfterReadOk, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSGrenade35ChangedDuringOriginal, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSGrenade35MissingOriginal, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSGrenade35BeforeAdjacent, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSGrenade35AfterAdjacent, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSGrenade35AdjacentReadFail, __ATOMIC_RELAXED)];
     details = [details stringByAppendingFormat:
         @"\nStage27 LeaveRoom cache=%u | local disconnect cache=%u | strict lock=%u"
          "\nLeaveRoom entry=%u blocked=%u forwarded=%u | DemoLeave entry=%u blocked=%u forwarded=%u"
