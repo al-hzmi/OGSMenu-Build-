@@ -171,6 +171,10 @@ static Update0Fn orig_WorkerInGameDisconnected = NULL;
 
 static ApplyDamageFn  orig_ApplyDamage = NULL;
 static DamageRemoteFn orig_DamageRemote = NULL;
+// PlayerNetwork.KillPlayer has one explicit IL2CPP argument (preserved as an
+// unmodified raw machine word). Passive diagnostics only, never block a kill.
+typedef void (*OGSKillPlayerFn)(void *, uintptr_t, const void *);
+static OGSKillPlayerFn orig_OGSKillPlayer = NULL;
 // FPSWeapon.FireOneShot() instance ABI: self, MethodInfo* (MD30438).
 typedef void (*KnifeFire28Fn)(void*, const void*);
 static KnifeFire28Fn orig_KnifeFire28 = NULL;
@@ -984,9 +988,19 @@ static const uintptr_t kOGSRoomSetVisibleSlot = 0x02391768;
 // Room.set_MaxPlayers MD31704 / MI29298, ARM64 RVA 0x013F1AF0.
 // The native implementation clamps the input at 255, sends a Photon room
 // property update, then stores the local one-byte room capacity at +0x20.
-// OGS38 supports bounded capacity changes in either direction through 32.
+// OGS39: RoomInfo.playerCount (+0x50) is NOT Room.get_PlayerCount.
+// The verified Room getter (MD31705 / MI29299) reads the actual PUN roster.
+// Capacity setters still update local state optimistically before the server
+// acknowledges anything; do not report a successful remote resize from it.
 static const uintptr_t kOGSRoomSetMaxPlayersSlot = 0x02391790;
 static const uintptr_t kOGSRoomSetMaxPlayersEntry = 0x013F1AF0;
+static const uintptr_t kOGSRoomGetPlayerCountSlot = 0x02391798;
+static const uintptr_t kOGSRoomGetPlayerCountEntry = 0x013ED320;
+static volatile uintptr_t gOGSRoomRosterObservedRoom = 0;
+static volatile int32_t gOGSRoomRosterObservedCount = 0;
+static volatile uint32_t gOGSRoomRosterGetterVerified = 0;
+static volatile uint32_t gOGSRoomRosterGetterFailures = 0;
+static double gOGSRoomRosterLastPollAt = 0.; // Photon callback only
 static volatile uint32_t gOGSRoomCapacityPending = 0;
 static uintptr_t gOGSRoomCapacityBoundRoom = 0; // gStateLock
 static int32_t gOGSRoomCapacityBoundActor = 0; // gStateLock
@@ -1003,6 +1017,15 @@ static volatile uint32_t gOGSRoomCapacityLastBefore = 0;
 static volatile uint32_t gOGSRoomCapacityLastAfter = 0;
 static volatile uint32_t gOGSRoomCapacityLastTarget = 0;
 static volatile uint32_t gOGSRoomCapacityLastOccupancy = 0;
+// Unattributed signals within 8s of a request, NEVER called a server ACK.
+// Concurrent room operations can generate the very same OpCode 252/Event253.
+static uintptr_t gOGSRoomCapacitySignalRoom = 0; // gStateLock
+static double gOGSRoomCapacitySignalTime = 0.;  // gStateLock
+static volatile uint32_t gOGSRoomCapacityNearby252Ok = 0;
+static volatile uint32_t gOGSRoomCapacityNearby252Error = 0;
+static volatile int32_t gOGSRoomCapacityNearby252LastCode = INT32_MAX;
+static volatile uint32_t gOGSRoomCapacityNearby253 = 0;
+static volatile uint32_t gOGSRoomCapacityAfter253 = 0;
 // 0=no action, 1=hidden & joinable, 2=hidden & closed, 3=public & joinable.
 static volatile uint32_t gOGSPrivacyPending = 0;
 static uintptr_t gOGSPrivacyRequestedRoom = 0; // gStateLock
@@ -1638,6 +1661,46 @@ static volatile uint32_t gOGSGrenade35AdjacentReadFail = 0;
 static volatile uint32_t gOGSGrenade35MissingOriginal = 0;
 static volatile int32_t gOGSGrenade35BeforeAdjacent = INT32_MIN;
 static volatile int32_t gOGSGrenade35AfterAdjacent = INT32_MIN;
+// OGS39: read-only probe of FPSWeapon.playerWeapons (+0xC8) and the
+// PlayerWeapons.Grenade array (+0x60) / selectedGrenade (+0x8C). The
+// SwitchWeaponGrenade native ARM64 method uses +0x60 and +0x8C. These are
+// NOT ammunition counters, and no array or selection is ever modified.
+static volatile uint32_t gOGSGrenade39InventoryReads = 0;
+static volatile uint32_t gOGSGrenade39InventoryReadFailures = 0;
+static volatile uint32_t gOGSGrenade39SelectionChanges = 0;
+static volatile int32_t gOGSGrenade39SlotsBefore = -1;
+static volatile int32_t gOGSGrenade39SlotsAfter = -1;
+static volatile int32_t gOGSGrenade39SelectedBefore = -1;
+static volatile int32_t gOGSGrenade39SelectedAfter = -1;
+static volatile uint32_t gOGS39KillHookStatus = 0;
+static volatile uint32_t gOGS39KillCallbacks = 0;
+static volatile uint32_t gOGS39LocalKillCallbacks = 0;
+static volatile uint32_t gOGS39OtherKillCallbacks = 0;
+static volatile uint32_t gOGS39UnknownKillCallbacks = 0;
+
+static bool OGSReadGrenadeSelectionProbe(void *weapon, int32_t *slotCount,
+                                         int32_t *selected) {
+    if (!weapon || !slotCount || !selected) return false;
+    uintptr_t playerWeapons = 0, grenadeArray = 0, klass = 0;
+    uintptr_t length = 0;
+    int32_t selectedIndex = -1;
+    if (!OGSReadMemory((uintptr_t)weapon + 0xC8u,
+                       &playerWeapons, sizeof(playerWeapons)) ||
+        playerWeapons < 0x100000000ULL ||
+        !OGSReadMemory(playerWeapons, &klass, sizeof(klass)) ||
+        klass < 0x100000000ULL ||
+        !OGSReadMemory(playerWeapons + 0x60u,
+                       &grenadeArray, sizeof(grenadeArray)) ||
+        grenadeArray < 0x100000000ULL ||
+        !OGSReadMemory(grenadeArray + 0x18u, &length, sizeof(length)) ||
+        length > 64 ||
+        !OGSReadMemory(playerWeapons + 0x8Cu,
+                       &selectedIndex, sizeof(selectedIndex)) ||
+        selectedIndex < -1 || selectedIndex > 64) return false;
+    *slotCount = (int32_t)length;
+    *selected = selectedIndex;
+    return true;
+}
 
 // Verified in the original fps 3.4.0 ARM64 executable:
 // PlayerNetwork.GetPhotonView RVA 0x13A9964 (self -> PhotonView),
@@ -1668,6 +1731,25 @@ static bool OGSIsDamageToLocalPlayer(void *playerNetwork, bool *verified) {
         ownerActorID <= 0) return false;
     if (verified) *verified = true;
     return localActorID == ownerActorID;
+}
+
+// Diagnostic method-pointer hook. ARM64 PlayerNetwork.KillPlayer
+// MD30380 / MI29168 / entry RVA 0x013E8FBC. Direct native `bl` calls may
+// bypass IL2CPP's pointer table, so zero callbacks do NOT rule this path out.
+static void hook_OGSKillPlayer(void *self, uintptr_t argument,
+                                const void *method) {
+    __atomic_fetch_add(&gOGS39KillCallbacks, 1u, __ATOMIC_RELAXED);
+    bool verified = false;
+    bool mine = OGSIsDamageToLocalPlayer(self, &verified);
+    if (!verified)
+        __atomic_fetch_add(&gOGS39UnknownKillCallbacks, 1u, __ATOMIC_RELAXED);
+    else if (mine)
+        __atomic_fetch_add(&gOGS39LocalKillCallbacks, 1u, __ATOMIC_RELAXED);
+    else
+        __atomic_fetch_add(&gOGS39OtherKillCallbacks, 1u, __ATOMIC_RELAXED);
+    OGSKillPlayerFn original = __atomic_load_n(&orig_OGSKillPlayer,
+                                               __ATOMIC_ACQUIRE);
+    if (original) original(self, argument, method);
 }
 
 // RVA 0x137CF70 constructs an Int32[3] with damage at +0x20.
@@ -1850,6 +1932,7 @@ static void hook_OGSGrenadeShoot(void *self, const void *method) {
     bool beforeRead = false;
     uintptr_t ammoSlot = (uintptr_t)self + 0x12Cu;
     int32_t before = -1;
+    int32_t inventorySlotsBefore = -1, selectedGrenadeBefore = -1;
     if (self && __atomic_load_n(&gOGSGrenade31Enabled, __ATOMIC_ACQUIRE)) {
         // Never turn off the user's toggle when joining/leaving rooms or
         // when the network/roster cache lags behind the Unity game loop.
@@ -1875,6 +1958,18 @@ static void hook_OGSGrenadeShoot(void *self, const void *method) {
                                    __ATOMIC_RELAXED);
             } else {
                 localGrenadeObserved = true;
+                if (OGSReadGrenadeSelectionProbe(self, &inventorySlotsBefore,
+                                                 &selectedGrenadeBefore)) {
+                    __atomic_fetch_add(&gOGSGrenade39InventoryReads, 1u,
+                                       __ATOMIC_RELAXED);
+                    __atomic_store_n(&gOGSGrenade39SlotsBefore,
+                                     inventorySlotsBefore, __ATOMIC_RELAXED);
+                    __atomic_store_n(&gOGSGrenade39SelectedBefore,
+                                     selectedGrenadeBefore, __ATOMIC_RELAXED);
+                } else {
+                    __atomic_fetch_add(&gOGSGrenade39InventoryReadFailures,
+                                       1u, __ATOMIC_RELAXED);
+                }
                 __atomic_fetch_add(&gOGSGrenade35LocalPhaseSamples, 1u,
                                    __ATOMIC_RELAXED);
                 int32_t adjacent = INT32_MIN;
@@ -1951,6 +2046,21 @@ static void hook_OGSGrenadeShoot(void *self, const void *method) {
     int32_t after = INT32_MIN;
     bool afterRead = false;
     if (localGrenadeObserved) {
+        int32_t inventorySlotsAfter = -1, selectedGrenadeAfter = -1;
+        if (OGSReadGrenadeSelectionProbe(self, &inventorySlotsAfter,
+                                         &selectedGrenadeAfter)) {
+            __atomic_store_n(&gOGSGrenade39SlotsAfter, inventorySlotsAfter,
+                             __ATOMIC_RELAXED);
+            __atomic_store_n(&gOGSGrenade39SelectedAfter,
+                             selectedGrenadeAfter, __ATOMIC_RELAXED);
+            if (selectedGrenadeBefore >= 0 &&
+                selectedGrenadeBefore != selectedGrenadeAfter)
+                __atomic_fetch_add(&gOGSGrenade39SelectionChanges,
+                                   1u, __ATOMIC_RELAXED);
+        } else {
+            __atomic_fetch_add(&gOGSGrenade39InventoryReadFailures, 1u,
+                               __ATOMIC_RELAXED);
+        }
         afterRead = OGSReadMemory(ammoSlot, &after, sizeof(after));
         if (!afterRead) {
             __atomic_fetch_add(&gOGSGrenade34AfterReadFailed, 1u,
@@ -2334,6 +2444,54 @@ static void OGSProcessSelfNicknameOnPhotonThread(void) {
     // Read-back is local only; server acceptance is intentionally not claimed.
 }
 
+// Room.get_PlayerCount (MD31705, MI29299, RVA 0x013ED320) obtains the
+// actual Photon player-list count; RoomInfo's backing cache at +0x50 does
+// not. This may only be called from a Photon/Unity callback, not from UIKit.
+static bool OGSReadLiveRoomPlayerCountOnPhotonThread(uintptr_t room,
+                                                     int32_t *outCount) {
+    if (!outCount || room < 0x100000000ULL) return false;
+    uintptr_t getter = OGSResolveRVA(kOGSRoomGetPlayerCountEntry);
+    uintptr_t slot = OGSResolveRVA(kOGSRoomGetPlayerCountSlot);
+    uintptr_t observed = 0;
+    if (!getter || !slot ||
+        !OGSReadMemory(slot, &observed, sizeof(observed)) ||
+        observed != getter || !OGSIsExecutableGameAddress(getter)) {
+        __atomic_store_n(&gOGSRoomRosterGetterVerified, 0u, __ATOMIC_RELEASE);
+        __atomic_fetch_add(&gOGSRoomRosterGetterFailures, 1u, __ATOMIC_RELAXED);
+        return false;
+    }
+    __atomic_store_n(&gOGSRoomRosterGetterVerified, 1u, __ATOMIC_RELEASE);
+    typedef int32_t (*RoomGetPlayerCountFn)(void *, const void *);
+    int32_t actual = ((RoomGetPlayerCountFn)getter)((void *)room, NULL);
+    if (actual < 1 || actual > 255) {
+        __atomic_fetch_add(&gOGSRoomRosterGetterFailures, 1u, __ATOMIC_RELAXED);
+        return false;
+    }
+    *outCount = actual;
+    return true;
+}
+
+static void OGSObserveRoomRosterOnPhotonThread(void) {
+    double now = CFAbsoluteTimeGetCurrent();
+    if (gOGSRoomRosterLastPollAt > 0. &&
+        now - gOGSRoomRosterLastPollAt < 0.5) return;
+    gOGSRoomRosterLastPollAt = now;
+    uintptr_t room = 0;
+    int32_t actor = 0, master = 0, actualCount = 0;
+    if (OGSReadAutoRoom(&room, &actor, &master) && actor > 0 &&
+        OGSReadLiveRoomPlayerCountOnPhotonThread(room, &actualCount)) {
+        __atomic_store_n(&gOGSRoomRosterObservedCount, actualCount,
+                         __ATOMIC_RELEASE);
+        __atomic_store_n(&gOGSRoomRosterObservedRoom, room,
+                         __ATOMIC_RELEASE);
+    } else {
+        __atomic_store_n(&gOGSRoomRosterObservedRoom, (uintptr_t)0,
+                         __ATOMIC_RELEASE);
+        __atomic_store_n(&gOGSRoomRosterObservedCount, 0,
+                         __ATOMIC_RELEASE);
+    }
+}
+
 // Execute one explicitly requested room-capacity change on Photon Update.
 // Never write room memory directly or mutate other players' state. This uses
 // the game's own verified Room.set_MaxPlayers property setter.
@@ -2359,9 +2517,9 @@ static void OGSProcessRoomCapacityOnPhotonThread(void) {
     if (!OGSReadAutoRoom(&room, &actor, &master) ||
         room != boundRoom || actor != boundActor || actor != master ||
         !OGSReadMemory(room + 0x20u, &current, sizeof(current)) ||
-        !OGSReadMemory(room + 0x50u, &playerCount, sizeof(playerCount)) ||
+        !OGSReadLiveRoomPlayerCountOnPhotonThread(room, &playerCount) ||
         current < 1 || current > 32 ||
-        playerCount < 0 || playerCount > current ||
+        playerCount > current ||
         target < 2 || target > 32 || target == current ||
         current != expectedBefore) {
         __atomic_fetch_add(&gOGSRoomCapacityRejected, 1u, __ATOMIC_RELAXED);
@@ -2390,6 +2548,12 @@ static void OGSProcessRoomCapacityOnPhotonThread(void) {
     }
     typedef void (*RoomSetMaxPlayersFn)(void *, int32_t, const void *);
     __atomic_fetch_add(&gOGSRoomCapacityAttempted, 1u, __ATOMIC_RELAXED);
+    // Track network replies near the call, without attributing unrelated
+    // Op252 or Event253 responses to this request.
+    os_unfair_lock_lock(&gStateLock);
+    gOGSRoomCapacitySignalRoom = room;
+    gOGSRoomCapacitySignalTime = CFAbsoluteTimeGetCurrent();
+    os_unfair_lock_unlock(&gStateLock);
     ((RoomSetMaxPlayersFn)entry)((void *)room, (int32_t)target, NULL);
 
     uint8_t after = 0;
@@ -2426,6 +2590,7 @@ static void hook_PhotonHandlerUpdate(void *self, void *method) {
     if (__atomic_load_n(&gOGSManualKickPending, __ATOMIC_ACQUIRE))
         OGSProcessManualKickOnEvent();
     OGSProcessClosedGuardOnPhotonCallback();
+    OGSObserveRoomRosterOnPhotonThread();
     if (__atomic_load_n(&gOGSPrivacyPending, __ATOMIC_ACQUIRE))
         OGSProcessRoomPrivacyOnEvent();
     OGSProcessSelfNicknameOnPhotonThread();
@@ -2476,6 +2641,28 @@ static void hook_OnOperationResponse(void *self, void *response, void *method) {
                     __atomic_fetch_add(&gOGSSetProps252ZeroReturn, 1ULL, __ATOMIC_RELAXED);
                 else
                     __atomic_fetch_add(&gOGSSetProps252NonzeroReturn, 1ULL, __ATOMIC_RELAXED);
+                uintptr_t signalRoom = 0;
+                double signalAt = 0.;
+                os_unfair_lock_lock(&gStateLock);
+                signalRoom = gOGSRoomCapacitySignalRoom;
+                signalAt = gOGSRoomCapacitySignalTime;
+                os_unfair_lock_unlock(&gStateLock);
+                double elapsed = CFAbsoluteTimeGetCurrent() - signalAt;
+                if (signalRoom && signalAt > 0. && elapsed >= 0. && elapsed < 8.) {
+                    uintptr_t liveRoom = 0;
+                    int32_t actor = 0, master = 0;
+                    if (OGSReadAutoRoom(&liveRoom, &actor, &master) &&
+                        liveRoom == signalRoom) {
+                        __atomic_store_n(&gOGSRoomCapacityNearby252LastCode,
+                                         (int32_t)returnCode, __ATOMIC_RELAXED);
+                        if (returnCode == 0)
+                            __atomic_fetch_add(&gOGSRoomCapacityNearby252Ok,
+                                               1u, __ATOMIC_RELAXED);
+                        else
+                            __atomic_fetch_add(&gOGSRoomCapacityNearby252Error,
+                                               1u, __ATOMIC_RELAXED);
+                    }
+                }
             } else {
                 __atomic_fetch_add(&gOGSSetProps252ParseErrors, 1u, __ATOMIC_RELAXED);
             }
@@ -2543,6 +2730,29 @@ static void hook_OnEvent(void *self, void *eventData, void *method) {
         orig_OnEvent(self, eventData, method);
     }
     __atomic_fetch_sub(&gOGS.insideNetworkEvent, 1, __ATOMIC_ACQ_REL);
+    if (observedEventCode == 253) {
+        uintptr_t signalRoom = 0;
+        double signalAt = 0.;
+        os_unfair_lock_lock(&gStateLock);
+        signalRoom = gOGSRoomCapacitySignalRoom;
+        signalAt = gOGSRoomCapacitySignalTime;
+        os_unfair_lock_unlock(&gStateLock);
+        double elapsed = now - signalAt;
+        if (signalRoom && signalAt > 0. && elapsed >= 0. && elapsed < 8.) {
+            uintptr_t liveRoom = 0;
+            int32_t actor = 0, master = 0;
+            uint8_t observedCapacity = 0;
+            if (OGSReadAutoRoom(&liveRoom, &actor, &master) &&
+                liveRoom == signalRoom &&
+                OGSReadMemory(liveRoom + 0x20u, &observedCapacity,
+                              sizeof(observedCapacity))) {
+                __atomic_fetch_add(&gOGSRoomCapacityNearby253, 1u,
+                                   __ATOMIC_RELAXED);
+                __atomic_store_n(&gOGSRoomCapacityAfter253,
+                                 observedCapacity, __ATOMIC_RELAXED);
+            }
+        }
+    }
     int32_t masterAfter = OGSReadMasterForEventObservation();
     if (masterBefore > 0 && masterAfter > 0) {
         __atomic_fetch_add(&gOGSInlineMasterObservations, 1u, __ATOMIC_RELAXED);
@@ -3276,6 +3486,25 @@ static void OGSInstallHooks(void) {
         __atomic_store_n(&gOGSResponseHookStatus,
                           actual ? 2u : 3u, __ATOMIC_RELEASE);
     }
+    // Exact fps 3.4.0 metadata identity: PlayerNetwork.KillPlayer
+    // MD30380 / MI29168, method pointer at 0x02391380.
+    // This is passive: the original always receives identical arguments.
+    uintptr_t killSlot = OGSResolveRVA(0x02391380u);
+    uintptr_t killEntry = OGSResolveRVA(0x013E8FBCu);
+    void *killActual = NULL;
+    if (killSlot && killEntry &&
+        OGSReadPointer(killSlot, &killActual) &&
+        killActual == (void *)killEntry &&
+        OGSIsExecutableGameAddress(killEntry)) {
+        bool installed = OGSInstallPointerSlotHook(0x02391380u,
+                                                  (void *)&hook_OGSKillPlayer,
+                                                  (void **)&orig_OGSKillPlayer);
+        __atomic_store_n(&gOGS39KillHookStatus, installed ? 1u : 3u,
+                         __ATOMIC_RELEASE);
+    } else {
+        __atomic_store_n(&gOGS39KillHookStatus, killActual ? 2u : 3u,
+                         __ATOMIC_RELEASE);
+    }
     OGSInstallPointerSlotHook(gOffsets.tblLeaveRoom, (void *)&hook_LeaveRoom, (void **)&orig_LeaveRoom);
     // FPSWeapon.ShootBullet: MI27852, method pointer slot = 0x2358400 + MI*8.
     OGSInstallPointerSlotHook(0x0238EA60u, (void *)&hook_KnifeShoot29,
@@ -3454,7 +3683,7 @@ static void OGSInstallHooks(void) {
         self.menuPanel.hidden = YES;
 
         self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 5, 260, 18)];
-        self.titleLabel.text = @"OGS38 | سعة الروم والضرر";
+        self.titleLabel.text = @"OGS39 | تشخيص الروم والذخيرة";
         self.titleLabel.textColor = [UIColor whiteColor];
         self.titleLabel.textAlignment = NSTextAlignmentCenter;
         self.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
@@ -4033,6 +4262,7 @@ static void OGSInstallHooks(void) {
         __atomic_load_n(&gOGSGrenade35AdjacentReadFail, __ATOMIC_RELAXED)];
     details = [details stringByAppendingFormat:
         @"\nOGS36 self nickname: queued=%u | local applied=%u | rejected=%u | failed=%u"
+         "\nOGS39 nickname accepts 1..100 grapheme characters; server limit unknown."
          "\nName change is SELF-only; local readback is not server acknowledgement."
          "\nOGS36 shield: enabled=%u | damage callbacks=%u | local bypass=%u"
          "\nOther player passes=%u | unknown owner passes=%u"
@@ -4047,11 +4277,34 @@ static void OGSInstallHooks(void) {
         __atomic_load_n(&gGodOtherPlayerPasses, __ATOMIC_RELAXED),
         __atomic_load_n(&gGodUnverifiedPasses, __ATOMIC_RELAXED)];
     details = [details stringByAppendingFormat:
-        @"\nOGS38 room capacity: pending=%u | queued=%u | attempted=%u"
+        @"\nOGS39 grenade inventory probes: reads=%u | failures=%u | selection changes=%u"
+         "\nGrenade array slots before=%d after=%d | selected index before=%d after=%d"
+         "\nRead-only PlayerWeapons observation; not proof of restock.",
+        __atomic_load_n(&gOGSGrenade39InventoryReads, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSGrenade39InventoryReadFailures, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSGrenade39SelectionChanges, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSGrenade39SlotsBefore, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSGrenade39SlotsAfter, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSGrenade39SelectedBefore, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSGrenade39SelectedAfter, __ATOMIC_RELAXED)];
+    details = [details stringByAppendingFormat:
+        @"\nOGS39 KillPlayer passive hook=%u | callbacks=%u | local=%u"
+         " | other=%u | unknown=%u"
+         "\nMethod-pointer dispatch only; direct calls might bypass this hook."
+         "\nShield still covers DamageRemote only; no host-independent immunity proven.",
+        __atomic_load_n(&gOGS39KillHookStatus, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGS39KillCallbacks, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGS39LocalKillCallbacks, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGS39OtherKillCallbacks, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGS39UnknownKillCallbacks, __ATOMIC_RELAXED)];
+    details = [details stringByAppendingFormat:
+        @"\nOGS39 room capacity: pending=%u | queued=%u | attempted=%u"
          " | local applied=%u | rejected=%u | failed=%u | below occupants=%u"
          "\nMaxPlayers before=%u | requested=%u | after=%u | occupants=%u"
-         "\nSupported capacity changes: any integer 2..32, including reductions."
-         "\nLocal room update is NOT server acknowledgement; confirm from another account.",
+         "\nReal roster getter verified=%u | failures=%u | cached players=%d"
+         "\nNearby Op252 OK/error=%u/%u | last code=%d | Event253=%u | capacity after event=%u"
+         "\nThese shared operations/events are NOT attributable ACKs."
+         "\nLocal room update is NOT server proof; verify with another account.",
         __atomic_load_n(&gOGSRoomCapacityPending, __ATOMIC_ACQUIRE),
         __atomic_load_n(&gOGSRoomCapacityQueued, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSRoomCapacityAttempted, __ATOMIC_RELAXED),
@@ -4062,7 +4315,15 @@ static void OGSInstallHooks(void) {
         __atomic_load_n(&gOGSRoomCapacityLastBefore, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSRoomCapacityLastTarget, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSRoomCapacityLastAfter, __ATOMIC_RELAXED),
-        __atomic_load_n(&gOGSRoomCapacityLastOccupancy, __ATOMIC_RELAXED)];
+        __atomic_load_n(&gOGSRoomCapacityLastOccupancy, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSRoomRosterGetterVerified, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSRoomRosterGetterFailures, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSRoomRosterObservedCount, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSRoomCapacityNearby252Ok, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSRoomCapacityNearby252Error, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSRoomCapacityNearby252LastCode, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSRoomCapacityNearby253, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSRoomCapacityAfter253, __ATOMIC_RELAXED)];
     details = [details stringByAppendingFormat:
         @"\nStage27 LeaveRoom cache=%u | local disconnect cache=%u | strict lock=%u"
          "\nLeaveRoom entry=%u blocked=%u forwarded=%u | DemoLeave entry=%u blocked=%u forwarded=%u"
@@ -4503,7 +4764,7 @@ static void OGSInstallHooks(void) {
         message:@"اسمك أنت فقط؛ ينتظر تنفيذ Photon ولا يغيّر أسماء الآخرين."
         preferredStyle:UIAlertControllerStyleAlert];
     [dialog addTextFieldWithConfigurationHandler:^(UITextField *field) {
-        field.placeholder = @"اسم جديد (2–24 حرفًا)";
+        field.placeholder = @"اسم جديد (1–100 حرف)";
         field.autocorrectionType = UITextAutocorrectionTypeNo;
     }];
     __weak UITextField *weakInput = dialog.textFields.firstObject;
@@ -4513,9 +4774,21 @@ static void OGSInstallHooks(void) {
         style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
         NSString *entry = [weakInput.text ?: @""
             stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-        if (entry.length < 2 || entry.length > 24 ||
+        // Count user-perceived characters (grapheme clusters) so Arabic
+        // diacritics and joined emoji do not consume multiple character slots.
+        __block NSUInteger characterCount = 0;
+        [entry enumerateSubstringsInRange:NSMakeRange(0, entry.length)
+                                  options:NSStringEnumerationByComposedCharacterSequences
+                               usingBlock:^(__unused NSString *part,
+                                            __unused NSRange partRange,
+                                            __unused NSRange enclosingRange,
+                                            BOOL *stop) {
+            ++characterCount;
+            if (characterCount > 100) *stop = YES;
+        }];
+        if (characterCount < 1 || characterCount > 100 ||
             [entry rangeOfCharacterFromSet:[NSCharacterSet controlCharacterSet]].location != NSNotFound) {
-            self.statusLabel.text = @"الاسم يجب أن يكون بين 2 و24 حرفًا دون رموز تحكم";
+            self.statusLabel.text = @"الاسم من 1 إلى 100 حرف دون رموز تحكم؛ خادم اللعبة قد يفرض حدًا أقصر";
             return;
         }
         uintptr_t currentRoom = 0;
@@ -4559,10 +4832,12 @@ static void OGSInstallHooks(void) {
     uint8_t current = 0;
     if (!OGSReadAutoRoom(&room, &actor, &master) ||
         !OGSReadMemory(room + 0x20u, &current, sizeof(current)) ||
-        !OGSReadMemory(room + 0x50u, &playerCount, sizeof(playerCount)) ||
-        current < 1 || current > 32 || playerCount < 0 ||
+        __atomic_load_n(&gOGSRoomRosterObservedRoom, __ATOMIC_ACQUIRE) != room ||
+        (playerCount = __atomic_load_n(&gOGSRoomRosterObservedCount,
+                                        __ATOMIC_ACQUIRE)) < 1 ||
+        current < 1 || current > 32 ||
         playerCount > current) {
-        self.statusLabel.text = @"تعذر تأكيد الروم وسعته؛ لا تعديل";
+        self.statusLabel.text = @"تعذر قراءة العدد الفعلي للاعبين؛ انتظر ثانية ثم أعد فتح السعة";
         return;
     }
     if (actor != master) {
@@ -4635,7 +4910,7 @@ static void OGSInstallHooks(void) {
                 return;
             }
             __atomic_fetch_add(&gOGSRoomCapacityQueued, 1u, __ATOMIC_RELAXED);
-            self.statusLabel.text = @"تغيير السعة ينتظر Photon؛ تأكد من حساب آخر";
+            self.statusLabel.text = @"طلب السعة ينتظر Photon؛ تغيّر الجهاز وحده لا يثبت قبول الخادم";
         }]];
     UIViewController *root = [self gameMainWindow].rootViewController;
     if (root && !root.presentedViewController)
