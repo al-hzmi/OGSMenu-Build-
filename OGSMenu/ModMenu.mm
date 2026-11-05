@@ -191,6 +191,17 @@ static os_unfair_lock gStateLock    = OS_UNFAIR_LOCK_INIT;
 static os_unfair_lock gSnapshotLock = OS_UNFAIR_LOCK_INIT;
 static os_unfair_lock gHookInstallLock = OS_UNFAIR_LOCK_INIT; // serialize installer only
 
+// OGS36: user-requested SELF nickname edit, bound to the same room/actor.
+// UIKit only queues a string; the Photon Update thread performs the call.
+static NSString *gOGSSelfNicknamePending = nil; // gStateLock
+static uintptr_t gOGSSelfNicknameRoom = 0;       // gStateLock
+static int32_t gOGSSelfNicknameActor = 0;        // gStateLock
+static double gOGSSelfNicknameLastQueuedAt = 0.; // gStateLock
+static volatile uint32_t gOGSSelfNicknameQueuedCount = 0;
+static volatile uint32_t gOGSSelfNicknameLocalApplied = 0;
+static volatile uint32_t gOGSSelfNicknameRejected = 0;
+static volatile uint32_t gOGSSelfNicknameFailed = 0;
+
 typedef struct {
     volatile bool     inRoom;
     volatile bool     isMaster;
@@ -2233,6 +2244,73 @@ static void OGSProcessRecoveryOnPhotonCallback(uint32_t observedEventCode,
 }
 
 static void OGSRepairMasterReceiverCaches(void);
+static bool OGSIsExecutableGameAddress(uintptr_t addr);
+
+// PhotonPlayer.set_NickName (MD31598/MI28961, fps 3.4.0 RVA 0x13D753C).
+// Never access other players, forge a Photon property event or call from UIKit.
+static void OGSProcessSelfNicknameOnPhotonThread(void) {
+    NSString *requested = nil;
+    uintptr_t boundRoom = 0;
+    int32_t boundActor = 0;
+    os_unfair_lock_lock(&gStateLock);
+    if (gOGSSelfNicknamePending) {
+        requested = gOGSSelfNicknamePending;
+        gOGSSelfNicknamePending = nil;
+        boundRoom = gOGSSelfNicknameRoom;
+        boundActor = gOGSSelfNicknameActor;
+    }
+    os_unfair_lock_unlock(&gStateLock);
+    if (!requested) return;
+
+    uintptr_t room = 0;
+    int32_t actor = 0, master = 0;
+    if (!OGSReadAutoRoom(&room, &actor, &master) ||
+        room != boundRoom || actor != boundActor || actor <= 0) {
+        __atomic_fetch_add(&gOGSSelfNicknameRejected, 1u, __ATOMIC_RELAXED);
+        return;
+    }
+
+    // Reject a mismatched game build or a callback slot modified by other
+    // code. There is no speculative call to an unverified function pointer.
+    const uintptr_t setter = OGSResolveRVA(0x013D753Cu);
+    const uintptr_t setterSlot = OGSResolveRVA(0x02390D08u);
+    uintptr_t observed = 0;
+    const uintptr_t localGetter = OGSResolveRVA(gOffsets.rvaGetLocalPlayer);
+    const uintptr_t nameGetter = OGSResolveRVA(gOffsets.rvaPlayerGetName);
+    if (!setter || !setterSlot || !localGetter || !nameGetter ||
+        !OGSReadMemory(setterSlot, &observed, sizeof(observed)) ||
+        observed != setter || !OGSIsExecutableGameAddress(setter)) {
+        __atomic_fetch_add(&gOGSSelfNicknameFailed, 1u, __ATOMIC_RELAXED);
+        return;
+    }
+
+    void *localPlayer = ((Object0Fn)localGetter)(NULL);
+    void *klass = NULL;
+    int32_t confirmedActor = 0;
+    if (!localPlayer ||
+        !OGSReadPointer((uintptr_t)localPlayer, &klass) ||
+        !OGSReadMemory((uintptr_t)localPlayer + 0x10u,
+                       &confirmedActor, sizeof(confirmedActor)) ||
+        confirmedActor != actor) {
+        __atomic_fetch_add(&gOGSSelfNicknameRejected, 1u, __ATOMIC_RELAXED);
+        return;
+    }
+    void *managed = OGSManagedStringFromNSString(requested);
+    if (!managed) {
+        __atomic_fetch_add(&gOGSSelfNicknameFailed, 1u, __ATOMIC_RELAXED);
+        return;
+    }
+    typedef void (*SetSelfNickFn)(void *, void *, const void *);
+    ((SetSelfNickFn)setter)(localPlayer, managed, NULL);
+
+    void *localName = ((PlayerGetNameFn)nameGetter)(localPlayer, NULL);
+    NSString *readBack = OGSReadIl2CppString(localName);
+    if (readBack && [readBack isEqualToString:requested])
+        __atomic_fetch_add(&gOGSSelfNicknameLocalApplied, 1u, __ATOMIC_RELAXED);
+    else
+        __atomic_fetch_add(&gOGSSelfNicknameFailed, 1u, __ATOMIC_RELAXED);
+    // Read-back is local only; server acceptance is intentionally not claimed.
+}
 
 // Executed on the game's Unity/PUN Update thread, never from the UIKit
 // menu timer. Makes standalone room privacy possible with zero other players.
@@ -2256,6 +2334,7 @@ static void hook_PhotonHandlerUpdate(void *self, void *method) {
     OGSProcessClosedGuardOnPhotonCallback();
     if (__atomic_load_n(&gOGSPrivacyPending, __ATOMIC_ACQUIRE))
         OGSProcessRoomPrivacyOnEvent();
+    OGSProcessSelfNicknameOnPhotonThread();
 
     // Fast-path for verified MasterClient callback notifications and manual
     // recovery taps: sample fresh Photon state on this frame, not after the
@@ -3269,7 +3348,7 @@ static void OGSInstallHooks(void) {
         CGFloat menuViewportHeight = MIN(358.0, MAX(160.0, CGRectGetHeight(gw.bounds) - 26.0));
         CGFloat menuX = MAX(8.0, MIN(75.0, CGRectGetWidth(gw.bounds) - 323.0));
         self.menuPanel = [[UIScrollView alloc] initWithFrame:CGRectMake(menuX, 18, 315, menuViewportHeight)];
-        self.menuPanel.contentSize = CGSizeMake(315, 393);
+        self.menuPanel.contentSize = CGSizeMake(315, 432);
         self.menuPanel.alwaysBounceVertical = NO;
         self.menuPanel.showsVerticalScrollIndicator = YES;
         self.menuPanel.clipsToBounds = YES;
@@ -3280,7 +3359,7 @@ static void OGSInstallHooks(void) {
         self.menuPanel.hidden = YES;
 
         self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 5, 260, 18)];
-        self.titleLabel.text = @"OGS35 | تشخيص مراحل رمي القنابل";
+        self.titleLabel.text = @"OGS36 | الاسم والدرع والتشخيص";
         self.titleLabel.textColor = [UIColor whiteColor];
         self.titleLabel.textAlignment = NSTextAlignmentCenter;
         self.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
@@ -3370,6 +3449,10 @@ static void OGSInstallHooks(void) {
             title:@"قنابل متجددة: إيقاف" bg:darkGray
             action:@selector(toggleGrenade31:)];
         [self.menuPanel addSubview:self.grenade31Button];
+
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(10, 389, 295, 30)
+            title:@"تغيير اسمي داخل الروم" bg:hostBlue
+            action:@selector(promptSelfNickname:)]];
 
         [self.containerView addSubview:self.menuPanel];
         self.containerView.floatingButton = self.floatingButton;
@@ -3850,6 +3933,21 @@ static void OGSInstallHooks(void) {
         __atomic_load_n(&gOGSGrenade35AfterAdjacent, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSGrenade35AdjacentReadFail, __ATOMIC_RELAXED)];
     details = [details stringByAppendingFormat:
+        @"\nOGS36 self nickname: queued=%u | local applied=%u | rejected=%u | failed=%u"
+         "\nName change is SELF-only; local readback is not server acknowledgement."
+         "\nOGS36 shield: enabled=%u | damage callbacks=%u | local bypass=%u"
+         "\nOther player passes=%u | unknown owner passes=%u"
+         "\nShield toggle has NO MasterClient requirement. Grenade path unproven.",
+        __atomic_load_n(&gOGSSelfNicknameQueuedCount, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSSelfNicknameLocalApplied, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSSelfNicknameRejected, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSSelfNicknameFailed, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE) ? 1u : 0u,
+        __atomic_load_n(&gGodCallbacks, __ATOMIC_RELAXED),
+        __atomic_load_n(&gGodLocalBypasses, __ATOMIC_RELAXED),
+        __atomic_load_n(&gGodOtherPlayerPasses, __ATOMIC_RELAXED),
+        __atomic_load_n(&gGodUnverifiedPasses, __ATOMIC_RELAXED)];
+    details = [details stringByAppendingFormat:
         @"\nStage27 LeaveRoom cache=%u | local disconnect cache=%u | strict lock=%u"
          "\nLeaveRoom entry=%u blocked=%u forwarded=%u | DemoLeave entry=%u blocked=%u forwarded=%u"
          "\nLocal OnDisconnectedFromPhoton=%u | room vanished=%u"
@@ -4274,6 +4372,68 @@ static void OGSInstallHooks(void) {
     self.statusLabel.text = master != localActor ?
         @"الاستعادة التفاعلية تنتظر حدث Photon؛ 3 طلبات سريعة، و6 بكل دقيقة" :
         @"الاستعادة التفاعلية مستمرة؛ تشترك اليدوية والتلقائية في الحد";
+}
+
+- (void)promptSelfNickname:(UIButton *)button {
+    (void)button;
+    uintptr_t room = 0;
+    int32_t actor = 0, master = 0;
+    if (!OGSReadAutoRoom(&room, &actor, &master) || actor <= 0) {
+        self.statusLabel.text = @"تغيير الاسم يحتاج دخول روم فعلي أولًا";
+        return;
+    }
+    UIAlertController *dialog = [UIAlertController
+        alertControllerWithTitle:@"تغيير اسمك داخل الروم"
+        message:@"اسمك أنت فقط؛ ينتظر تنفيذ Photon ولا يغيّر أسماء الآخرين."
+        preferredStyle:UIAlertControllerStyleAlert];
+    [dialog addTextFieldWithConfigurationHandler:^(UITextField *field) {
+        field.placeholder = @"اسم جديد (2–24 حرفًا)";
+        field.autocorrectionType = UITextAutocorrectionTypeNo;
+    }];
+    __weak UITextField *weakInput = dialog.textFields.firstObject;
+    [dialog addAction:[UIAlertAction actionWithTitle:@"إلغاء"
+        style:UIAlertActionStyleCancel handler:nil]];
+    [dialog addAction:[UIAlertAction actionWithTitle:@"تطبيق"
+        style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+        NSString *entry = [weakInput.text ?: @""
+            stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (entry.length < 2 || entry.length > 24 ||
+            [entry rangeOfCharacterFromSet:[NSCharacterSet controlCharacterSet]].location != NSNotFound) {
+            self.statusLabel.text = @"الاسم يجب أن يكون بين 2 و24 حرفًا دون رموز تحكم";
+            return;
+        }
+        uintptr_t currentRoom = 0;
+        int32_t currentActor = 0, currentMaster = 0;
+        if (!OGSReadAutoRoom(&currentRoom, &currentActor, &currentMaster) ||
+            currentRoom != room || currentActor != actor) {
+            self.statusLabel.text = @"تغيرت الغرفة أو هويتك؛ افتح الخيار من جديد";
+            return;
+        }
+        double now = CFAbsoluteTimeGetCurrent();
+        bool busy = false, limited = false;
+        os_unfair_lock_lock(&gStateLock);
+        busy = gOGSSelfNicknamePending != nil;
+        limited = gOGSSelfNicknameLastQueuedAt > 0. &&
+                  now - gOGSSelfNicknameLastQueuedAt < 10.0;
+        if (!busy && !limited) {
+            gOGSSelfNicknamePending = [entry copy];
+            gOGSSelfNicknameRoom = room;
+            gOGSSelfNicknameActor = actor;
+            gOGSSelfNicknameLastQueuedAt = now;
+        }
+        os_unfair_lock_unlock(&gStateLock);
+        if (busy || limited) {
+            self.statusLabel.text = busy ? @"انتظر تنفيذ طلب الاسم السابق" :
+                                           @"انتظر 10 ثوانٍ بين تغييرات الاسم";
+            return;
+        }
+        __atomic_fetch_add(&gOGSSelfNicknameQueuedCount, 1u, __ATOMIC_RELAXED);
+        self.statusLabel.text = @"الاسم في انتظار إطار Photon؛ راجع التشخيص للتأكيد المحلي";
+    }]];
+    UIViewController *root = [self gameMainWindow].rootViewController;
+    if (root && !root.presentedViewController)
+        [root presentViewController:dialog animated:YES completion:nil];
+    else self.statusLabel.text = @"أغلق النوافذ المفتوحة ثم أعد المحاولة";
 }
 
 - (void)toggleGodMode:(UIButton *)s {
