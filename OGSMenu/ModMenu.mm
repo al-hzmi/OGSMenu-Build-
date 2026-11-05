@@ -981,6 +981,24 @@ static bool OGSReserveMasterRequestLocked(uintptr_t room, int32_t actor, double 
 // never from the UIKit timer. Slot pointers have been checked against ARM64.
 static const uintptr_t kOGSRoomSetOpenSlot = 0x02391758;
 static const uintptr_t kOGSRoomSetVisibleSlot = 0x02391768;
+// Room.set_MaxPlayers MD31704 / MI29298, ARM64 RVA 0x013F1AF0.
+// The native implementation clamps the input at 255, sends a Photon room
+// property update, then stores the local one-byte room capacity at +0x20.
+// OGS37 deliberately supports only bounded increases through 32 players.
+static const uintptr_t kOGSRoomSetMaxPlayersSlot = 0x02391790;
+static const uintptr_t kOGSRoomSetMaxPlayersEntry = 0x013F1AF0;
+static volatile uint32_t gOGSRoomCapacityPending = 0;
+static uintptr_t gOGSRoomCapacityBoundRoom = 0; // gStateLock
+static int32_t gOGSRoomCapacityBoundActor = 0; // gStateLock
+static uint8_t gOGSRoomCapacityTarget = 0; // gStateLock
+static double gOGSRoomCapacityLastQueuedAt = 0.; // gStateLock
+static volatile uint32_t gOGSRoomCapacityQueued = 0;
+static volatile uint32_t gOGSRoomCapacityAttempted = 0;
+static volatile uint32_t gOGSRoomCapacityLocalApplied = 0;
+static volatile uint32_t gOGSRoomCapacityRejected = 0;
+static volatile uint32_t gOGSRoomCapacityFailed = 0;
+static volatile uint32_t gOGSRoomCapacityLastBefore = 0;
+static volatile uint32_t gOGSRoomCapacityLastAfter = 0;
 // 0=no action, 1=hidden & joinable, 2=hidden & closed, 3=public & joinable.
 static volatile uint32_t gOGSPrivacyPending = 0;
 static uintptr_t gOGSPrivacyRequestedRoom = 0; // gStateLock
@@ -2312,6 +2330,65 @@ static void OGSProcessSelfNicknameOnPhotonThread(void) {
     // Read-back is local only; server acceptance is intentionally not claimed.
 }
 
+// Execute one explicitly requested room-capacity increase on Photon Update.
+// Never write room memory directly or mutate other players' state. This uses
+// the game's own verified Room.set_MaxPlayers property setter.
+static void OGSProcessRoomCapacityOnPhotonThread(void) {
+    uint8_t target = 0;
+    uintptr_t boundRoom = 0;
+    int32_t boundActor = 0;
+    os_unfair_lock_lock(&gStateLock);
+    if (__atomic_load_n(&gOGSRoomCapacityPending, __ATOMIC_ACQUIRE)) {
+        target = gOGSRoomCapacityTarget;
+        boundRoom = gOGSRoomCapacityBoundRoom;
+        boundActor = gOGSRoomCapacityBoundActor;
+        __atomic_store_n(&gOGSRoomCapacityPending, 0u, __ATOMIC_RELEASE);
+    }
+    os_unfair_lock_unlock(&gStateLock);
+    if (!target) return;
+
+    uintptr_t room = 0;
+    int32_t actor = 0, master = 0, playerCount = 0;
+    uint8_t current = 0;
+    if (!OGSReadAutoRoom(&room, &actor, &master) ||
+        room != boundRoom || actor != boundActor || actor != master ||
+        !OGSReadMemory(room + 0x20u, &current, sizeof(current)) ||
+        !OGSReadMemory(room + 0x50u, &playerCount, sizeof(playerCount)) ||
+        current < 1 || current > 32 ||
+        playerCount < 0 || playerCount > current ||
+        !(target == 8 || target == 10 || target == 16 || target == 32) ||
+        target <= current) {
+        __atomic_fetch_add(&gOGSRoomCapacityRejected, 1u, __ATOMIC_RELAXED);
+        return;
+    }
+    __atomic_store_n(&gOGSRoomCapacityLastBefore, current, __ATOMIC_RELAXED);
+
+    uintptr_t entry = OGSResolveRVA(kOGSRoomSetMaxPlayersEntry);
+    uintptr_t slot = OGSResolveRVA(kOGSRoomSetMaxPlayersSlot);
+    uintptr_t observed = 0;
+    if (!entry || !slot || !OGSReadMemory(slot, &observed, sizeof(observed)) ||
+        observed != entry || !OGSIsExecutableGameAddress(entry)) {
+        __atomic_fetch_add(&gOGSRoomCapacityFailed, 1u, __ATOMIC_RELAXED);
+        return;
+    }
+    typedef void (*RoomSetMaxPlayersFn)(void *, int32_t, const void *);
+    __atomic_fetch_add(&gOGSRoomCapacityAttempted, 1u, __ATOMIC_RELAXED);
+    ((RoomSetMaxPlayersFn)entry)((void *)room, (int32_t)target, NULL);
+
+    uint8_t after = 0;
+    if (!OGSReadMemory(room + 0x20u, &after, sizeof(after))) {
+        __atomic_fetch_add(&gOGSRoomCapacityFailed, 1u, __ATOMIC_RELAXED);
+        return;
+    }
+    __atomic_store_n(&gOGSRoomCapacityLastAfter, after, __ATOMIC_RELAXED);
+    if (after == target)
+        __atomic_fetch_add(&gOGSRoomCapacityLocalApplied, 1u, __ATOMIC_RELAXED);
+    else
+        __atomic_fetch_add(&gOGSRoomCapacityFailed, 1u, __ATOMIC_RELAXED);
+    // Local room write-back is not server acknowledgement. Confirm with
+    // a second account, a second player's reported MaxPlayers, and joins.
+}
+
 // Executed on the game's Unity/PUN Update thread, never from the UIKit
 // menu timer. Makes standalone room privacy possible with zero other players.
 static void hook_PhotonHandlerUpdate(void *self, void *method) {
@@ -2335,6 +2412,7 @@ static void hook_PhotonHandlerUpdate(void *self, void *method) {
     if (__atomic_load_n(&gOGSPrivacyPending, __ATOMIC_ACQUIRE))
         OGSProcessRoomPrivacyOnEvent();
     OGSProcessSelfNicknameOnPhotonThread();
+    OGSProcessRoomCapacityOnPhotonThread();
 
     // Fast-path for verified MasterClient callback notifications and manual
     // recovery taps: sample fresh Photon state on this frame, not after the
@@ -3348,7 +3426,7 @@ static void OGSInstallHooks(void) {
         CGFloat menuViewportHeight = MIN(358.0, MAX(160.0, CGRectGetHeight(gw.bounds) - 26.0));
         CGFloat menuX = MAX(8.0, MIN(75.0, CGRectGetWidth(gw.bounds) - 323.0));
         self.menuPanel = [[UIScrollView alloc] initWithFrame:CGRectMake(menuX, 18, 315, menuViewportHeight)];
-        self.menuPanel.contentSize = CGSizeMake(315, 432);
+        self.menuPanel.contentSize = CGSizeMake(315, 467);
         self.menuPanel.alwaysBounceVertical = NO;
         self.menuPanel.showsVerticalScrollIndicator = YES;
         self.menuPanel.clipsToBounds = YES;
@@ -3359,7 +3437,7 @@ static void OGSInstallHooks(void) {
         self.menuPanel.hidden = YES;
 
         self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 5, 260, 18)];
-        self.titleLabel.text = @"OGS36 | الاسم والدرع والتشخيص";
+        self.titleLabel.text = @"OGS37 | إدارة سعة الروم";
         self.titleLabel.textColor = [UIColor whiteColor];
         self.titleLabel.textAlignment = NSTextAlignmentCenter;
         self.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
@@ -3453,6 +3531,10 @@ static void OGSInstallHooks(void) {
         [self.menuPanel addSubview:[self makeBtn:CGRectMake(10, 389, 295, 30)
             title:@"تغيير اسمي داخل الروم" bg:hostBlue
             action:@selector(promptSelfNickname:)]];
+
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(10, 424, 295, 30)
+            title:@"زيادة سعة الروم (8 / 10 / 16 / 32)" bg:hostBlue
+            action:@selector(promptRoomCapacity:)]];
 
         [self.containerView addSubview:self.menuPanel];
         self.containerView.floatingButton = self.floatingButton;
@@ -3948,6 +4030,19 @@ static void OGSInstallHooks(void) {
         __atomic_load_n(&gGodOtherPlayerPasses, __ATOMIC_RELAXED),
         __atomic_load_n(&gGodUnverifiedPasses, __ATOMIC_RELAXED)];
     details = [details stringByAppendingFormat:
+        @"\nOGS37 room capacity: pending=%u | queued=%u | attempted=%u"
+         " | local applied=%u | rejected=%u | failed=%u"
+         "\nMaxPlayers before=%u | after=%u | supported increases: 8/10/16/32"
+         "\nLocal room update is NOT server acknowledgement; confirm from another account.",
+        __atomic_load_n(&gOGSRoomCapacityPending, __ATOMIC_ACQUIRE),
+        __atomic_load_n(&gOGSRoomCapacityQueued, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSRoomCapacityAttempted, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSRoomCapacityLocalApplied, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSRoomCapacityRejected, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSRoomCapacityFailed, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSRoomCapacityLastBefore, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGSRoomCapacityLastAfter, __ATOMIC_RELAXED)];
+    details = [details stringByAppendingFormat:
         @"\nStage27 LeaveRoom cache=%u | local disconnect cache=%u | strict lock=%u"
          "\nLeaveRoom entry=%u blocked=%u forwarded=%u | DemoLeave entry=%u blocked=%u forwarded=%u"
          "\nLocal OnDisconnectedFromPhoton=%u | room vanished=%u"
@@ -4430,6 +4525,77 @@ static void OGSInstallHooks(void) {
         __atomic_fetch_add(&gOGSSelfNicknameQueuedCount, 1u, __ATOMIC_RELAXED);
         self.statusLabel.text = @"الاسم في انتظار إطار Photon؛ راجع التشخيص للتأكيد المحلي";
     }]];
+    UIViewController *root = [self gameMainWindow].rootViewController;
+    if (root && !root.presentedViewController)
+        [root presentViewController:dialog animated:YES completion:nil];
+    else self.statusLabel.text = @"أغلق النوافذ المفتوحة ثم أعد المحاولة";
+}
+
+- (void)promptRoomCapacity:(UIButton *)button {
+    (void)button;
+    uintptr_t room = 0;
+    int32_t actor = 0, master = 0, playerCount = 0;
+    uint8_t current = 0;
+    if (!OGSReadAutoRoom(&room, &actor, &master) ||
+        !OGSReadMemory(room + 0x20u, &current, sizeof(current)) ||
+        !OGSReadMemory(room + 0x50u, &playerCount, sizeof(playerCount)) ||
+        current < 1 || current > 32 || playerCount < 0 ||
+        playerCount > current) {
+        self.statusLabel.text = @"تعذر تأكيد الروم وسعته؛ لا تعديل";
+        return;
+    }
+    if (actor != master) {
+        self.statusLabel.text = @"تغيير سعة الروم يتطلب أن تكون الهوست حاليًا";
+        return;
+    }
+    if (current >= 32) {
+        self.statusLabel.text = @"الحد التجريبي الحالي 32 لاعبًا؛ لم نعتمد 100 أو 200";
+        return;
+    }
+    UIAlertController *dialog = [UIAlertController
+        alertControllerWithTitle:@"زيادة سعة الروم"
+        message:[NSString stringWithFormat:
+            @"السعة المرصودة: %u | اللاعبون: %d\nتُرسل الزيادة عبر Photon، والقبول من الخادم غير مضمون.",
+            (unsigned)current, playerCount]
+        preferredStyle:UIAlertControllerStyleAlert];
+    for (NSNumber *number in @[@8, @10, @16, @32]) {
+        const uint8_t target = (uint8_t)number.unsignedIntValue;
+        if (target <= current) continue;
+        [dialog addAction:[UIAlertAction actionWithTitle:
+            [NSString stringWithFormat:@"زيادة إلى %u لاعبين", (unsigned)target]
+            style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+            uintptr_t liveRoom = 0;
+            int32_t liveActor = 0, liveMaster = 0;
+            if (!OGSReadAutoRoom(&liveRoom, &liveActor, &liveMaster) ||
+                liveRoom != room || liveActor != actor || liveMaster != liveActor) {
+                self.statusLabel.text = @"تغيرت الغرفة أو الهوست؛ ألغي الطلب";
+                return;
+            }
+            bool busy = false, limited = false;
+            double now = CFAbsoluteTimeGetCurrent();
+            os_unfair_lock_lock(&gStateLock);
+            busy = __atomic_load_n(&gOGSRoomCapacityPending, __ATOMIC_ACQUIRE);
+            limited = gOGSRoomCapacityLastQueuedAt > 0. &&
+                now - gOGSRoomCapacityLastQueuedAt < 10.0;
+            if (!busy && !limited) {
+                gOGSRoomCapacityBoundRoom = room;
+                gOGSRoomCapacityBoundActor = actor;
+                gOGSRoomCapacityTarget = target;
+                gOGSRoomCapacityLastQueuedAt = now;
+                __atomic_store_n(&gOGSRoomCapacityPending, 1u, __ATOMIC_RELEASE);
+            }
+            os_unfair_lock_unlock(&gStateLock);
+            if (busy || limited) {
+                self.statusLabel.text = busy ? @"انتظر انتهاء طلب السعة السابق" :
+                    @"انتظر 10 ثوانٍ قبل محاولة تعديل أخرى";
+                return;
+            }
+            __atomic_fetch_add(&gOGSRoomCapacityQueued, 1u, __ATOMIC_RELAXED);
+            self.statusLabel.text = @"طلب الزيادة ينتظر Photon؛ راجع التشخيص والتأكيد من حساب آخر";
+        }]];
+    }
+    [dialog addAction:[UIAlertAction actionWithTitle:@"إلغاء"
+        style:UIAlertActionStyleCancel handler:nil]];
     UIViewController *root = [self gameMainWindow].rootViewController;
     if (root && !root.presentedViewController)
         [root presentViewController:dialog animated:YES completion:nil];
