@@ -7,6 +7,7 @@ No unrelated files are modified, and no speculative offsets are patched.
 """
 
 import argparse
+import copy
 import hashlib
 import os
 from pathlib import Path
@@ -149,7 +150,10 @@ def main() -> None:
                 for info in source.infolist():
                     data = patched_game if info.filename == GAME else (
                         replacement if info.filename == LIB else source.read(info.filename))
-                    output.writestr(info, data)
+                    # ZipFile.writestr mutates ZipInfo.header_offset in place.
+                    # Reusing the SOURCE object would corrupt its read offsets
+                    # during the subsequent byte-for-byte manifest verification.
+                    output.writestr(copy.copy(info), data)
             with zipfile.ZipFile(temp) as output:
                 if output.testzip() is not None or output.namelist() != names:
                     raise ValueError("Repacked IPA integrity or manifest mismatch")
