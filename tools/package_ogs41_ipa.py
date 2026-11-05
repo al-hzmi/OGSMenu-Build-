@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Build OGS41 from the exact supplied OGS34 IPA and ARM64 OGS41 dylib.
+"""Build OGS41/42 from the exact supplied OGS34 IPA and ARM64 dylib.
 
-OGS41 reuses the independently verified OGS40 native KillPlayer bridge and
-both older pre-sign damage bridges. It patches no additional game instructions.
+Both releases reuse the independently verified OGS40 native KillPlayer bridge
+and both older pre-sign damage bridges. No new game instructions are patched.
 Output is unsigned and needs a legitimate installation signature.
 """
 
@@ -18,7 +18,7 @@ from package_ogs40_ipa import (
 )
 
 
-def main():
+def main(release="OGS41"):
     parser = argparse.ArgumentParser()
     parser.add_argument("source", type=Path)
     parser.add_argument("dylib", type=Path)
@@ -35,7 +35,7 @@ def main():
         if digest(source.read(LIB)) != ORIGINAL_LIB_SHA256:
             raise ValueError("Unexpected source OGS dylib")
         patched_game = patch_kill_bridge(source.read(GAME))
-        fd, temp = tempfile.mkstemp(prefix="ogs41-", suffix=".ipa",
+        fd, temp = tempfile.mkstemp(prefix=release.lower() + "-", suffix=".ipa",
                                     dir=args.output.parent)
         os.close(fd)
         try:
@@ -56,7 +56,7 @@ def main():
         finally:
             if os.path.exists(temp):
                 os.unlink(temp)
-    print("OGS41 IPA created:", args.output)
+    print(f"{release} IPA created:", args.output)
     print("Game SHA256", digest(patched_game))
     print("Dylib SHA256", digest(lib))
     print("Unchanged entries", len(names) - 2)

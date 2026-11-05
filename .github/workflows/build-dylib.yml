@@ -42,9 +42,9 @@ jobs:
           xcrun --sdk iphoneos clang++ -target arm64-apple-ios14.0 -isysroot "$SDK" -std=c++17 -fobjc-arc -fblocks -dynamiclib -Ivendor/dobby/build/iphoneos -framework UIKit -framework Foundation -framework QuartzCore -framework CoreGraphics -Wl,-install_name,@rpath/OGSMenu.dylib OGSMenu/ModMenu.mm vendor/dobby/build/iphoneos/arm64/libdobby.a -lc++ -o dist/OGSMenu.dylib
           # The game links @rpath/OGSMenu.dylib internally. Ship the same
           # bytes under an explicit release name for unambiguous downloads.
-          cp dist/OGSMenu.dylib dist/OGS41.dylib
+          cp dist/OGSMenu.dylib dist/OGS42.dylib
           file dist/OGSMenu.dylib
-          shasum -a 256 dist/OGSMenu.dylib dist/OGS41.dylib
+          shasum -a 256 dist/OGSMenu.dylib dist/OGS42.dylib
           xcrun vtool -show-build dist/OGSMenu.dylib
       - uses: actions/upload-artifact@v4
         with:
@@ -52,8 +52,8 @@ jobs:
           path: dist/OGSMenu.dylib
       - uses: actions/upload-artifact@v4
         with:
-          name: OGS41-ARM64-Artifact
-          path: dist/OGS41.dylib
+          name: OGS42-ARM64-Artifact
+          path: dist/OGS42.dylib
       - uses: actions/upload-artifact@v4
         with:
           name: OGSMenu-Stage12-Source-Review

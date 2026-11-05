@@ -1712,7 +1712,13 @@ static volatile uint32_t gOGS40KillCallbacks = 0;
 static volatile uint32_t gOGS40LocalKillCallbacks = 0;
 static volatile uint32_t gOGS40OtherKillCallbacks = 0;
 static volatile uint32_t gOGS40UnknownKillCallbacks = 0;
-static volatile uint32_t gOGS40LocalKillBypasses = 0;
+// OGS42 avoids trapping the avatar in a dead-but-moving state. The original
+// KillPlayer calls RoomController.PrepareRespawn and must be forwarded even
+// while shielded. Observe its verified local state BEFORE the original call.
+static volatile uint32_t gOGS42KillLocalOriginalForwarded = 0;
+static volatile uint32_t gOGS42KillPreDeadFlagZero = 0;
+static volatile uint32_t gOGS42KillPreDeadFlagOne = 0;
+static volatile uint32_t gOGS42KillPreDeadFlagUnknown = 0;
 
 static bool OGSReadGrenadeSelectionProbe(void *weapon, int32_t *slotCount,
                                          int32_t *selected) {
@@ -1769,10 +1775,11 @@ static bool OGSIsDamageToLocalPlayer(void *playerNetwork, bool *verified) {
     return localActorID == ownerActorID;
 }
 
-// OGS40 pre-sign native bridge for PlayerNetwork.KillPlayer. This catches
-// native direct calls which bypassed the OGS39 method-pointer slot hook.
-// Only a verified LOCAL player can be skipped when the shield is armed.
-// All other players and unknown owners are forwarded unmodified.
+// OGS42: KillPlayer is NOT a safe invulnerability interception point: the
+// original sets playerKilled (+0x12C) AND invokes PrepareRespawn. OGS41
+// skipped both, leaving the client in a dead-animation/moving-avatar state.
+// Keep the native bridge to observe and classify calls, but ALWAYS forward
+// the original. The independent pre-death damage bridges remain shield-gated.
 static void OGSBridgeKillPlayer(void *self, uintptr_t argument,
                                  const void *method) {
     __atomic_fetch_add(&gOGS40KillCallbacks, 1u, __ATOMIC_RELAXED);
@@ -1786,8 +1793,22 @@ static void OGSBridgeKillPlayer(void *self, uintptr_t argument,
         __atomic_fetch_add(&gOGS40OtherKillCallbacks, 1u, __ATOMIC_RELAXED);
     if (verified && mine &&
         __atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE)) {
-        __atomic_fetch_add(&gOGS40LocalKillBypasses, 1u, __ATOMIC_RELAXED);
-        return;
+        __atomic_fetch_add(&gOGS42KillLocalOriginalForwarded, 1u,
+                           __ATOMIC_RELAXED);
+        uint8_t killed = 0xFF;
+        if (!OGSReadMemory((uintptr_t)self + 0x12Cu,
+                           &killed, sizeof(killed)))
+            __atomic_fetch_add(&gOGS42KillPreDeadFlagUnknown, 1u,
+                               __ATOMIC_RELAXED);
+        else if (killed == 0)
+            __atomic_fetch_add(&gOGS42KillPreDeadFlagZero, 1u,
+                               __ATOMIC_RELAXED);
+        else if (killed == 1)
+            __atomic_fetch_add(&gOGS42KillPreDeadFlagOne, 1u,
+                               __ATOMIC_RELAXED);
+        else
+            __atomic_fetch_add(&gOGS42KillPreDeadFlagUnknown, 1u,
+                               __ATOMIC_RELAXED);
     }
     OGSKillPlayerFn original = __atomic_load_n(&orig_OGSKillPlayer,
                                                __ATOMIC_ACQUIRE);
@@ -3783,7 +3804,7 @@ static void OGSInstallHooks(void) {
         self.menuPanel.hidden = YES;
 
         self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 5, 260, 18)];
-        self.titleLabel.text = @"OGS41 | درع الضرر المباشر";
+        self.titleLabel.text = @"OGS42 | سلامة الموت والبعث";
         self.titleLabel.textColor = [UIColor whiteColor];
         self.titleLabel.textAlignment = NSTextAlignmentCenter;
         self.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
@@ -4362,7 +4383,7 @@ static void OGSInstallHooks(void) {
         __atomic_load_n(&gOGSGrenade35AdjacentReadFail, __ATOMIC_RELAXED)];
     details = [details stringByAppendingFormat:
         @"\nOGS36 self nickname: queued=%u | local applied=%u | rejected=%u | failed=%u"
-         "\nOGS41 nickname: 1..100 graphemes; RLM/LRM/ZWJ/ZWNJ allowed."
+         "\nOGS42 nickname: 1..100 graphemes; RLM/LRM/ZWJ/ZWNJ allowed."
          "\nOther format controls rejected; server nickname limit unknown."
          "\nName change is SELF-only; local readback is not server acknowledgement."
          "\nOGS36 shield: enabled=%u | damage callbacks=%u | local bypass=%u"
@@ -4378,7 +4399,7 @@ static void OGSInstallHooks(void) {
         __atomic_load_n(&gGodOtherPlayerPasses, __ATOMIC_RELAXED),
         __atomic_load_n(&gGodUnverifiedPasses, __ATOMIC_RELAXED)];
     details = [details stringByAppendingFormat:
-        @"\nOGS41 grenade inventory probes: reads=%u | failures=%u | selection changes=%u"
+        @"\nOGS42 grenade inventory probes: reads=%u | failures=%u | selection changes=%u"
          "\nGrenade array slots before=%d after=%d | selected index before=%d after=%d"
          "\nRead-only PlayerWeapons observation; not proof of restock.",
         __atomic_load_n(&gOGSGrenade39InventoryReads, __ATOMIC_RELAXED),
@@ -4389,19 +4410,23 @@ static void OGSInstallHooks(void) {
         __atomic_load_n(&gOGSGrenade39SelectedBefore, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSGrenade39SelectedAfter, __ATOMIC_RELAXED)];
     details = [details stringByAppendingFormat:
-        @"\nOGS41 KillPlayer native bridge=%u | callbacks=%u | local=%u"
-         " | other=%u | unknown=%u | local bypass=%u"
+        @"\nOGS42 KillPlayer native bridge=%u | callbacks=%u | local=%u"
+         " | other=%u | unknown=%u | local original forwarded=%u"
          "\nStatus 1=installed,2=wrong IPA stub,3=unavailable."
-         "\nOnly verified SELF kills are bypassed while shield enabled."
-         "\nNo MasterClient gate; game/server death paths remain unverified.",
+         "\nOGS42 local pre-kill playerKilled flag 0/1/unknown=%u/%u/%u"
+         "\nKillPlayer always forwards to preserve PrepareRespawn;"
+         " other death paths remain unverified.",
         __atomic_load_n(&gOGS40KillBridgeStatus, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGS40KillCallbacks, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGS40LocalKillCallbacks, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGS40OtherKillCallbacks, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGS40UnknownKillCallbacks, __ATOMIC_RELAXED),
-        __atomic_load_n(&gOGS40LocalKillBypasses, __ATOMIC_RELAXED)];
+        __atomic_load_n(&gOGS42KillLocalOriginalForwarded, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGS42KillPreDeadFlagZero, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGS42KillPreDeadFlagOne, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGS42KillPreDeadFlagUnknown, __ATOMIC_RELAXED)];
     details = [details stringByAppendingFormat:
-        @"\nOGS41 ApplyDamage native bridge: callbacks=%u | local bypass=%u"
+        @"\nOGS42 ApplyDamage native bridge: callbacks=%u | local bypass=%u"
          " | other passes=%u | unknown passes=%u"
          "\nHitBox and falling damage can call ApplyDamage directly; this"
          " bridge is independent from DamageRemote and KillPlayer."
@@ -4411,7 +4436,7 @@ static void OGSInstallHooks(void) {
         __atomic_load_n(&gGodApplyOtherPlayerPasses, __ATOMIC_RELAXED),
         __atomic_load_n(&gGodApplyUnknownPasses, __ATOMIC_RELAXED)];
     details = [details stringByAppendingFormat:
-        @"\nOGS41 room capacity: pending=%u | queued=%u | attempted=%u"
+        @"\nOGS42 room capacity: pending=%u | queued=%u | attempted=%u"
          " | local applied=%u | rejected=%u | failed=%u | below occupants=%u"
          "\nMaxPlayers before=%u | requested=%u | after=%u | occupants=%u"
          "\nReal roster getter verified=%u | failures=%u | cached players=%d"
@@ -5039,7 +5064,7 @@ static void OGSInstallHooks(void) {
                  !OGSInstallKillBridgeOnDemand())) {
         self.statusLabel.text = @"يلزم IPA كامل بجسور DamageRemote وApplyDamage وKillPlayer";
         UIAlertController *warning = [UIAlertController alertControllerWithTitle:@"حماية من الكراش"
-            message:@"يلزم تجهيز جسور الضرر المباشر والبعيد والقتل في IPA كامل. جرّب OGS41 بعد إعادة توقيعه؛ تبديل dylib في نسخة أصلية غير مجهزة لا يكفي."
+            message:@"يلزم تجهيز جسور الضرر المباشر والبعيد والقتل في IPA كامل. جرّب OGS42 بعد إعادة توقيعه؛ تبديل dylib في نسخة أصلية غير مجهزة لا يكفي."
             preferredStyle:UIAlertControllerStyleAlert];
         [warning addAction:[UIAlertAction actionWithTitle:@"فهمت" style:UIAlertActionStyleDefault handler:nil]];
         UIViewController *root = [self gameMainWindow].rootViewController;
@@ -5060,10 +5085,13 @@ static void OGSInstallHooks(void) {
         __atomic_store_n(&gOGS40LocalKillCallbacks, 0u, __ATOMIC_RELAXED);
         __atomic_store_n(&gOGS40OtherKillCallbacks, 0u, __ATOMIC_RELAXED);
         __atomic_store_n(&gOGS40UnknownKillCallbacks, 0u, __ATOMIC_RELAXED);
-        __atomic_store_n(&gOGS40LocalKillBypasses, 0u, __ATOMIC_RELAXED);
+        __atomic_store_n(&gOGS42KillLocalOriginalForwarded, 0u, __ATOMIC_RELAXED);
+        __atomic_store_n(&gOGS42KillPreDeadFlagZero, 0u, __ATOMIC_RELAXED);
+        __atomic_store_n(&gOGS42KillPreDeadFlagOne, 0u, __ATOMIC_RELAXED);
+        __atomic_store_n(&gOGS42KillPreDeadFlagUnknown, 0u, __ATOMIC_RELAXED);
         [s setTitle:@"درع الحماية: تجريبي ⚠️" forState:UIControlStateNormal];
         s.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
-        self.statusLabel.text = @"OGS41 يفحص DamageRemote وApplyDamage وKillPlayer محليًا؛ الحماية دون هوست غير مؤكدة";
+        self.statusLabel.text = @"OGS42 يحاول منع الضرر قبل الموت؛ مسار KillPlayer يمر طبيعيًا لإتاحة إعادة الظهور";
     } else {
         [s setTitle:@"درع الحماية: متوقف 🛡️" forState:UIControlStateNormal];
         s.backgroundColor = [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
