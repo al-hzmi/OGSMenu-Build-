@@ -428,6 +428,27 @@ static void *OGSManagedStringFromNSString(NSString *text) {
     return managed;
 }
 
+// Foundation's controlCharacterSet also includes Unicode Cf format marks.
+// A leading RLM (U+200F) is common in Arabic/stylized nicknames, and was
+// rejected by OGS39 despite being harmless as a nickname character.
+// Allow only the explicitly enumerated formatting marks. Continue rejecting
+// C0/C1 controls and bidi embedding/override characters that can spoof UI.
+static bool OGSHasForbiddenNicknameControls(NSString *text) {
+    NSCharacterSet *controls = [NSCharacterSet controlCharacterSet];
+    for (NSUInteger index = 0; index < text.length; ++index) {
+        unichar c = [text characterAtIndex:index];
+        if (![controls characterIsMember:c]) continue;
+        if (c == 0x061C || // Arabic Letter Mark
+            c == 0x200C || // Zero Width Non-Joiner
+            c == 0x200D || // Zero Width Joiner
+            c == 0x200E || // Left-to-Right Mark
+            c == 0x200F)   // Right-to-Left Mark
+            continue;
+        return true;
+    }
+    return false;
+}
+
 static void *OGSCreateFreshKickString(void *templateIl2CppStr) {
     char phraseBuf[OGS_MAX_NAME_BYTES];
     os_unfair_lock_lock(&gStateLock);
@@ -1582,6 +1603,13 @@ static const uintptr_t OGS_MAGIC_SLOT = 0x2813EF0;
 static const uintptr_t OGS_GOD_SLOT = 0x2813EF8;
 static const uintptr_t OGS_MAGIC_ORIGINAL = 0x3014;
 static const uintptr_t OGS_GOD_ORIGINAL = 0x3054;
+// OGS40 offline-prepared, verified PlayerNetwork.KillPlayer bridge. The
+// writable callback slot sits in the documented 0x3230-byte gap AFTER the
+// __DATA,__common section, not inside existing game globals.
+static const uintptr_t OGS_KILL_STUB = 0x3080;
+static const uintptr_t OGS_KILL_SLOT = 0x02A98DD0;
+static const uintptr_t OGS_KILL_ORIGINAL = 0x3094;
+static const uintptr_t OGS_KILL_ENTRY = 0x013E8FBC;
 
 // Safe, runtime-only diagnostics for the pre-sign bridge.
 // Counts let us distinguish a working bridge from an unused game call path.
@@ -1672,11 +1700,12 @@ static volatile int32_t gOGSGrenade39SlotsBefore = -1;
 static volatile int32_t gOGSGrenade39SlotsAfter = -1;
 static volatile int32_t gOGSGrenade39SelectedBefore = -1;
 static volatile int32_t gOGSGrenade39SelectedAfter = -1;
-static volatile uint32_t gOGS39KillHookStatus = 0;
-static volatile uint32_t gOGS39KillCallbacks = 0;
-static volatile uint32_t gOGS39LocalKillCallbacks = 0;
-static volatile uint32_t gOGS39OtherKillCallbacks = 0;
-static volatile uint32_t gOGS39UnknownKillCallbacks = 0;
+static volatile uint32_t gOGS40KillBridgeStatus = 0;
+static volatile uint32_t gOGS40KillCallbacks = 0;
+static volatile uint32_t gOGS40LocalKillCallbacks = 0;
+static volatile uint32_t gOGS40OtherKillCallbacks = 0;
+static volatile uint32_t gOGS40UnknownKillCallbacks = 0;
+static volatile uint32_t gOGS40LocalKillBypasses = 0;
 
 static bool OGSReadGrenadeSelectionProbe(void *weapon, int32_t *slotCount,
                                          int32_t *selected) {
@@ -1733,20 +1762,26 @@ static bool OGSIsDamageToLocalPlayer(void *playerNetwork, bool *verified) {
     return localActorID == ownerActorID;
 }
 
-// Diagnostic method-pointer hook. ARM64 PlayerNetwork.KillPlayer
-// MD30380 / MI29168 / entry RVA 0x013E8FBC. Direct native `bl` calls may
-// bypass IL2CPP's pointer table, so zero callbacks do NOT rule this path out.
-static void hook_OGSKillPlayer(void *self, uintptr_t argument,
-                                const void *method) {
-    __atomic_fetch_add(&gOGS39KillCallbacks, 1u, __ATOMIC_RELAXED);
+// OGS40 pre-sign native bridge for PlayerNetwork.KillPlayer. This catches
+// native direct calls which bypassed the OGS39 method-pointer slot hook.
+// Only a verified LOCAL player can be skipped when the shield is armed.
+// All other players and unknown owners are forwarded unmodified.
+static void OGSBridgeKillPlayer(void *self, uintptr_t argument,
+                                 const void *method) {
+    __atomic_fetch_add(&gOGS40KillCallbacks, 1u, __ATOMIC_RELAXED);
     bool verified = false;
     bool mine = OGSIsDamageToLocalPlayer(self, &verified);
     if (!verified)
-        __atomic_fetch_add(&gOGS39UnknownKillCallbacks, 1u, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&gOGS40UnknownKillCallbacks, 1u, __ATOMIC_RELAXED);
     else if (mine)
-        __atomic_fetch_add(&gOGS39LocalKillCallbacks, 1u, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&gOGS40LocalKillCallbacks, 1u, __ATOMIC_RELAXED);
     else
-        __atomic_fetch_add(&gOGS39OtherKillCallbacks, 1u, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&gOGS40OtherKillCallbacks, 1u, __ATOMIC_RELAXED);
+    if (verified && mine &&
+        __atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE)) {
+        __atomic_fetch_add(&gOGS40LocalKillBypasses, 1u, __ATOMIC_RELAXED);
+        return;
+    }
     OGSKillPlayerFn original = __atomic_load_n(&orig_OGSKillPlayer,
                                                __ATOMIC_ACQUIRE);
     if (original) original(self, argument, method);
@@ -3009,6 +3044,60 @@ static bool OGSInstallDamageHookOnDemand(bool godMode) {
     return true;
 }
 
+// OGS40: PlayerNetwork.KillPlayer() direct-call-safe pre-sign bridge.
+// The absolute stub and slot encodings are computed and verified against the
+// exact fps 3.4.0 binary before inserting the callback. No executable memory
+// pages are modified at runtime; only a dedicated writable callback slot.
+static bool gOGS40KillBridgeInstalled = false;
+static bool OGSInstallKillBridgeOnDemand(void) {
+    if (gOGS40KillBridgeInstalled) return true;
+    uintptr_t base = OGSFindGameImage();
+    if (!base) return false;
+    uintptr_t entry = base + OGS_KILL_ENTRY;
+    uintptr_t stub = base + OGS_KILL_STUB;
+    uintptr_t slot = base + OGS_KILL_SLOT;
+    uintptr_t trampoline = base + OGS_KILL_ORIGINAL;
+    if (!OGSIsExecutableGameAddress(entry) ||
+        !OGSIsExecutableGameAddress(stub) ||
+        !OGSIsExecutableGameAddress(trampoline) ||
+        !OGSIsWritableMappedSlot(slot)) {
+        __atomic_store_n(&gOGS40KillBridgeStatus, 3u, __ATOMIC_RELEASE);
+        return false;
+    }
+    int64_t distance = (int64_t)OGS_KILL_STUB - (int64_t)OGS_KILL_ENTRY;
+    if ((distance & 3) || distance <= -(1LL << 27) ||
+        distance >= (1LL << 27)) return false;
+    uint32_t branchExpected = 0x14000000u |
+        (uint32_t)((distance / 4) & 0x03ffffffu);
+    uint32_t branch = 0, adrp = 0, add = 0, ldr = 0;
+    uint32_t br = 0, originalProlog = 0;
+    if (!OGSReadMemory(entry, &branch, sizeof(branch)) ||
+        !OGSReadMemory(stub, &adrp, sizeof(adrp)) ||
+        !OGSReadMemory(stub + 4u, &add, sizeof(add)) ||
+        !OGSReadMemory(stub + 8u, &ldr, sizeof(ldr)) ||
+        !OGSReadMemory(stub + 16u, &br, sizeof(br)) ||
+        !OGSReadMemory(trampoline, &originalProlog, sizeof(originalProlog)) ||
+        branch != branchExpected ||
+        adrp != 0xB00154B0u || add != 0x91374210u ||
+        ldr != 0xF9400210u || br != 0xD61F0200u ||
+        originalProlog != 0xD101C3FFu) {
+        __atomic_store_n(&gOGS40KillBridgeStatus, 2u, __ATOMIC_RELEASE);
+        return false;
+    }
+    uintptr_t old = 0;
+    uintptr_t callback = (uintptr_t)&OGSBridgeKillPlayer;
+    if (!OGSReadMemory(slot, &old, sizeof(old)) ||
+        (old && old != callback)) {
+        __atomic_store_n(&gOGS40KillBridgeStatus, 3u, __ATOMIC_RELEASE);
+        return false;
+    }
+    orig_OGSKillPlayer = (OGSKillPlayerFn)trampoline;
+    __atomic_store_n((uintptr_t *)slot, callback, __ATOMIC_RELEASE);
+    gOGS40KillBridgeInstalled = true;
+    __atomic_store_n(&gOGS40KillBridgeStatus, 1u, __ATOMIC_RELEASE);
+    return true;
+}
+
 static bool OGSIsWritableMappedSlot(uintptr_t address) {
     if (address < 0x100000000ULL || (address & (sizeof(void *) - 1))) return false;
     vm_address_t regionAddress = (vm_address_t)address;
@@ -3486,25 +3575,8 @@ static void OGSInstallHooks(void) {
         __atomic_store_n(&gOGSResponseHookStatus,
                           actual ? 2u : 3u, __ATOMIC_RELEASE);
     }
-    // Exact fps 3.4.0 metadata identity: PlayerNetwork.KillPlayer
-    // MD30380 / MI29168, method pointer at 0x02391380.
-    // This is passive: the original always receives identical arguments.
-    uintptr_t killSlot = OGSResolveRVA(0x02391380u);
-    uintptr_t killEntry = OGSResolveRVA(0x013E8FBCu);
-    void *killActual = NULL;
-    if (killSlot && killEntry &&
-        OGSReadPointer(killSlot, &killActual) &&
-        killActual == (void *)killEntry &&
-        OGSIsExecutableGameAddress(killEntry)) {
-        bool installed = OGSInstallPointerSlotHook(0x02391380u,
-                                                  (void *)&hook_OGSKillPlayer,
-                                                  (void **)&orig_OGSKillPlayer);
-        __atomic_store_n(&gOGS39KillHookStatus, installed ? 1u : 3u,
-                         __ATOMIC_RELEASE);
-    } else {
-        __atomic_store_n(&gOGS39KillHookStatus, killActual ? 2u : 3u,
-                         __ATOMIC_RELEASE);
-    }
+    // OGS40 moves KillPlayer to an on-demand, pre-sign native bridge.
+    // Do not install the OGS39 pointer-table hook (status=2 on the device).
     OGSInstallPointerSlotHook(gOffsets.tblLeaveRoom, (void *)&hook_LeaveRoom, (void **)&orig_LeaveRoom);
     // FPSWeapon.ShootBullet: MI27852, method pointer slot = 0x2358400 + MI*8.
     OGSInstallPointerSlotHook(0x0238EA60u, (void *)&hook_KnifeShoot29,
@@ -3683,7 +3755,7 @@ static void OGSInstallHooks(void) {
         self.menuPanel.hidden = YES;
 
         self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 5, 260, 18)];
-        self.titleLabel.text = @"OGS39 | تشخيص الروم والذخيرة";
+        self.titleLabel.text = @"OGS40 | الدرع والأسماء المزخرفة";
         self.titleLabel.textColor = [UIColor whiteColor];
         self.titleLabel.textAlignment = NSTextAlignmentCenter;
         self.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
@@ -4262,7 +4334,8 @@ static void OGSInstallHooks(void) {
         __atomic_load_n(&gOGSGrenade35AdjacentReadFail, __ATOMIC_RELAXED)];
     details = [details stringByAppendingFormat:
         @"\nOGS36 self nickname: queued=%u | local applied=%u | rejected=%u | failed=%u"
-         "\nOGS39 nickname accepts 1..100 grapheme characters; server limit unknown."
+         "\nOGS40 nickname: 1..100 graphemes; RLM/LRM/ZWJ/ZWNJ allowed."
+         "\nOther format controls rejected; server nickname limit unknown."
          "\nName change is SELF-only; local readback is not server acknowledgement."
          "\nOGS36 shield: enabled=%u | damage callbacks=%u | local bypass=%u"
          "\nOther player passes=%u | unknown owner passes=%u"
@@ -4277,7 +4350,7 @@ static void OGSInstallHooks(void) {
         __atomic_load_n(&gGodOtherPlayerPasses, __ATOMIC_RELAXED),
         __atomic_load_n(&gGodUnverifiedPasses, __ATOMIC_RELAXED)];
     details = [details stringByAppendingFormat:
-        @"\nOGS39 grenade inventory probes: reads=%u | failures=%u | selection changes=%u"
+        @"\nOGS40 grenade inventory probes: reads=%u | failures=%u | selection changes=%u"
          "\nGrenade array slots before=%d after=%d | selected index before=%d after=%d"
          "\nRead-only PlayerWeapons observation; not proof of restock.",
         __atomic_load_n(&gOGSGrenade39InventoryReads, __ATOMIC_RELAXED),
@@ -4288,17 +4361,19 @@ static void OGSInstallHooks(void) {
         __atomic_load_n(&gOGSGrenade39SelectedBefore, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSGrenade39SelectedAfter, __ATOMIC_RELAXED)];
     details = [details stringByAppendingFormat:
-        @"\nOGS39 KillPlayer passive hook=%u | callbacks=%u | local=%u"
-         " | other=%u | unknown=%u"
-         "\nMethod-pointer dispatch only; direct calls might bypass this hook."
-         "\nShield still covers DamageRemote only; no host-independent immunity proven.",
-        __atomic_load_n(&gOGS39KillHookStatus, __ATOMIC_RELAXED),
-        __atomic_load_n(&gOGS39KillCallbacks, __ATOMIC_RELAXED),
-        __atomic_load_n(&gOGS39LocalKillCallbacks, __ATOMIC_RELAXED),
-        __atomic_load_n(&gOGS39OtherKillCallbacks, __ATOMIC_RELAXED),
-        __atomic_load_n(&gOGS39UnknownKillCallbacks, __ATOMIC_RELAXED)];
+        @"\nOGS40 KillPlayer native bridge=%u | callbacks=%u | local=%u"
+         " | other=%u | unknown=%u | local bypass=%u"
+         "\nStatus 1=installed,2=wrong IPA stub,3=unavailable."
+         "\nOnly verified SELF kills are bypassed while shield enabled."
+         "\nNo MasterClient gate; game/server death paths remain unverified.",
+        __atomic_load_n(&gOGS40KillBridgeStatus, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGS40KillCallbacks, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGS40LocalKillCallbacks, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGS40OtherKillCallbacks, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGS40UnknownKillCallbacks, __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGS40LocalKillBypasses, __ATOMIC_RELAXED)];
     details = [details stringByAppendingFormat:
-        @"\nOGS39 room capacity: pending=%u | queued=%u | attempted=%u"
+        @"\nOGS40 room capacity: pending=%u | queued=%u | attempted=%u"
          " | local applied=%u | rejected=%u | failed=%u | below occupants=%u"
          "\nMaxPlayers before=%u | requested=%u | after=%u | occupants=%u"
          "\nReal roster getter verified=%u | failures=%u | cached players=%d"
@@ -4787,8 +4862,8 @@ static void OGSInstallHooks(void) {
             if (characterCount > 100) *stop = YES;
         }];
         if (characterCount < 1 || characterCount > 100 ||
-            [entry rangeOfCharacterFromSet:[NSCharacterSet controlCharacterSet]].location != NSNotFound) {
-            self.statusLabel.text = @"الاسم من 1 إلى 100 حرف دون رموز تحكم؛ خادم اللعبة قد يفرض حدًا أقصر";
+            OGSHasForbiddenNicknameControls(entry)) {
+            self.statusLabel.text = @"الاسم من 1 إلى 100 حرف؛ يدعم الزخرفة واتجاه العربية، ويرفض رموز التحكم الخطرة";
             return;
         }
         uintptr_t currentRoom = 0;
@@ -4921,10 +4996,11 @@ static void OGSInstallHooks(void) {
 - (void)toggleGodMode:(UIButton *)s {
     int32_t current = __atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE);
     int32_t next = current ? 0 : 1;
-    if (next && !OGSInstallDamageHookOnDemand(true)) {
-        self.statusLabel.text = @"نسخة IPA الحالية لا تحتوي جسر الضرر المجهز قبل التوقيع";
+    if (next && (!OGSInstallDamageHookOnDemand(true) ||
+                 !OGSInstallKillBridgeOnDemand())) {
+        self.statusLabel.text = @"نسخة IPA لا تحتوي جسري الضرر والقتل المجهزين لـ OGS40";
         UIAlertController *warning = [UIAlertController alertControllerWithTitle:@"حماية من الكراش"
-            message:@"الميزات تتطلب تجهيز ملف fps 3.4.0 قبل توقيع التطبيق وإعادة حقن OGSMenu. النسخة الأصلية لا تحتوي جسر الضرر."
+            message:@"تشغيل الدرع المطوّر يتطلب IPA إصدار OGS40 الكامل، وليس مجرد استبدال dylib في نسخة قديمة. أعد توقيع النسخة الكاملة."
             preferredStyle:UIAlertControllerStyleAlert];
         [warning addAction:[UIAlertAction actionWithTitle:@"فهمت" style:UIAlertActionStyleDefault handler:nil]];
         UIViewController *root = [self gameMainWindow].rootViewController;
@@ -4937,9 +5013,14 @@ static void OGSInstallHooks(void) {
         __atomic_store_n(&gGodLocalBypasses, 0u, __ATOMIC_RELAXED);
         __atomic_store_n(&gGodOtherPlayerPasses, 0u, __ATOMIC_RELAXED);
         __atomic_store_n(&gGodUnverifiedPasses, 0u, __ATOMIC_RELAXED);
+        __atomic_store_n(&gOGS40KillCallbacks, 0u, __ATOMIC_RELAXED);
+        __atomic_store_n(&gOGS40LocalKillCallbacks, 0u, __ATOMIC_RELAXED);
+        __atomic_store_n(&gOGS40OtherKillCallbacks, 0u, __ATOMIC_RELAXED);
+        __atomic_store_n(&gOGS40UnknownKillCallbacks, 0u, __ATOMIC_RELAXED);
+        __atomic_store_n(&gOGS40LocalKillBypasses, 0u, __ATOMIC_RELAXED);
         [s setTitle:@"درع الحماية: تجريبي ⚠️" forState:UIControlStateNormal];
         s.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
-        self.statusLabel.text = @"يعترض DamageRemote فقط؛ لا يضمن منع الموت أو ضرر القنابل";
+        self.statusLabel.text = @"OGS40 يراقب مساري DamageRemote وKillPlayer للاعبك فقط؛ النجاح دون هوست يحتاج تجربة";
     } else {
         [s setTitle:@"درع الحماية: متوقف 🛡️" forState:UIControlStateNormal];
         s.backgroundColor = [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
