@@ -13,8 +13,15 @@ struct OriginalClientTeamRequest {
     double at = 0;
 };
 static OriginalClientTeamRequest originalClientPending, originalClientIssued;
-static NSString *originalClientMessage = @"الحساب الثاني الأصلي: اختر لاعبًا في غرفة بحسابين";
+static NSString *originalClientMessage = @"اختر حسابك الثاني من القائمة، حتى في الغرف متعددة اللاعبين";
 static double originalClientLastSubmitAt = -100.;
+
+static int selectedActorMatches(const OGSRoomSnapshot &roster, int actor) {
+    int matches = 0;
+    for (uint32_t i = 0; i < roster.count; ++i)
+        if (roster.peers[i].actorID == actor) ++matches;
+    return matches;
+}
 
 static NSString *originalClientTeamStatus() {
     os_unfair_lock_lock(&lock);
@@ -33,14 +40,14 @@ static bool queueOriginalClientTeam(int target, int team) {
     f.snapshotValid = s.valid;
     f.rosterValid = roster.inRoom && roster.roomAddress == s.id.room;
     f.otherPlayers = (int)roster.count;
-    f.soleOtherActor = roster.count == 1 ? roster.peers[0].actorID : 0;
+    f.targetMatches = selectedActorMatches(roster, target);
     f.targetActor = target;
     f.destination = team;
     f.mode = s.mode;
     f.age = 0.;
     bool accepted = ogs48::allowTeamRequest(f);
     os_unfair_lock_lock(&lock);
-    if (!accepted) originalClientMessage = @"يلزم حسابك الثاني وحده معك في الغرفة واختيار اسمه";
+    if (!accepted) originalClientMessage = @"تعذر التحقق من هوية اللاعب المحدد أو حالة الغرفة؛ أعد اختياره";
     else if (originalClientPending.target || t - originalClientLastSubmitAt < 15.) {
         accepted = false;
         originalClientMessage = @"انتظر 15 ثانية قبل طلب نقل آخر";
@@ -68,12 +75,12 @@ static void originalClientTeamTick(const Snapshot &s) {
     f.snapshotValid = s.valid;
     f.rosterValid = roster.inRoom && roster.roomAddress == s.id.room;
     f.otherPlayers = (int)roster.count;
-    f.soleOtherActor = roster.count == 1 ? roster.peers[0].actorID : 0;
+    f.targetMatches = selectedActorMatches(roster, req.target);
     f.targetActor = req.target;
     f.destination = req.team;
     f.mode = s.mode;
     f.age = now() - req.at;
-    NSString *result = @"ألغي الطلب: تغير اللاعب أو الغرفة أو لم يعد الحسابان وحدهما";
+    NSString *result = @"ألغي الطلب: تغيّرت الغرفة أو لم يعد الحساب المحدد ظاهرًا";
     if (ogs48::allowTeamRequest(f)) {
         void *target = findActor(req.target);
         uintptr_t getAddress = OGSResolveRVA(0x14232D8); // TeamExtensions.GetTeam

@@ -1796,14 +1796,6 @@ static uintptr_t gOGS46ShieldRoom = 0; // published before godModeOn
 static int32_t gOGS46ShieldActor = 0;
 static uintptr_t gOGS46ShieldPlayer = 0;
 
-static bool OGS46TwoAccountTestRoom(uintptr_t room) {
-    OGSRoomSnapshot peers = OGSCurrentSnapshot();
-    // Accept visible/open rooms; only the operator and at most one other
-    // account may be present. All property/damage callbacks fail closed if
-    // the read-only roster has not verified this exact room.
-    return room && peers.inRoom && peers.roomAddress == room && peers.count <= 1;
-}
-
 static bool OGS46ShouldBlockSelfDamage(void *pn) {
     if (!__atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE) ||
         (uintptr_t)pn != __atomic_load_n(&gOGS46ShieldPlayer, __ATOMIC_ACQUIRE)) return false;
@@ -1814,7 +1806,6 @@ static bool OGS46ShouldBlockSelfDamage(void *pn) {
     return OGSReadAutoRoom(&room, &actor, &master) && actor == master && actor == ownerActor &&
         room == __atomic_load_n(&gOGS46ShieldRoom, __ATOMIC_ACQUIRE) &&
         actor == __atomic_load_n(&gOGS46ShieldActor, __ATOMIC_ACQUIRE) &&
-        OGS46TwoAccountTestRoom(room) &&
         OGSReadMemory((uintptr_t)pn + 0x12C, &killed, 1) && killed == 0;
 }
 
@@ -3243,11 +3234,10 @@ static bool OGS44ObserveExplosion(unsigned index, void *self) {
         __atomic_fetch_add(&gOGS44PreFlagZero[index], 1u, __ATOMIC_RELAXED);
     else
         __atomic_fetch_add(&gOGS44PreFlagOne[index], 1u, __ATOMIC_RELAXED);
-    bool twoAccountRoom = roomVerified && OGS46TwoAccountTestRoom(room);
     OGSExplosionFacts facts = {
         __atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE) != 0,
         verified, mine, roomVerified, ownerContextActor == actor,
-        roomVerified && actor == master, twoAccountRoom,
+        roomVerified && actor == master,
         deadFlagVerified, deadFlagVerified && flag == 0
     };
     bool blocked = OGSShouldBlockLocalExplosion(facts) && OGS46ShouldBlockSelfDamage(self);
@@ -3981,7 +3971,7 @@ static void OGSInstallHooks(void) {
         self.menuPanel.hidden = YES;
 
         self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 5, 260, 18)];
-        self.titleLabel.text = @"OGS48 | الطيران وحسابك الثاني الأصلي";
+        self.titleLabel.text = @"OGS49 | درع بلا قيد للغرفة + الطيران";
         self.titleLabel.textColor = [UIColor whiteColor];
         self.titleLabel.textAlignment = NSTextAlignmentCenter;
         self.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
@@ -4429,7 +4419,10 @@ static void OGSInstallHooks(void) {
     self.flightPad.hidden = !flightOn;
     [self.flightButton setTitle:flightOn ? @"الطيران: مفعّل — اضغط للإيقاف" : @"الطيران: إيقاف" forState:UIControlStateNormal];
     BOOL shieldOn = __atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE) != 0;
-    [self.godModeButton setTitle:shieldOn ? @"درع الهوست: مفعّل للاختبار" : @"درع الهوست: إيقاف" forState:UIControlStateNormal];
+    uintptr_t shieldBound = __atomic_load_n(&gOGS46ShieldRoom, __ATOMIC_ACQUIRE);
+    [self.godModeButton setTitle:shieldOn ?
+        (shieldBound ? @"الدرع: مسلّح (هوست فقط)" : @"الدرع: انتظار تحقق الهوست") :
+        @"درع الحماية: إيقاف" forState:UIControlStateNormal];
     [self.unbanButton setTitle:[NSString stringWithFormat:@"فك الحظر (%lu)", (unsigned long)[self bannedCountSafe]] forState:UIControlStateNormal];
 }
 
@@ -5314,8 +5307,8 @@ static void OGSInstallHooks(void) {
 - (void)changeSelectedTeam:(UIButton *)sender {
     OGSRoomSnapshot peers = OGSCurrentSnapshot();
     uint32_t selected = __atomic_load_n(&gOGS.selectedPeer, __ATOMIC_ACQUIRE);
-    if (!peers.inRoom || peers.count != 1 || selected >= peers.count) {
-        self.remoteTeamLabel.text = @"للتجربة: ادخل غرفة فيها حساباك فقط، ثم اختر الحساب الثاني";
+    if (!peers.inRoom || !peers.count || selected >= peers.count) {
+        self.remoteTeamLabel.text = @"حدد حسابك الثاني من قائمة اللاعبين الحالية أولًا";
         return;
     }
     int32_t targetActor = peers.peers[selected].actorID;
@@ -5375,17 +5368,6 @@ static void OGSInstallHooks(void) {
     int32_t current = __atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE);
     int32_t next = current ? 0 : 1;
     ogs46::Snapshot shieldState = ogs46::snapshot();
-    if (next && (!shieldState.valid || !shieldState.master || !shieldState.alive ||
-                 !OGS46TwoAccountTestRoom(shieldState.id.room))) {
-        self.gameplayLabel.text = @"الدرع: يلزم هوست وشخصية حيّة وغرفة بحسابيك فقط";
-        UIAlertController *warning = [UIAlertController alertControllerWithTitle:@"شرط الدرع التجريبي"
-            message:@"لم يعد إخفاء الغرفة مطلوبًا، لكن يلزم أن تكون الهوست وشخصيتك حيّة، وألا يوجد أكثر من حساب ثانٍ في الغرفة. انتظر تحديث قائمة اللاعبين ثم جرّب. الحماية بدون هوست لم تثبت بعد."
-            preferredStyle:UIAlertControllerStyleAlert];
-        [warning addAction:[UIAlertAction actionWithTitle:@"فهمت" style:UIAlertActionStyleDefault handler:nil]];
-        UIViewController *root = [self gameMainWindow].rootViewController;
-        if (root && !root.presentedViewController) [root presentViewController:warning animated:YES completion:nil];
-        return;
-    }
     if (next && (!OGSInstallDamageHookOnDemand(true) ||
                  !OGSInstallDamageHookOnDemand(false) ||
                  !OGSInstallKillBridgeOnDemand())) {
@@ -5408,9 +5390,15 @@ static void OGSInstallHooks(void) {
         }
     }
     if (next) {
-        __atomic_store_n(&gOGS46ShieldRoom, shieldState.id.room, __ATOMIC_RELEASE);
-        __atomic_store_n(&gOGS46ShieldActor, shieldState.id.actor, __ATOMIC_RELEASE);
-        __atomic_store_n(&gOGS46ShieldPlayer, shieldState.id.player, __ATOMIC_RELEASE);
+        // UI arming is unconditional on room size or privacy; the native
+        // damage callbacks still require verified SELF + alive + MasterClient.
+        // If the room snapshot is transiently unavailable, roomUpdate binds
+        // when a valid local host/character sample becomes available.
+        bool bindNow = shieldState.valid && shieldState.master && shieldState.alive &&
+                       shieldState.id.room && shieldState.id.player && shieldState.id.actor > 0;
+        __atomic_store_n(&gOGS46ShieldRoom, bindNow ? shieldState.id.room : 0, __ATOMIC_RELEASE);
+        __atomic_store_n(&gOGS46ShieldActor, bindNow ? shieldState.id.actor : 0, __ATOMIC_RELEASE);
+        __atomic_store_n(&gOGS46ShieldPlayer, bindNow ? shieldState.id.player : 0, __ATOMIC_RELEASE);
     }
     __atomic_store_n(&gOGS.godModeOn, next, __ATOMIC_RELEASE);
     if (next) {
@@ -5432,7 +5420,9 @@ static void OGSInstallHooks(void) {
         __atomic_store_n(&gOGS42KillPreDeadFlagUnknown, 0u, __ATOMIC_RELAXED);
         [s setTitle:@"درع الحماية: تجريبي ⚠️" forState:UIControlStateNormal];
         s.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
-        self.statusLabel.text = @"حماية الانفجار للهوست داخل غرفة مغلقة ومخفية فقط؛ تجريبية";
+        self.statusLabel.text = __atomic_load_n(&gOGS46ShieldRoom, __ATOMIC_ACQUIRE) ?
+            @"درع الهوست مربوط بشخصيتك؛ تجريبي وغير مضمون ضد جميع المسارات" :
+            @"الدرع مسلّح، وينتظر التحقق من هوست وشخصية حيّة؛ لا يمنع الضرر الآن";
     } else {
         [s setTitle:@"درع الحماية: متوقف 🛡️" forState:UIControlStateNormal];
         s.backgroundColor = [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];

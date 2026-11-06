@@ -96,11 +96,29 @@ static void processSelfRequest(void *self, const Snapshot &s, const Request &req
 static void roomUpdate(void *self, void *method) {
     if (roomOriginal) roomOriginal(self, method);
     Snapshot s = sample(self);
-    if (__atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE) &&
-        (!s.valid || !s.master || !s.alive || !OGS46TwoAccountTestRoom(s.id.room) ||
-         s.id.room != __atomic_load_n(&gOGS46ShieldRoom, __ATOMIC_ACQUIRE) ||
-         s.id.actor != __atomic_load_n(&gOGS46ShieldActor, __ATOMIC_ACQUIRE)))
-        __atomic_store_n(&gOGS.godModeOn, 0, __ATOMIC_RELEASE);
+    if (__atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE)) {
+        uintptr_t boundRoom = __atomic_load_n(&gOGS46ShieldRoom, __ATOMIC_ACQUIRE);
+        int32_t boundActor = __atomic_load_n(&gOGS46ShieldActor, __ATOMIC_ACQUIRE);
+        uintptr_t boundPlayer = __atomic_load_n(&gOGS46ShieldPlayer, __ATOMIC_ACQUIRE);
+        // No crowd-size or hidden-room predicate. Bind on a verified host
+        // sample; a single incomplete sample or temporary host loss merely
+        // suspends protection (the native callbacks verify MasterClient).
+        if (!boundRoom && s.valid && s.master && s.alive && s.id.player) {
+            __atomic_store_n(&gOGS46ShieldRoom, s.id.room, __ATOMIC_RELEASE);
+            __atomic_store_n(&gOGS46ShieldActor, s.id.actor, __ATOMIC_RELEASE);
+            __atomic_store_n(&gOGS46ShieldPlayer, s.id.player, __ATOMIC_RELEASE);
+        } else if (boundRoom && s.valid &&
+                   (s.id.room != boundRoom || s.id.actor != boundActor ||
+                    (s.id.player && s.id.player != boundPlayer) ||
+                    (s.aliveVerified && !s.alive))) {
+            // Never carry a protection binding across death, a new avatar,
+            // room transition or actor change (OGS41 partial-death regression).
+            __atomic_store_n(&gOGS.godModeOn, 0, __ATOMIC_RELEASE);
+            __atomic_store_n(&gOGS46ShieldRoom, 0, __ATOMIC_RELEASE);
+            __atomic_store_n(&gOGS46ShieldActor, 0, __ATOMIC_RELEASE);
+            __atomic_store_n(&gOGS46ShieldPlayer, 0, __ATOMIC_RELEASE);
+        }
+    }
     Request req;
     os_unfair_lock_lock(&lock);
     latest = s;
