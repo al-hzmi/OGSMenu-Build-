@@ -87,10 +87,10 @@ def main():
             else:raise AssertionError('modified game not rejected')
         print('PASS tampered source executable and stub area rejected')
     source=(Path(__file__).resolve().parents[1]/'OGSMenu/ModMenu.mm').read_text()
-    for f in ('OGS44BombNear','OGS44BombFar','OGS44C4Near','OGS44C4Far'):
+    for i,f in enumerate(('OGS44BombNear','OGS44BombFar','OGS44C4Near','OGS44C4Far')):
         match=re.search(r'static void '+f+r'\([^)]*\)\s*\{(.*?)\}',source,re.S)
-        assert match and 'OGS44ObserveExplosion' in match.group(1) and 'if (original) original(' in match.group(1),f
-    print('PASS four diagnostic callbacks forward original functions in source')
+        assert match and f'if (OGS44ObserveExplosion({i}, self)) return;' in match.group(1) and 'if (original) original(' in match.group(1),f
+    print('PASS four explosion callbacks gate suppression and otherwise call original in source')
     print('NOT TESTED: valid signature, runtime hooks, authority, two-client gameplay')
 
 if __name__=='__main__':main()
