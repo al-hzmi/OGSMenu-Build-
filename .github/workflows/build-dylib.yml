@@ -49,6 +49,8 @@ jobs:
         run: clang++ -std=c++17 -Wall -Wextra -Werror -pedantic tests/test_ogs51_training.cpp -o /tmp/ogs51-training && /tmp/ogs51-training
       - name: Check compact OGS54 play-menu layout
         run: python3 tools/test_ogs54_ui.py
+      - name: Check guarded capacity choice grid
+        run: python3 tools/test_ogs55_capacity_ui.py
       - name: Compile iOS arm64 dylib
         shell: bash
         run: |

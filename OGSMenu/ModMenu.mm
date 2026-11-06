@@ -1447,6 +1447,7 @@ static void OGSProcessSpeed(void) {
 @property (strong, nonatomic) OGSPassthroughContainer *containerView;
 @property (strong, nonatomic) UIButton *floatingButton;
 @property (strong, nonatomic) UIScrollView *menuPanel;
+@property (strong, nonatomic) UIView *capacityPicker;
 @property (strong, nonatomic) UILabel *titleLabel;
 @property (strong, nonatomic) UILabel *playerLabel;
 @property (strong, nonatomic) UILabel *statusLabel;
@@ -5246,6 +5247,9 @@ static void OGSInstallHooks(void) {
 - (void)toggleMenu {
     self.menuPanel.hidden = !self.menuPanel.hidden;
     if (!self.menuPanel.hidden) {
+        // A fresh open always starts in the primary controls, never in a
+        // leftover capacity picker from the previous interaction.
+        if (self.capacityPicker) [self dismissCapacityPicker:nil];
         // The first tap should always reveal the player picker and team row.
         [self.menuPanel setContentOffset:CGPointZero animated:NO];
         OGSInstallHooks();
@@ -5531,97 +5535,125 @@ static void OGSInstallHooks(void) {
     else self.statusLabel.text = @"أغلق النوافذ المفتوحة ثم أعد المحاولة";
 }
 
+- (void)dismissCapacityPicker:(UIButton *)button {
+    (void)button;
+    [self.capacityPicker removeFromSuperview];
+    self.capacityPicker = nil;
+    self.menuPanel.scrollEnabled = YES;
+}
+
 - (void)promptRoomCapacity:(UIButton *)button {
     (void)button;
+    if (self.capacityPicker) { [self dismissCapacityPicker:nil]; return; }
+
     uintptr_t room = 0;
-    int32_t actor = 0, master = 0, playerCount = 0;
+    int32_t actor = 0, master = 0;
     uint8_t current = 0;
-    if (!OGSReadAutoRoom(&room, &actor, &master) ||
+    bool known = OGSReadAutoRoom(&room, &actor, &master) &&
+        OGSReadMemory(room + 0x20u, &current, sizeof(current)) &&
+        __atomic_load_n(&gOGSRoomRosterObservedRoom, __ATOMIC_ACQUIRE) == room;
+    int32_t occupied = known ? __atomic_load_n(&gOGSRoomRosterObservedCount,
+                                               __ATOMIC_ACQUIRE) : 0;
+    known = known && current >= 1 && current <= 32 &&
+        occupied >= 1 && occupied <= current;
+    bool permitted = known && actor > 0 && master == actor;
+
+    // One compact grid instead of opening the keyboard or stacking 31 alerts.
+    // All 2..32 choices are visible; unavailable actions are truly disabled.
+    UIView *panel = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 290, 352)];
+    panel.backgroundColor = [UIColor colorWithRed:.095 green:.10 blue:.13 alpha:1.];
+    panel.layer.cornerRadius = 12.;
+    UILabel *heading = [[UILabel alloc] initWithFrame:CGRectMake(8, 7, 236, 28)];
+    heading.textColor = UIColor.whiteColor;
+    heading.font = [UIFont boldSystemFontOfSize:12.];
+    heading.textAlignment = NSTextAlignmentCenter;
+    heading.text = known ?
+        [NSString stringWithFormat:@"السعة %u | الموجودون %d", (unsigned)current, occupied] :
+        @"السعة: حالة الروم غير مؤكدة";
+    [panel addSubview:heading];
+    UIButton *close = [self makeBtn:CGRectMake(251, 7, 31, 28)
+        title:@"✕" bg:[UIColor colorWithWhite:.31 alpha:1.] action:@selector(dismissCapacityPicker:)];
+    [panel addSubview:close];
+
+    UIColor *available = [UIColor colorWithRed:.14 green:.42 blue:.72 alpha:1.];
+    UIColor *unavailable = [UIColor colorWithWhite:.27 alpha:1.];
+    for (NSInteger desired = 2; desired <= 32; ++desired) {
+        NSInteger index = desired - 2;
+        CGFloat x = 8. + (index % 5) * 55.;
+        CGFloat y = 44. + (index / 5) * 39.;
+        BOOL enabled = permitted && desired >= occupied && desired != current;
+        UIButton *choice = [self makeBtn:CGRectMake(x, y, 50, 31)
+            title:[NSString stringWithFormat:@"%ld", (long)desired]
+            bg:enabled ? available : unavailable action:@selector(selectRoomCapacity:)];
+        choice.tag = desired;
+        choice.enabled = enabled;
+        choice.accessibilityLabel = [NSString stringWithFormat:
+            @"سعة %ld لاعبين%@", (long)desired, enabled ? @"" : @"، غير متاحة"];
+        [panel addSubview:choice];
+    }
+    UILabel *explanation = [[UILabel alloc] initWithFrame:CGRectMake(8, 318, 274, 24)];
+    explanation.textColor = [UIColor colorWithWhite:.79 alpha:1.];
+    explanation.font = [UIFont systemFontOfSize:9.5];
+    explanation.textAlignment = NSTextAlignmentCenter;
+    explanation.text = !known ? @"انتظر بيانات الروم ثم أعد فتح الأرقام" :
+        !permitted ? @"الرمادي: التغيير يتطلب صلاحية الهوست" :
+        @"الرمادي: السعة الحالية أو أقل من الموجودين";
+    [panel addSubview:explanation];
+
+    [self.menuPanel setContentOffset:CGPointZero animated:NO];
+    // A short landscape viewport still needs to reach the final grid row.
+    self.menuPanel.scrollEnabled = YES;
+    [self.menuPanel addSubview:panel];
+    self.capacityPicker = panel;
+}
+
+- (void)selectRoomCapacity:(UIButton *)button {
+    NSInteger desired = button.tag;
+    [self dismissCapacityPicker:nil];
+    if (desired < 2 || desired > 32) return;
+
+    // Re-check identity, authority, occupancy and current room state when a
+    // number is tapped, not only when the picker was first displayed.
+    uintptr_t room = 0;
+    int32_t actor = 0, master = 0;
+    uint8_t current = 0;
+    if (!OGSReadAutoRoom(&room, &actor, &master) || actor <= 0 ||
+        actor != master ||
         !OGSReadMemory(room + 0x20u, &current, sizeof(current)) ||
         __atomic_load_n(&gOGSRoomRosterObservedRoom, __ATOMIC_ACQUIRE) != room ||
-        (playerCount = __atomic_load_n(&gOGSRoomRosterObservedCount,
-                                        __ATOMIC_ACQUIRE)) < 1 ||
-        current < 1 || current > 32 ||
-        playerCount > current) {
-        self.statusLabel.text = @"تعذر قراءة العدد الفعلي للاعبين؛ انتظر ثانية ثم أعد فتح السعة";
+        current < 1 || current > 32) {
+        self.statusLabel.text = @"تغيرت حالة الغرفة أو الهوست؛ ألغي الطلب";
         return;
     }
-    if (actor != master) {
-        self.statusLabel.text = @"تغيير سعة الروم يتطلب أن تكون الهوست حاليًا";
+    int32_t occupied = __atomic_load_n(&gOGSRoomRosterObservedCount,
+                                        __ATOMIC_ACQUIRE);
+    if (occupied < 1 || occupied > current || desired < occupied ||
+        desired == current) {
+        self.statusLabel.text = @"السعة غير متاحة للعدد الحالي من اللاعبين";
         return;
     }
-    UIAlertController *dialog = [UIAlertController
-        alertControllerWithTitle:@"تحديد سعة الروم"
-        message:[NSString stringWithFormat:
-            @"السعة الحالية: %u | الموجودون: %d\nاختر رقمًا من 2 إلى 32، مثل 2 أو 4 أو 6 أو 8. لا يمكن النزول تحت عدد الموجودين.",
-            (unsigned)current, playerCount]
-        preferredStyle:UIAlertControllerStyleAlert];
-    [dialog addTextFieldWithConfigurationHandler:^(UITextField *field) {
-        field.placeholder = @"عدد اللاعبين (2–32)";
-        field.text = [NSString stringWithFormat:@"%u", (unsigned)current];
-        field.keyboardType = UIKeyboardTypeNumberPad;
-    }];
-    __weak UITextField *weakInput = dialog.textFields.firstObject;
-    [dialog addAction:[UIAlertAction actionWithTitle:@"إلغاء"
-        style:UIAlertActionStyleCancel handler:nil]];
-    [dialog addAction:[UIAlertAction actionWithTitle:@"تطبيق السعة"
-        style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
-            NSString *input = [weakInput.text ?: @""
-                stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-            if (input.length == 0 || input.length > 2 ||
-                [input rangeOfCharacterFromSet:
-                    [[NSCharacterSet decimalDigitCharacterSet] invertedSet]].location != NSNotFound) {
-                self.statusLabel.text = @"اكتب رقمًا صحيحًا من 2 إلى 32";
-                return;
-            }
-            NSInteger desired = input.integerValue;
-            if (desired < 2 || desired > 32) {
-                self.statusLabel.text = @"السعة المدعومة حاليًا من 2 إلى 32 فقط";
-                return;
-            }
-            if (desired == current) {
-                self.statusLabel.text = @"السعة بالفعل تساوي الرقم المدخل";
-                return;
-            }
-            if (desired < playerCount) {
-                self.statusLabel.text = @"لا يمكن أن تقل السعة عن عدد اللاعبين الموجودين";
-                return;
-            }
-            const uint8_t target = (uint8_t)desired;
-            uintptr_t liveRoom = 0;
-            int32_t liveActor = 0, liveMaster = 0;
-            if (!OGSReadAutoRoom(&liveRoom, &liveActor, &liveMaster) ||
-                liveRoom != room || liveActor != actor || liveMaster != liveActor) {
-                self.statusLabel.text = @"تغيرت الغرفة أو الهوست؛ ألغي الطلب";
-                return;
-            }
-            bool busy = false, limited = false;
-            double now = CFAbsoluteTimeGetCurrent();
-            os_unfair_lock_lock(&gStateLock);
-            busy = __atomic_load_n(&gOGSRoomCapacityPending, __ATOMIC_ACQUIRE);
-            limited = gOGSRoomCapacityLastQueuedAt > 0. &&
-                now - gOGSRoomCapacityLastQueuedAt < 10.0;
-            if (!busy && !limited) {
-                gOGSRoomCapacityBoundRoom = room;
-                gOGSRoomCapacityBoundActor = actor;
-                gOGSRoomCapacityTarget = target;
-                gOGSRoomCapacityExpectedBefore = current;
-                gOGSRoomCapacityLastQueuedAt = now;
-                __atomic_store_n(&gOGSRoomCapacityPending, 1u, __ATOMIC_RELEASE);
-            }
-            os_unfair_lock_unlock(&gStateLock);
-            if (busy || limited) {
-                self.statusLabel.text = busy ? @"انتظر انتهاء طلب السعة السابق" :
-                    @"انتظر 10 ثوانٍ قبل محاولة تعديل أخرى";
-                return;
-            }
-            __atomic_fetch_add(&gOGSRoomCapacityQueued, 1u, __ATOMIC_RELAXED);
-            self.statusLabel.text = @"طلب السعة ينتظر Photon؛ تغيّر الجهاز وحده لا يثبت قبول الخادم";
-        }]];
-    UIViewController *root = [self gameMainWindow].rootViewController;
-    if (root && !root.presentedViewController)
-        [root presentViewController:dialog animated:YES completion:nil];
-    else self.statusLabel.text = @"أغلق النوافذ المفتوحة ثم أعد المحاولة";
+    bool busy = false, limited = false;
+    double now = CFAbsoluteTimeGetCurrent();
+    os_unfair_lock_lock(&gStateLock);
+    busy = __atomic_load_n(&gOGSRoomCapacityPending, __ATOMIC_ACQUIRE);
+    limited = gOGSRoomCapacityLastQueuedAt > 0. &&
+        now - gOGSRoomCapacityLastQueuedAt < 10.0;
+    if (!busy && !limited) {
+        gOGSRoomCapacityBoundRoom = room;
+        gOGSRoomCapacityBoundActor = actor;
+        gOGSRoomCapacityTarget = (uint8_t)desired;
+        gOGSRoomCapacityExpectedBefore = current;
+        gOGSRoomCapacityLastQueuedAt = now;
+        __atomic_store_n(&gOGSRoomCapacityPending, 1u, __ATOMIC_RELEASE);
+    }
+    os_unfair_lock_unlock(&gStateLock);
+    if (busy || limited) {
+        self.statusLabel.text = busy ? @"انتظر انتهاء طلب السعة السابق" :
+            @"انتظر 10 ثوانٍ قبل محاولة تعديل أخرى";
+        return;
+    }
+    __atomic_fetch_add(&gOGSRoomCapacityQueued, 1u, __ATOMIC_RELAXED);
+    self.statusLabel.text = @"طلب السعة أُرسل؛ قبول الخادم يحتاج تحققًا من جهاز ثانٍ";
 }
 
 - (void)refreshTraining51Marker {
