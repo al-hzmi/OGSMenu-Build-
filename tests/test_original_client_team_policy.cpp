@@ -5,6 +5,14 @@
 int main() {
     using namespace ogs46;
     using namespace ogs48;
+    // OGS52 regression: absence of the optional tracing bridge must not
+    // suppress a valid call through the original executable game entry.
+    assert(allowNativeTeamDispatch(true, 0));
+    assert(allowNativeTeamDispatch(true, 1));
+    assert(allowNativeTeamDispatch(true, 2));
+    assert(!allowNativeTeamDispatch(false, 0));
+    assert(!allowNativeTeamDispatch(false, 1));
+    assert(!allowNativeTeamDispatch(false, 2));
     TeamRequestFacts f;
     f.queuedRoom = 100;
     f.liveRoom = 100;

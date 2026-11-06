@@ -5,6 +5,13 @@
 // This is a local safety predicate, NOT proof the Photon server authorizes
 // setting a different actor's player properties.
 namespace ogs48 {
+// The native operation hook only records transport calls; its installation
+// state must never become an authorization condition for SetCustomProperties.
+static inline bool allowNativeTeamDispatch(bool originalSetterExecutable,
+                                           unsigned observerBridgeStatus) {
+    (void)observerBridgeStatus;
+    return originalSetterExecutable;
+}
 struct TeamRequestFacts {
     uintptr_t queuedRoom = 0;
     uintptr_t liveRoom = 0;

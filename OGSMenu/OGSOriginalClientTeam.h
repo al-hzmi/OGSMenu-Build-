@@ -88,7 +88,19 @@ static void originalClientTeamPhotonTick() {
         req.before=current;req.last=current;
         trace51Add(req.id,[NSString stringWithFormat:@"TARGET verified actor=%d native Team=%d",req.target,current]);
         if(current==req.team){trace51Add(req.id,@"ALREADY same local property; no gameplay claim");team51Message(@"خاصية الفريق مطابقة محليًا؛ لم يُكرر الطلب");return;}
-        if(__atomic_load_n(&bridgeStatus[3],__ATOMIC_ACQUIRE)!=1){trace51Add(req.id,@"REJECTED missing exact OGS51 operation bridge");team51Message(@"يلزم IPA51 كامل؛ لم يُرسل الطلب");return;}
+        // The OpSetPropertiesOfActor bridge is an OBSERVER only. Requiring it
+        // for dispatch caused OGS51 to drop otherwise validated team requests
+        // when the native instrumentation stub was unavailable on-device.
+        // The game's SetCustomProperties entry is independent of this hook.
+        uint32_t operationBridge = __atomic_load_n(&bridgeStatus[3],__ATOMIC_ACQUIRE);
+        uintptr_t setProperties = OGSResolveRVA(0x13D0CC0);
+        if(!ogs48::allowNativeTeamDispatch(setProperties && OGSIsExecutableGameAddress(setProperties),operationBridge)) {
+            trace51Add(req.id,@"REJECTED original SetCustomProperties entry unavailable");
+            team51Message(@"تعذر التحقق من دالة النقل الأصلية؛ لم يُرسل الطلب");
+            return;
+        }
+        if(operationBridge!=1)
+            trace51Add(req.id,[NSString stringWithFormat:@"OpSetPropertiesOfActor observer unavailable (status=%u); direct native dispatch will proceed without transport instrumentation",operationBridge]);
         void *props=table51New(),*expected=table51New();
         void *key=OGSManagedStringFromNSString(@"Team"),*value=int51Box(req.team),*old=int51Box(current);
         void *mk=OGSManagedStringFromNSString(@"ogs51.request"),*mv=OGSManagedStringFromNSString(req.marker);
@@ -99,7 +111,7 @@ static void originalClientTeamPhotonTick() {
         struct Scope {uint64_t prior;int actor;Scope(uint64_t id,int a):prior(propertiesRequestID),actor(propertiesTargetActor){propertiesRequestID=id;propertiesTargetActor=a;}~Scope(){propertiesRequestID=prior;propertiesTargetActor=actor;}} scope(req.id,req.target);
         trace51Add(req.id,@"SetCustomProperties ENTER: Team Int32 + request UUID; expected Team (no optimistic cache merge)");
         using Set=void (*)(void *,void *,void *,bool,const void *);
-        ((Set)OGSResolveRVA(0x13D0CC0))(target,props,expected,false,nullptr);
+        ((Set)setProperties)(target,props,expected,false,nullptr);
         int32_t after=-1;bool readOK=gameTeam51Read(target,after);
         trace51Add(req.id,[NSString stringWithFormat:@"NATIVE returned; local Team=%d readable=%d; NOT ACK",after,readOK]);
         team51Message(@"أُرسل Team الصحيح بشرط القيمة السابقة؛ انتظار تحديث مطابق، لا تأكيد جهاز ثانٍ");
