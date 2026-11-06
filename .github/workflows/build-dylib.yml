@@ -11,7 +11,9 @@ permissions:
   contents: write
 jobs:
   build:
-    runs-on: macos-15
+    # OGS51: ARM pool stayed unassigned >14 minutes; standard Intel pool
+    # cross-compiles the same arm64-apple-ios14.0 target with the same command.
+    runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
       - name: Record run ID for artifact retrieval
