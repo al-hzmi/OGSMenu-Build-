@@ -3147,6 +3147,119 @@ static bool OGSInstallKillBridgeOnDemand(void) {
     return true;
 }
 
+// OGS44: passive explosion diagnostics. Four pre-signed stubs ALWAYS fall
+// through to the relocated original while slots are empty. No HP, network,
+// movement or death state is changed by these callbacks.
+typedef void (*OGSExplosionOneFn)(void *, int32_t, const void *);
+typedef void (*OGSExplosionZeroFn)(void *, const void *);
+static OGSExplosionOneFn gOGS44BombOriginal[2] = {NULL, NULL};
+static OGSExplosionZeroFn gOGS44C4Original[2] = {NULL, NULL};
+static volatile uint32_t gOGS44Status[4] = {};
+static volatile uint32_t gOGS44Total[4] = {};
+static volatile uint32_t gOGS44Local[4] = {};
+static volatile uint32_t gOGS44Other[4] = {};
+static volatile uint32_t gOGS44Unknown[4] = {};
+static volatile uint32_t gOGS44LocalMaster[4] = {};
+static volatile uint32_t gOGS44LocalNonMaster[4] = {};
+static volatile uint32_t gOGS44LocalMasterUnknown[4] = {};
+static volatile uint32_t gOGS44PreFlagZero[4] = {};
+static volatile uint32_t gOGS44PreFlagOne[4] = {};
+static volatile uint32_t gOGS44PreFlagUnknown[4] = {};
+
+static void OGS44ObserveExplosion(unsigned index, void *self) {
+    __atomic_fetch_add(&gOGS44Total[index], 1u, __ATOMIC_RELAXED);
+    bool verified = false;
+    bool mine = OGSIsDamageToLocalPlayer(self, &verified);
+    if (!verified) {
+        __atomic_fetch_add(&gOGS44Unknown[index], 1u, __ATOMIC_RELAXED);
+        return;
+    }
+    if (!mine) {
+        __atomic_fetch_add(&gOGS44Other[index], 1u, __ATOMIC_RELAXED);
+        return;
+    }
+    __atomic_fetch_add(&gOGS44Local[index], 1u, __ATOMIC_RELAXED);
+    uintptr_t room = 0; int32_t actor = 0, master = 0;
+    if (!OGSReadAutoRoom(&room, &actor, &master))
+        __atomic_fetch_add(&gOGS44LocalMasterUnknown[index], 1u, __ATOMIC_RELAXED);
+    else if (actor == master)
+        __atomic_fetch_add(&gOGS44LocalMaster[index], 1u, __ATOMIC_RELAXED);
+    else
+        __atomic_fetch_add(&gOGS44LocalNonMaster[index], 1u, __ATOMIC_RELAXED);
+    uint8_t flag = 255;
+    if (!OGSReadMemory((uintptr_t)self + 0x12Cu, &flag, sizeof(flag)) || flag > 1)
+        __atomic_fetch_add(&gOGS44PreFlagUnknown[index], 1u, __ATOMIC_RELAXED);
+    else if (flag == 0)
+        __atomic_fetch_add(&gOGS44PreFlagZero[index], 1u, __ATOMIC_RELAXED);
+    else
+        __atomic_fetch_add(&gOGS44PreFlagOne[index], 1u, __ATOMIC_RELAXED);
+}
+static void OGS44BombNear(void *self, int32_t actor, const void *method) {
+    OGS44ObserveExplosion(0, self);
+    OGSExplosionOneFn original = __atomic_load_n(&gOGS44BombOriginal[0], __ATOMIC_ACQUIRE);
+    if (original) original(self, actor, method);
+}
+static void OGS44BombFar(void *self, int32_t actor, const void *method) {
+    OGS44ObserveExplosion(1, self);
+    OGSExplosionOneFn original = __atomic_load_n(&gOGS44BombOriginal[1], __ATOMIC_ACQUIRE);
+    if (original) original(self, actor, method);
+}
+static void OGS44C4Near(void *self, const void *method) {
+    OGS44ObserveExplosion(2, self);
+    OGSExplosionZeroFn original = __atomic_load_n(&gOGS44C4Original[0], __ATOMIC_ACQUIRE);
+    if (original) original(self, method);
+}
+static void OGS44C4Far(void *self, const void *method) {
+    OGS44ObserveExplosion(3, self);
+    OGSExplosionZeroFn original = __atomic_load_n(&gOGS44C4Original[1], __ATOMIC_ACQUIRE);
+    if (original) original(self, method);
+}
+
+// All constants match package_ogs44_diagnostics.py; reject incomplete stubs,
+// occupied slots, wrong executable mapping and missing callback trampolines.
+static void OGS44InstallExplosionDiagnostics(void) {
+    static const uintptr_t entries[4] = {0x13E7DB0, 0x13E815C, 0x13E8508, 0x13E88A4};
+    static const uintptr_t stubs[4] = {0x30C0, 0x3100, 0x3140, 0x3180};
+    static const uintptr_t slots[4] = {0x2A98DD8, 0x2A98DE0, 0x2A98DE8, 0x2A98DF0};
+    static const uint32_t prologs[4] = {0xD10183FF, 0xD10183FF, 0xD10143FF, 0xD10143FF};
+    uintptr_t callbacks[4] = {(uintptr_t)&OGS44BombNear, (uintptr_t)&OGS44BombFar,
+                              (uintptr_t)&OGS44C4Near, (uintptr_t)&OGS44C4Far};
+    uintptr_t base = OGSFindGameImage();
+    if (!base) return;
+    for (unsigned i = 0; i < 4; ++i) {
+        if (__atomic_load_n(&gOGS44Status[i], __ATOMIC_ACQUIRE) == 1) continue;
+        uintptr_t entry = base + entries[i], stub = base + stubs[i], slot = base + slots[i];
+        uint32_t words[7] = {}, first = 0;
+        int64_t delta = (int64_t)stubs[i] - (int64_t)entries[i];
+        uint32_t branch = 0x14000000u | ((uint32_t)(delta / 4) & 0x03ffffffu);
+        int64_t pages = ((int64_t)(slots[i] & ~(uintptr_t)0xFFF) -
+                         (int64_t)(stubs[i] & ~(uintptr_t)0xFFF)) / 4096;
+        uint32_t adrp = 0x90000010u | (((uint32_t)pages & 3u) << 29) |
+                        ((((uint32_t)pages >> 2) & 0x7ffffu) << 5);
+        uint32_t add = 0x91000210u | ((uint32_t)(slots[i] & 0xfffu) << 10);
+        int64_t back = (int64_t)(entries[i] + 4u) - (int64_t)(stubs[i] + 24u);
+        uint32_t backBranch = 0x14000000u | ((uint32_t)(back / 4) & 0x03ffffffu);
+        uintptr_t old = 0;
+        if (!OGSIsExecutableGameAddress(entry) || !OGSIsExecutableGameAddress(stub) ||
+            !OGSIsExecutableGameAddress(stub + 20u) || !OGSIsWritableMappedSlot(slot) ||
+            !OGSReadMemory(entry, &first, 4) || !OGSReadMemory(stub, words, sizeof(words)) ||
+            !OGSReadMemory(slot, &old, sizeof(old)) || first != branch ||
+            words[0] != adrp || words[1] != add || words[2] != 0xF9400210u ||
+            words[3] != 0xB4000050u || words[4] != 0xD61F0200u ||
+            words[5] != prologs[i] || words[6] != backBranch ||
+            (old && old != callbacks[i])) {
+            __atomic_store_n(&gOGS44Status[i], 2u, __ATOMIC_RELEASE);
+            continue;
+        }
+        if (i < 2)
+            __atomic_store_n(&gOGS44BombOriginal[i], (OGSExplosionOneFn)(stub + 20u), __ATOMIC_RELEASE);
+        else
+            __atomic_store_n(&gOGS44C4Original[i - 2], (OGSExplosionZeroFn)(stub + 20u), __ATOMIC_RELEASE);
+        __atomic_store_n((uintptr_t *)slot, callbacks[i], __ATOMIC_RELEASE);
+        __atomic_store_n(&gOGS44Status[i], 1u, __ATOMIC_RELEASE);
+    }
+}
+
 static bool OGSIsWritableMappedSlot(uintptr_t address) {
     if (address < 0x100000000ULL || (address & (sizeof(void *) - 1))) return false;
     vm_address_t regionAddress = (vm_address_t)address;
@@ -3804,7 +3917,7 @@ static void OGSInstallHooks(void) {
         self.menuPanel.hidden = YES;
 
         self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 5, 260, 18)];
-        self.titleLabel.text = @"OGS42 | سلامة الموت والبعث";
+        self.titleLabel.text = @"OGS44 | تشخيص ضرر الانفجار";
         self.titleLabel.textColor = [UIColor whiteColor];
         self.titleLabel.textAlignment = NSTextAlignmentCenter;
         self.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
@@ -4435,6 +4548,26 @@ static void OGSInstallHooks(void) {
         __atomic_load_n(&gGodApplyLocalBypasses, __ATOMIC_RELAXED),
         __atomic_load_n(&gGodApplyOtherPlayerPasses, __ATOMIC_RELAXED),
         __atomic_load_n(&gGodApplyUnknownPasses, __ATOMIC_RELAXED)];
+    for (unsigned i = 0; i < 4; ++i) {
+        NSString *name = @[@"Bomb near", @"Bomb far", @"C4 near", @"C4 far"][i];
+        details = [details stringByAppendingFormat:
+            @"\nOGS44 %@: bridge=%u | total=%u | local=%u | other=%u | unknown=%u"
+             "\nLocal master/non-master/unknown=%u/%u/%u | pre-dead 0/1/unknown=%u/%u/%u",
+            name, __atomic_load_n(&gOGS44Status[i], __ATOMIC_ACQUIRE),
+            __atomic_load_n(&gOGS44Total[i], __ATOMIC_RELAXED),
+            __atomic_load_n(&gOGS44Local[i], __ATOMIC_RELAXED),
+            __atomic_load_n(&gOGS44Other[i], __ATOMIC_RELAXED),
+            __atomic_load_n(&gOGS44Unknown[i], __ATOMIC_RELAXED),
+            __atomic_load_n(&gOGS44LocalMaster[i], __ATOMIC_RELAXED),
+            __atomic_load_n(&gOGS44LocalNonMaster[i], __ATOMIC_RELAXED),
+            __atomic_load_n(&gOGS44LocalMasterUnknown[i], __ATOMIC_RELAXED),
+            __atomic_load_n(&gOGS44PreFlagZero[i], __ATOMIC_RELAXED),
+            __atomic_load_n(&gOGS44PreFlagOne[i], __ATOMIC_RELAXED),
+            __atomic_load_n(&gOGS44PreFlagUnknown[i], __ATOMIC_RELAXED)];
+    }
+    details = [details stringByAppendingString:
+        @"\nOGS44 bridge: 1=installed; 2=unavailable or wrong IPA. "
+         "Observation only. Counters persist when shield is off; no RPC acknowledgment implied."];
     details = [details stringByAppendingFormat:
         @"\nOGS42 room capacity: pending=%u | queued=%u | attempted=%u"
          " | local applied=%u | rejected=%u | failed=%u | below occupants=%u"
@@ -5071,6 +5204,7 @@ static void OGSInstallHooks(void) {
         if (root && !root.presentedViewController) [root presentViewController:warning animated:YES completion:nil];
         return;
     }
+    if (next) OGS44InstallExplosionDiagnostics(); // optional; older IPAs remain usable
     __atomic_store_n(&gOGS.godModeOn, next, __ATOMIC_RELEASE);
     if (next) {
         __atomic_store_n(&gGodCallbacks, 0u, __ATOMIC_RELAXED);
