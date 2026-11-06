@@ -49,7 +49,7 @@ def metadata(g,m):
     for t in range(h[41]//100):
         row=struct.unpack_from('<19I8H2I',m,h[40]+t*100)
         label=name(row[0]);fields={}
-        if label not in ('RoomController','FPSController','PlayerNetwork','GameSettings','Scoreboard','PunTeams'):continue
+        if label not in ('RoomController','FPSController','PlayerNetwork','GameSettings','Scoreboard','PunTeams','Object'):continue
         p=struct.unpack_from('<Q',g,FIELD_TABLE+t*8)[0]-BASE
         for j in range(row[21]):
             fi=struct.unpack_from('<3I',m,h[24]+12*(row[11]+j))
@@ -76,7 +76,7 @@ def verify(g,m):
     expected={'FPSController':{'gravity':0x3c,'airControl':0x4c,'pn':0x60,'moveDirection':0x7c,'controller':0x90,'myTransform':0x98,'fallStartLevel':0xcc,'falling':0xd0,'currentLadder':0x108},
       'RoomController':{'ourTeam':0x1b0,'meTeam':0x1b4,'ourPlayer':0x108,'currentRespawnTime':0x1c0,'currentGameMode':0x1b8},
       'PlayerNetwork':{'fpsController':0xf8,'playerKilled':0x12c,'Counter':0x28,'Teror':0x30},
-      'GameSettings':{'rc':0x30}}
+      'GameSettings':{'rc':0x30,'menuOpened':0x158}}
     for typ,fields in expected.items():
         for name,off in fields.items():require(types[typ]['fields'][name]==off,f'{typ}.{name}')
     # Both the displaced instruction and mandatory lifecycle call must survive.
@@ -104,7 +104,31 @@ def main():
         cursor+=size
     require(boundaries,'function starts missing')
     selected={r for r,rows in mm.items() if any(n.startswith(('PlayerNetwork.','RoomController.','FPSController.','Scoreboard.','Grenade.','C4.','HitBox.','PunTeams.','TeamExtensions.','<PrepareRespawnCoroutine>')) or n in ('CharacterController.Move','PhotonView.RPC','PhotonView.get_isMine','PhotonPlayer.SetCustomProperties','PhotonNetwork.get_isMasterClient') for _,n,_ in rows)}
-    records=[];edges=[]
+    # Direct inbound edges from ALL executable sections, including callers
+    # outside the selected gameplay classes. Native helpers stay unidentified.
+    inbound=[]; hp_refs=[]
+    for lo,hi in executable_sections(g):
+        for pc in range(lo,hi,4):
+            w=struct.unpack_from('<I',g,pc)[0];target=branch_target(w,pc)
+            i=bisect.bisect_right(boundaries,pc)-1
+            caller=boundaries[i] if i>=0 else None
+            if target and target[0] in selected:
+                inbound.append({'site':hex(pc),'target':hex(target[0]),'kind':target[1],
+                                'caller_rva':hex(caller) if caller else None,'caller':mm.get(caller,[])})
+            # ADRP + short LDR/ADD references are candidates, not proof that
+            # every alias/indirect/computed access to PlayerHP was found.
+            if w&0x9f000000!=0x90000000:continue
+            rd=w&31;imm=((w>>29)&3)|(((w>>5)&0x7ffff)<<2)
+            if imm&(1<<20):imm-=1<<21
+            page=(pc&~4095)+(imm<<12)
+            if page!=0x283d000:continue
+            for q in range(pc+4,min(pc+24,hi),4):
+                ins=struct.unpack_from('<I',g,q)[0]
+                is_ldr=ins&0xffc00000==0xf9400000 and ((ins>>5)&31)==rd
+                is_add=ins&0xffc00000==0x91000000 and ((ins>>5)&31)==rd and (ins&31)==rd
+                if (is_ldr and page+((ins>>10)&4095)*8==0x283d768) or (is_add and page+((ins>>10)&4095)==0x283d768):
+                    hp_refs.append({'site':hex(q),'caller':mm.get(caller,[])})
+    records=[]
     for start in sorted(selected):
         i=bisect.bisect_left(boundaries,start)
         require(i<len(boundaries) and boundaries[i]==start,'method is not a native function boundary')
@@ -121,7 +145,7 @@ def main():
         label=mm[start][0][1].replace('/','_')
         (a.output/(label+'.asm')).write_text('\n'.join(lines)+'\n')
         records.append({'rva':hex(start),'end':hex(end),'identities':mm[start],'direct_edges':calls,'conditional_edges':branches,'indirect_sites':indirect})
-    report={'input_sha256':GAME_SHA,'metadata_sha256':META_SHA,'metadata_layout':'24.1 (header reports 24)', 'fields':types,'literals':literals,'methods':records,'runtime_verified':False,
+    report={'input_sha256':GAME_SHA,'metadata_sha256':META_SHA,'metadata_layout':'24.1 (header reports 24)', 'fields':types,'literals':literals,'methods':records,'all_direct_inbound_edges':inbound,'PlayerHP_reference_candidates':hp_refs,'runtime_verified':False,
       'limits':'Static control-flow and table identities; runtime virtual targets, Photon acceptance, installation and two-device behavior require device testing.'}
     (a.output/'evidence.json').write_text(json.dumps(report,indent=2))
     print(f'PASS: {len(records)} native method bodies, registration fields, literals, seven bridge identities and existing death lifecycle')

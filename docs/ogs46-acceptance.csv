@@ -1,0 +1,32 @@
+test,master,local_result,remote_result,lifecycle_result,evidence_reference,notes
+bullets,local,NOT RUN,NOT RUN,NOT RUN,,
+near_grenade,local,NOT RUN,NOT RUN,NOT RUN,,
+far_grenade,local,NOT RUN,NOT RUN,NOT RUN,,
+near_C4,local,NOT RUN,NOT RUN,NOT RUN,,
+far_C4,local,NOT RUN,NOT RUN,NOT RUN,,
+fall,local,NOT RUN,NOT RUN,NOT RUN,,
+death_respawn,local,NOT RUN,NOT RUN,NOT RUN,,
+spectator_return,local,NOT RUN,NOT RUN,NOT RUN,,
+team_switch,local,NOT RUN,NOT RUN,NOT RUN,,
+flight_stop,local,NOT RUN,NOT RUN,NOT RUN,,
+bullets,other,NOT RUN,NOT RUN,NOT RUN,,Shield unavailable with other master
+near_grenade,other,NOT RUN,NOT RUN,NOT RUN,,Shield unavailable with other master
+far_grenade,other,NOT RUN,NOT RUN,NOT RUN,,Shield unavailable with other master
+near_C4,other,NOT RUN,NOT RUN,NOT RUN,,Shield unavailable with other master
+far_C4,other,NOT RUN,NOT RUN,NOT RUN,,Shield unavailable with other master
+fall,other,NOT RUN,NOT RUN,NOT RUN,,Shield unavailable with other master
+death_respawn,other,NOT RUN,NOT RUN,NOT RUN,,
+spectator_return,other,NOT RUN,NOT RUN,NOT RUN,,
+team_switch,other,NOT RUN,NOT RUN,NOT RUN,,
+flight_stop,other,NOT RUN,NOT RUN,NOT RUN,,
+flight_death_respawn,both,NOT RUN,NOT RUN,NOT RUN,,
+flight_room_leave_rejoin,both,NOT RUN,NOT RUN,NOT RUN,,
+flight_background_foreground,both,NOT RUN,NOT RUN,NOT RUN,,
+flight_ladder,both,NOT RUN,NOT RUN,NOT RUN,,
+flight_touch_cancel,both,NOT RUN,NOT RUN,NOT RUN,,
+flight_wall_ceiling_collision,both,NOT RUN,NOT RUN,NOT RUN,,
+team_balance_rejection,both,NOT RUN,NOT RUN,NOT RUN,,
+team_respawn_rejection,both,NOT RUN,NOT RUN,NOT RUN,,
+master_migration_shield_off,both,NOT RUN,NOT RUN,NOT RUN,,
+name_unicode_regression,both,NOT RUN,NOT RUN,NOT RUN,,
+capacity_increase_decrease_regression,both,NOT RUN,NOT RUN,NOT RUN,,
