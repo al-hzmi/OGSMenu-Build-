@@ -42,4 +42,11 @@ int main() {
     assert(std::fabs(verticalStep(-1,.02f,false)+.1f)<1e-6f);
     assert(verticalStep(0,.02f,false)==0.f);
     assert(verticalStep(1,.02f,true)==0.f);
+    // Independent of Time.timeScale: only monotonic wall-clock elapsed time
+    // is fed into verticalStep, so a 10x speed setting cannot zero the ascent.
+    assert(std::fabs(realFlightInterval(100.02,100.)-.02f)<1e-5f);
+    assert(realFlightInterval(100.2,100.)==0.f);
+    assert(realFlightInterval(99.,100.)==0.f);
+    assert(realFlightInterval(100.,0.)==0.f);
+    assert(realFlightInterval(std::numeric_limits<double>::quiet_NaN(),100.)==0.f);
 }

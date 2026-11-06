@@ -27,6 +27,14 @@ inline float verticalStep(int axis, float dt, bool paused) {
     if (paused || !std::isfinite(dt) || dt <= 0.f || dt > .1f) return 0.f;
     return (axis > 0 ? 1.f : axis < 0 ? -1.f : 0.f) * 5.f * dt;
 }
+// Flight must use a monotonic REAL interval. Unity's Time.deltaTime changes
+// when the menu adjusts Time.timeScale, making flight appear to stall at high
+// speed (deltaTime > .1) or crawl at low speed. Skip long pauses/lag spikes.
+inline float realFlightInterval(double current, double previous) {
+    if (!std::isfinite(current) || !std::isfinite(previous) || previous <= 0.) return 0.f;
+    double elapsed = current - previous;
+    return elapsed > 0. && elapsed <= .1 ? static_cast<float>(elapsed) : 0.f;
+}
 // Restores configuration on normal return and C++ stack unwinding. Values are
 // borrowed for one native Update only; never retained across scene destruction.
 struct MovementLease {

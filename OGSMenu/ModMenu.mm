@@ -502,6 +502,7 @@ typedef struct {
 typedef struct {
     bool            inRoom;
     bool            isMaster;
+    uintptr_t       roomAddress;
     uint32_t        count;
     OGSPeerSnapshot peers[OGS_MAX_PEERS];
 } OGSRoomSnapshot;
@@ -1441,6 +1442,12 @@ static void OGSUpdateRoomSnapshot(bool passive = false) {
     OGSRoomSnapshot snapshot;
     memset(&snapshot, 0, sizeof(snapshot));
     snapshot.inRoom = inRoom;
+    if (inRoom) {
+        uintptr_t roomAddress = 0;
+        int32_t localActor = 0, masterActor = 0;
+        if (OGSReadAutoRoom(&roomAddress, &localActor, &masterActor))
+            snapshot.roomAddress = roomAddress;
+    }
 
     double now = CFAbsoluteTimeGetCurrent();
     bool wasInRoom = __atomic_load_n(&gOGS.inRoom, __ATOMIC_ACQUIRE);
@@ -1789,17 +1796,25 @@ static uintptr_t gOGS46ShieldRoom = 0; // published before godModeOn
 static int32_t gOGS46ShieldActor = 0;
 static uintptr_t gOGS46ShieldPlayer = 0;
 
+static bool OGS46TwoAccountTestRoom(uintptr_t room) {
+    OGSRoomSnapshot peers = OGSCurrentSnapshot();
+    // Accept visible/open rooms; only the operator and at most one other
+    // account may be present. All property/damage callbacks fail closed if
+    // the read-only roster has not verified this exact room.
+    return room && peers.inRoom && peers.roomAddress == room && peers.count <= 1;
+}
+
 static bool OGS46ShouldBlockSelfDamage(void *pn) {
     if (!__atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE) ||
         (uintptr_t)pn != __atomic_load_n(&gOGS46ShieldPlayer, __ATOMIC_ACQUIRE)) return false;
     bool verified = false; int32_t ownerActor = 0;
     if (!OGSIsDamageToLocalPlayerWithActor(pn, &verified, &ownerActor) || !verified) return false;
     uintptr_t room = 0; int32_t actor = 0, master = 0;
-    bool open = true, visible = true; uint8_t killed = 255;
+    uint8_t killed = 255;
     return OGSReadAutoRoom(&room, &actor, &master) && actor == master && actor == ownerActor &&
         room == __atomic_load_n(&gOGS46ShieldRoom, __ATOMIC_ACQUIRE) &&
         actor == __atomic_load_n(&gOGS46ShieldActor, __ATOMIC_ACQUIRE) &&
-        OGSReadRoomPrivacy(room, &open, &visible) && !open && !visible &&
+        OGS46TwoAccountTestRoom(room) &&
         OGSReadMemory((uintptr_t)pn + 0x12C, &killed, 1) && killed == 0;
 }
 
@@ -3228,12 +3243,11 @@ static bool OGS44ObserveExplosion(unsigned index, void *self) {
         __atomic_fetch_add(&gOGS44PreFlagZero[index], 1u, __ATOMIC_RELAXED);
     else
         __atomic_fetch_add(&gOGS44PreFlagOne[index], 1u, __ATOMIC_RELAXED);
-    bool open = true, visible = true;
-    bool privacyVerified = roomVerified && OGSReadRoomPrivacy(room, &open, &visible);
+    bool twoAccountRoom = roomVerified && OGS46TwoAccountTestRoom(room);
     OGSExplosionFacts facts = {
         __atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE) != 0,
         verified, mine, roomVerified, ownerContextActor == actor,
-        roomVerified && actor == master, privacyVerified, !visible, !open,
+        roomVerified && actor == master, twoAccountRoom,
         deadFlagVerified, deadFlagVerified && flag == 0
     };
     bool blocked = OGSShouldBlockLocalExplosion(facts) && OGS46ShouldBlockSelfDamage(self);
@@ -3597,6 +3611,7 @@ static void OGSRefreshReadOnlyRoster(void) {
         return;
     }
     roster.inRoom = true;
+    roster.roomAddress = room;
     int32_t me = __atomic_load_n(&gOGSPresenceActorID, __ATOMIC_ACQUIRE);
     roster.isMaster = me > 0 && master == me;
     if (others == 0) {
@@ -3966,7 +3981,7 @@ static void OGSInstallHooks(void) {
         self.menuPanel.hidden = YES;
 
         self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 5, 260, 18)];
-        self.titleLabel.text = @"OGS47 | الطيران ونقل الحساب الثاني";
+        self.titleLabel.text = @"OGS48 | الطيران وحسابك الثاني الأصلي";
         self.titleLabel.textColor = [UIColor whiteColor];
         self.titleLabel.textAlignment = NSTextAlignmentCenter;
         self.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
@@ -4020,10 +4035,9 @@ static void OGSInstallHooks(void) {
         self.gameplayLabel.textAlignment = NSTextAlignmentCenter;
         self.gameplayLabel.numberOfLines = 2;
         [self.menuPanel addSubview:self.gameplayLabel];
-        self.receiveTeamButton = [self makeBtn:CGRectMake(10, 583, 295, 30)
-            title:@"استقبال طلبات النقل: إيقاف" bg:darkGray action:@selector(toggleTeamReceiving:)];
-        [self.menuPanel addSubview:self.receiveTeamButton];
-        self.remoteTeamLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 616, 295, 55)];
+        // Original-client transition requires no receiving control on the other
+        // account. Keep the old cooperative receiver disabled and unexposed.
+        self.remoteTeamLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 580, 295, 65)];
         self.remoteTeamLabel.font = [UIFont systemFontOfSize:10];
         self.remoteTeamLabel.textColor = UIColor.whiteColor;
         self.remoteTeamLabel.textAlignment = NSTextAlignmentCenter;
@@ -4410,9 +4424,7 @@ static void OGSInstallHooks(void) {
                                  roomLine, blocked];
     }
     self.gameplayLabel.text = ogs46::statusText();
-    self.remoteTeamLabel.text = ogs46::remoteStatusText();
-    os_unfair_lock_lock(&ogs46::lock); bool receiving = ogs46::receivingUI; os_unfair_lock_unlock(&ogs46::lock);
-    [self.receiveTeamButton setTitle:receiving ? @"استقبال طلبات النقل: مفعّل" : @"استقبال طلبات النقل: إيقاف" forState:UIControlStateNormal];
+    self.remoteTeamLabel.text = ogs46::originalClientTeamStatus();
     os_unfair_lock_lock(&ogs46::lock); bool flightOn = ogs46::flightWanted; os_unfair_lock_unlock(&ogs46::lock);
     self.flightPad.hidden = !flightOn;
     [self.flightButton setTitle:flightOn ? @"الطيران: مفعّل — اضغط للإيقاف" : @"الطيران: إيقاف" forState:UIControlStateNormal];
@@ -5302,12 +5314,29 @@ static void OGSInstallHooks(void) {
 - (void)changeSelectedTeam:(UIButton *)sender {
     OGSRoomSnapshot peers = OGSCurrentSnapshot();
     uint32_t selected = __atomic_load_n(&gOGS.selectedPeer, __ATOMIC_ACQUIRE);
-    if (!peers.inRoom || selected >= peers.count) {
-        self.remoteTeamLabel.text = @"اختر حسابك الثاني من السابق / التالي أولًا";
+    if (!peers.inRoom || peers.count != 1 || selected >= peers.count) {
+        self.remoteTeamLabel.text = @"للتجربة: ادخل غرفة فيها حساباك فقط، ثم اختر الحساب الثاني";
         return;
     }
-    ogs46::queueRemoteTeam(peers.peers[selected].actorID, (int)sender.tag);
-    self.remoteTeamLabel.text = ogs46::remoteStatusText();
+    int32_t targetActor = peers.peers[selected].actorID;
+    NSInteger team = sender.tag;
+    NSString *destination = team == 0 ? @"مشاهد" : team == 1 ? @"شرطة" : @"لصوص";
+    NSString *actorName = [NSString stringWithUTF8String:peers.peers[selected].name] ?: @"الحساب الثاني";
+    UIViewController *root = [self gameMainWindow].rootViewController;
+    if (!root || root.presentedViewController) {
+        self.remoteTeamLabel.text = @"أغلق أي نافذة مفتوحة قبل تأكيد النقل";
+        return;
+    }
+    NSString *message = [NSString stringWithFormat:@"تأكد أن %@ هو حسابك الثاني الذي تملكه. سيُطلب تحديث فريقه إلى %@ عبر واجهة اللعبة الأصلية. قبول خادم Photon غير مؤكد وقد يتأخر أثره حتى الموت أو نهاية الجولة.", actorName, destination];
+    UIAlertController *confirm = [UIAlertController alertControllerWithTitle:@"اختبار نقل حسابك الأصلي"
+        message:message preferredStyle:UIAlertControllerStyleAlert];
+    [confirm addAction:[UIAlertAction actionWithTitle:@"إلغاء" style:UIAlertActionStyleCancel handler:nil]];
+    [confirm addAction:[UIAlertAction actionWithTitle:@"أؤكد ملكية الحساب — إرسال" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        (void)action;
+        ogs46::queueOriginalClientTeam(targetActor, (int)team);
+        self.remoteTeamLabel.text = ogs46::originalClientTeamStatus();
+    }]];
+    [root presentViewController:confirm animated:YES completion:nil];
 }
 - (void)toggleTeamReceiving:(UIButton *)sender {
     (void)sender; ogs46::toggleReceiving();
@@ -5331,7 +5360,7 @@ static void OGSInstallHooks(void) {
     [root presentViewController:dialog animated:YES completion:nil];
 }
 - (void)toggleSelfFlight:(UIButton *)sender {
-    if (!ogs46::toggleFlight()) self.gameplayLabel.text = @"يلزم لاعب حي واكتمال إعادة الظهور وIPA47 كامل";
+    if (!ogs46::toggleFlight()) self.gameplayLabel.text = @"يلزم لاعب حي واكتمال إعادة الظهور وIPA48 كامل";
 }
 - (void)startFlightAxis:(UIButton *)sender {
     os_unfair_lock_lock(&ogs46::lock);
@@ -5346,8 +5375,15 @@ static void OGSInstallHooks(void) {
     int32_t current = __atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE);
     int32_t next = current ? 0 : 1;
     ogs46::Snapshot shieldState = ogs46::snapshot();
-    if (next && (!shieldState.valid || !shieldState.privateRoom || !shieldState.master || !shieldState.alive)) {
-        self.gameplayLabel.text = @"الدرع يتطلب أن تكون الهوست وحيًا بغرفة مخفية ومغلقة";
+    if (next && (!shieldState.valid || !shieldState.master || !shieldState.alive ||
+                 !OGS46TwoAccountTestRoom(shieldState.id.room))) {
+        self.gameplayLabel.text = @"الدرع: يلزم هوست وشخصية حيّة وغرفة بحسابيك فقط";
+        UIAlertController *warning = [UIAlertController alertControllerWithTitle:@"شرط الدرع التجريبي"
+            message:@"لم يعد إخفاء الغرفة مطلوبًا، لكن يلزم أن تكون الهوست وشخصيتك حيّة، وألا يوجد أكثر من حساب ثانٍ في الغرفة. انتظر تحديث قائمة اللاعبين ثم جرّب. الحماية بدون هوست لم تثبت بعد."
+            preferredStyle:UIAlertControllerStyleAlert];
+        [warning addAction:[UIAlertAction actionWithTitle:@"فهمت" style:UIAlertActionStyleDefault handler:nil]];
+        UIViewController *root = [self gameMainWindow].rootViewController;
+        if (root && !root.presentedViewController) [root presentViewController:warning animated:YES completion:nil];
         return;
     }
     if (next && (!OGSInstallDamageHookOnDemand(true) ||

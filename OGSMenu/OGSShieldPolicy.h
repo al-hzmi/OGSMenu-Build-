@@ -8,15 +8,13 @@ struct OGSExplosionFacts {
     bool roomVerified;
     bool actorMatches;
     bool localMaster;
-    bool privacyVerified;
-    bool hidden;
-    bool closed;
+    bool twoAccountRoom;
     bool deadFlagVerified;
     bool alive;
 };
 
 static constexpr bool OGSShouldBlockLocalExplosion(const OGSExplosionFacts &f) {
     return f.enabled && f.ownerVerified && f.localOwner && f.roomVerified &&
-           f.actorMatches && f.localMaster && f.privacyVerified && f.hidden &&
-           f.closed && f.deadFlagVerified && f.alive;
+           f.actorMatches && f.localMaster && f.twoAccountRoom &&
+           f.deadFlagVerified && f.alive;
 }

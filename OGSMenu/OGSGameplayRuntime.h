@@ -6,7 +6,7 @@
 namespace ogs46 {
 struct Snapshot {
     Identity id; double at = 0;
-    bool valid = false, privateRoom = false, alive = false, master = false;
+    bool valid = false, privateRoom = false, alive = false, aliveVerified = false, master = false;
     int team = -1, respawn = -2, a = -1, b = -1;
     Mode mode = Mode::Unknown;
 };
@@ -16,6 +16,7 @@ static Snapshot latest;
 static Request pending;
 static Identity flightIdentity;
 static bool flightWanted = false;
+static double flightLastGoodAt = 0.;
 static int axis = 0;
 static int status = 0; // 1=requested, 2=issued, 3=local state observed, negatives=denial
 static int awaitingTeam = -1;
@@ -72,7 +73,8 @@ static Snapshot sample(void *rc) {
         bool mine = OGSIsDamageToLocalPlayerWithActor(player, &verified, &ownerActor);
         if (!verified || !mine || ownerActor != actor) return s;
         s.id.player = (uintptr_t)player;
-        s.alive = read(player, 0x12C, killed) && killed == 0;
+        s.aliveVerified = read(player, 0x12C, killed) && killed <= 1;
+        s.alive = s.aliveVerified && killed == 0;
     }
     s.valid = actor > 0 && s.team >= 0 && s.team <= 2;
     return s;
@@ -86,23 +88,35 @@ static bool sameSession(Identity a, Identity b) {
     a.player = b.player = 0; return same(a, b);
 }
 static void stopFlight() {
-    os_unfair_lock_lock(&lock); flightWanted = false; axis = 0; os_unfair_lock_unlock(&lock);
+    os_unfair_lock_lock(&lock); flightWanted = false; axis = 0; flightLastGoodAt = 0.; os_unfair_lock_unlock(&lock);
 }
 static void remoteTick(void *self, const Snapshot &s);
+static void originalClientTeamTick(const Snapshot &s);
 static void processSelfRequest(void *self, const Snapshot &s, const Request &req);
 static void roomUpdate(void *self, void *method) {
     if (roomOriginal) roomOriginal(self, method);
     Snapshot s = sample(self);
     if (__atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE) &&
-        (!s.valid || !s.privateRoom || !s.master || !s.alive ||
+        (!s.valid || !s.master || !s.alive || !OGS46TwoAccountTestRoom(s.id.room) ||
          s.id.room != __atomic_load_n(&gOGS46ShieldRoom, __ATOMIC_ACQUIRE) ||
          s.id.actor != __atomic_load_n(&gOGS46ShieldActor, __ATOMIC_ACQUIRE)))
         __atomic_store_n(&gOGS.godModeOn, 0, __ATOMIC_RELEASE);
     Request req;
     os_unfair_lock_lock(&lock);
     latest = s;
-    if (flightWanted && (!s.valid || !s.alive || !same(s.id, flightIdentity))) {
-        flightWanted = false; axis = 0;
+    if (flightWanted) {
+        // Explicit death, actor/room/scene changes and avatar replacement
+        // disarm immediately. A single incomplete IL2CPP sample does not.
+        bool changed = s.valid && (!sameSession(s.id, flightIdentity) ||
+            (s.id.player && s.id.player != flightIdentity.player) || s.team == 0 ||
+            (s.aliveVerified && !s.alive));
+        uintptr_t liveRoom = 0; int32_t liveActor = 0, liveMaster = 0;
+        if (!s.valid && OGSReadAutoRoom(&liveRoom, &liveActor, &liveMaster) &&
+            (liveRoom != flightIdentity.room || liveActor != flightIdentity.actor)) changed = true;
+        if (s.valid && s.alive && same(s.id, flightIdentity)) flightLastGoodAt = s.at;
+        if (changed || now() - flightLastGoodAt > 1.5) {
+            flightWanted = false; axis = 0; flightLastGoodAt = 0.;
+        }
     }
     req = pending; pending.team = -1;
     os_unfair_lock_unlock(&lock);
@@ -117,6 +131,7 @@ static void roomUpdate(void *self, void *method) {
     }
     processSelfRequest(self, s, req);
     remoteTick(self, s);
+    originalClientTeamTick(s);
 }
 static void processSelfRequest(void *self, const Snapshot &s, const Request &req) {
     if (req.team < 0) return;
@@ -145,16 +160,26 @@ static int32_t move(void *self, Vector3 displacement, const void *method) {
     return moveOriginal ? moveOriginal(self, displacement, method) : 0;
 }
 static void fpsUpdate(void *self, void *method) {
+    static thread_local double previousRealFrame = 0.;
+    static thread_local Identity previousFlightID;
     Identity id; bool wanted; int input;
     os_unfair_lock_lock(&lock); id = flightIdentity; wanted = flightWanted; input = axis;
     os_unfair_lock_unlock(&lock);
-    if (!wanted) { if (fpsOriginal) fpsOriginal(self, method); return; }
+    if (!wanted) { previousRealFrame = 0.; if (fpsOriginal) fpsOriginal(self, method); return; }
     void *pn = nullptr, *back = nullptr, *cc = nullptr, *transform = nullptr, *ladder = nullptr;
     // Other players must never stop or modify the local player's flight.
     if (!read(self, 0x60, pn) || (uintptr_t)pn != id.player) {
         if (fpsOriginal) fpsOriginal(self, method); return;
     }
+    double realNow = now();
+    float realDt = same(id, previousFlightID) ? realFlightInterval(realNow, previousRealFrame) : 0.f;
+    previousFlightID = id;
+    previousRealFrame = realNow;
     Snapshot s = sample((void *)id.controller);
+    if (s.valid && (!sameSession(s.id, id) ||
+        (s.id.player && s.id.player != id.player) || (s.aliveVerified && !s.alive))) {
+        stopFlight(); if (fpsOriginal) fpsOriginal(self, method); return;
+    }
     bool usable = s.valid && s.alive && same(s.id, id) &&
         read(pn, 0xF8, back) && back == self && objectAlive(self) &&
         read(self, 0x90, cc) && objectAlive(cc) && read(self, 0x98, transform) && objectAlive(transform) &&
@@ -162,19 +187,22 @@ static void fpsUpdate(void *self, void *method) {
     float gravity = 0; uint8_t air = 0;
     usable = usable && read(self, 0x3C, gravity) && std::isfinite(gravity) && fabsf(gravity) <= 1000.f &&
         read(self, 0x4C, air) && air <= 1;
-    if (!usable) { stopFlight(); if (fpsOriginal) fpsOriginal(self, method); return; }
+    // A frame-level transient read failure pauses flight for this one frame;
+    // RoomController.Update handles sustained failures and identity changes.
+    if (!usable) {
+        if (objectAlive(ladder)) stopFlight();
+        if (fpsOriginal) fpsOriginal(self, method); return;
+    }
     // Validate the actual ranges written (including unaligned bool/float fields).
     for (uintptr_t off : {0x38u, 0x48u, 0x80u, 0xC8u, 0xD0u}) {
         if (!OGSIsWritableMappedSlot((uintptr_t)self + off)) {
             stopFlight(); if (fpsOriginal) fpsOriginal(self, method); return;
         }
     }
-    using DeltaFn = float (*)(const void *);
-    float dt = ((DeltaFn)OGSResolveRVA(0x198AACC))(nullptr);
     void *settings = nullptr, *settingsClass = nullptr; uint8_t paused = 1;
     bool readPause = OGSReadPointer(OGSResolveRVA(0x281B1B8), &settingsClass) &&
         OGSReadPointer((uintptr_t)settingsClass + 0xB8, &settings) && read(settings, 0x158, paused);
-    float step = verticalStep(input, dt, !readPause || paused != 0);
+    float step = verticalStep(input, realDt, !readPause || paused != 0);
     auto &g = *(float *)((uintptr_t)self + 0x3C);
     auto &a = *(uint8_t *)((uintptr_t)self + 0x4C);
     auto &vy = *(float *)((uintptr_t)self + 0x80);
@@ -252,17 +280,19 @@ static bool toggleFlight() {
     bool ok = s.valid && s.alive && s.respawn == -1 &&
         __atomic_load_n(&bridgeStatus[1], __ATOMIC_ACQUIRE) == 1 &&
         __atomic_load_n(&bridgeStatus[2], __ATOMIC_ACQUIRE) == 1;
-    if (ok) { flightIdentity = s.id; flightWanted = true; axis = 0; }
+    if (ok) { flightIdentity = s.id; flightWanted = true; axis = 0; flightLastGoodAt = now(); }
     os_unfair_lock_unlock(&lock); return ok;
 }
 static NSString *statusText() {
     Snapshot s = snapshot(); int code; bool flying;
     os_unfair_lock_lock(&lock); code = status; flying = flightWanted;
     // An expired snapshot disarms controls even if the old room no longer ticks.
-    if (!s.valid) { flightWanted = false; axis = 0; pending.team = -1; flying = false;
-        __atomic_store_n(&gOGS.godModeOn, 0, __ATOMIC_RELEASE); }
+    if (!s.valid && now() - s.at > 1.5) {
+        flightWanted = false; axis = 0; flightLastGoodAt = 0.; pending.team = -1; flying = false;
+        __atomic_store_n(&gOGS.godModeOn, 0, __ATOMIC_RELEASE);
+    }
     os_unfair_lock_unlock(&lock);
-    if (!s.valid) return @"انتظار دخول غرفة وتحديث اللاعب";
+    if (!s.valid) return flying ? @"الطيران ينتظر استقرار تحديث اللعبة" : @"انتظار دخول غرفة وتحديث اللاعب";
     if (flying) return @"الطيران مفعّل • الأسهم للارتفاع وعصا اللعبة للحركة";
     if (code == 1) return @"طلب انتقال ينتظر تحديث اللعبة";
     if (code == 2) return @"نُفّذ المسار الأصلي • انتظار الحالة المحلية";
@@ -276,3 +306,4 @@ static NSString *statusText() {
 }
 
 #include "OGSRemoteTeam.h"
+#include "OGSOriginalClientTeam.h"
