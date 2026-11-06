@@ -13,13 +13,14 @@ static bool training51Scope(Training51 &s) {
         OGSReadRoomPrivacy(room,&open,&visible)&&!open&&!visible&&
         peers.inRoom&&peers.roomAddress==room&&selectedActorMatches(peers,s.target)==1&&
         !__atomic_load_n(&gOGSGrenade31Enabled,__ATOMIC_ACQUIRE)&&
-        !__atomic_load_n(&gOGS.magicBulletOn,__ATOMIC_ACQUIRE);
+        !__atomic_load_n(&gOGS.magicBulletOn,__ATOMIC_ACQUIRE)&&
+        !__atomic_load_n(&gKnife29Mode,__ATOMIC_ACQUIRE)&&!__atomic_load_n(&gKnife28On,__ATOMIC_ACQUIRE);
     if(!ok){os_unfair_lock_lock(&lock);training51.armed=false;training51Message=@"توقف المختبر: تغيرت الجلسة أو فُعّل تعديل الذخيرة/المدى";os_unfair_lock_unlock(&lock);}
     return ok;
 }
 static bool training51Toggle(int target) {
     Training51 s;os_unfair_lock_lock(&lock);bool on=training51.armed;training51.armed=false;os_unfair_lock_unlock(&lock);
-    if(on)return true;
+    if(on){os_unfair_lock_lock(&lock);training51Message=@"المختبر متوقف";os_unfair_lock_unlock(&lock);return true;}
     int32_t master=0;bool open=true,visible=true;OGSRoomSnapshot peers=OGSCurrentSnapshot();
     bool ok=OGSReadAutoRoom(&s.room,&s.actor,&master)&&target>0&&target!=s.actor&&
         OGSReadRoomPrivacy(s.room,&open,&visible)&&!open&&!visible&&peers.roomAddress==s.room&&selectedActorMatches(peers,target)==1;
@@ -29,7 +30,9 @@ static bool training51Toggle(int target) {
         // Read-only measurement baseline: do not silently measure modified ammo/damage.
         __atomic_store_n(&gOGSGrenade31Enabled,0u,__ATOMIC_RELEASE);
         __atomic_store_n(&gOGS.magicBulletOn,0,__ATOMIC_RELEASE);
-        os_unfair_lock_lock(&lock);training51=s;training51Message=@"مختبر قراءة فقط: أطلقت الرميات بنفسك؛ العلامة للمحدد حسب Actor";os_unfair_lock_unlock(&lock);
+        __atomic_store_n(&gKnife29Mode,0u,__ATOMIC_RELEASE);
+        __atomic_store_n(&gKnife28On,0u,__ATOMIC_RELEASE);
+        os_unfair_lock_lock(&lock);training51=s;training51Message=@"قياس دون تعديلات ذخيرة/سكين؛ ارمِ بنفسك. العلامة حسب Actor";os_unfair_lock_unlock(&lock);
         trace51Add(0,[NSString stringWithFormat:@"LAB armed room-local actor=%d target=%d; no name matching",s.actor,target]);
     } else {os_unfair_lock_lock(&lock);training51Message=@"المختبر يتطلب IPA51 كاملًا وحسابًا محددًا وغرفة مخفية ومغلقة";os_unfair_lock_unlock(&lock);}
     return ok;
@@ -80,7 +83,10 @@ static void weapon51Measure(void *self,const void *method,bool throwing) {
     if(original)original(self,method);
     if(!observe)return;
     Training51 afterLab;int after=-999;bool valid=training51Scope(afterLab)&&afterLab.room==lab.room&&objectAlive(self)&&read(self,0x12c,after);
-    trace51Add(0,[NSString stringWithFormat:@"GRENADE %@ native return ammo %d -> %d read=%d slots=%d selected=%d inventory=%d; local observation only",throwing?@"throw":@"shot",before,after,valid,slots,selected,inventory]);
+    int32_t afterSlots=-1,afterSelected=-1;
+    bool afterInventory=valid&&OGSReadGrenadeSelectionProbe(self,&afterSlots,&afterSelected);
+    uintptr_t room=0;int32_t me=0,master=0;bool role=OGSReadAutoRoom(&room,&me,&master)&&room==lab.room;
+    trace51Add(0,[NSString stringWithFormat:@"GRENADE %@ ammo %d -> %d read=%d slots %d -> %d selected %d -> %d inventory=%d/%d master=%d local=%d roleRead=%d; local observations only",throwing?@"throw":@"shot",before,after,valid,slots,afterSlots,selected,afterSelected,inventory,afterInventory,master,me,role]);
     os_unfair_lock_lock(&lock);if(throwing)++training51.throws;else ++training51.shots;os_unfair_lock_unlock(&lock);
 }
 static void fire51(void *s,const void *m){weapon51Measure(s,m,false);}

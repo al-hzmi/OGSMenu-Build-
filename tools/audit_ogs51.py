@@ -66,18 +66,39 @@ def verify(g,m,out=None):
   0x14877f0:('ldr','w8, [x0, #0x18]'),0x1487804:('ldr','x8, [x20, #0x10]'),
   0x13809f8:('ldr','w8, [x19, #0x12c]'),0x1380a00:('str','w21, [x19, #0x12c]'),
   0x13e6138:('ldr','x1, [x8, #0x770]'),0x13e615c:('str','w8, [x19, #0x154]'),
+  0x1381be8:('mov','w9, #0x10c'),0x1381bf4:('scvtf','s6, w21'),
+  0x1381c18:('bl','#0x19bc4d0'),0x1381e38:('bl','#0x138a734'),
+  0x1389cb0:('fmov','s3, #6.00000000'),0x1389ce4:('fmov','s3, #12.00000000'),
+  0x13e781c:('bl','#0x13cc2bc'),0x13e7f18:('bl','#0x13cc2bc'),
+  0x13e82c4:('bl','#0x13cc2bc'),0x13e8634:('bl','#0x13cc2bc'),0x13e89d0:('bl','#0x13cc2bc'),
+  0x13e7fd8:('sub','w25, w8, #0x65'),0x13e8384:('sub','w25, w8, #0x21'),
+  0x13f7e20:('bl','#0x13f36fc'),0x13fb944:('bl','#0x13f7218'),
   0x13b0cbc:('mov','w26, #0xf8'),0x13b0d4c:('bl','#0x13ab2a4'),
  }
  verified={}
  for a,(mn,op) in checks.items():
   i=next(cs.disasm(g[a:a+4],a));require((i.mnemonic,i.op_str)==(mn,op),f'instruction {a:#x}: {i.mnemonic} {i.op_str}')
   verified[hex(a)]=mn+' '+op
+ fields={}
+ expectedFields={'PlayerWeapons':{'Grenade':0x60,'selectedGrenade':0x8c},
+ 'FPSWeapon':{'wSettings':0xa8,'playerWeapons':0xc8,'playerNetwork':0xd8,'bulletsLeft':0x12c,'reserveBulletsLeft':0x130,'bulletRange':0x108,'knifeRange':0x10c,'bulletSpread':0x15c},
+ 'PlayerNetwork':{'playerKilled':0x12c,'playerTeam':0x154},'RoomController':{'ourTeam':0x1b0}}
+ def name(index):
+  p=h[6]+index;return m[p:m.index(0,p)].decode()
+ for t in range(h[41]//100):
+  row=struct.unpack_from('<19I8H2I',m,h[40]+t*100);label=name(row[0])
+  if label not in expectedFields:continue
+  offsets=struct.unpack_from('<Q',g,0x26bea10+t*8)[0]-BASE;found={}
+  for j in range(row[21]):
+   fi=struct.unpack_from('<3I',m,h[24]+12*(row[11]+j));found[name(fi[0])]=struct.unpack_from('<i',g,offsets+j*4)[0]
+  for field,offset in expectedFields[label].items():require(found.get(field)==offset,label+'.'+field+' native offset')
+  fields[label]=expectedFields[label]
  result={'input_game_sha256':GAME_SHA,'metadata_sha256':META_SHA,'input_library_sha256':LIB_SHA,
   'keys':{'0x283d770':'Team (game Int32)','0x283de90':'team (PUN Byte enum)'},
-  'checked_instructions':verified,'server_authorization':'NOT VERIFIED','stock_client_gameplay':'NOT RUN'}
+  'checked_instructions':verified,'registered_fields':fields,'server_authorization':'NOT VERIFIED','stock_client_gameplay':'NOT RUN'}
  if out:
   out.mkdir(parents=True,exist_ok=True);starts=sorted(mm);graph={}
-  wanted=('TeamExtensions.','PhotonPlayer.SetCustomProperties','PhotonPlayer.InternalCacheProperties','LoadBalancingPeer.OpSetPropertiesOfActor','NetworkingPeer.SetMasterClient','PhotonNetwork.SetMasterClient','NetworkingPeer.OnEvent','RoomController.RefreshPlayerList','RoomController.PrepareRespawn','RoomController.OnPhoton','RoomController.SpawnPlayer','RoomController.JoinedTeam','<PrepareRespawnCoroutine>','<Restart','PlayerNetwork.Update','PlayerNetwork.ApplyDamage','PlayerNetwork.DamageRemote','PlayerNetwork.BombDmg','PlayerNetwork.C4Dmg','PlayerNetwork.KillPlayer','FPSWeapon.FireOneShot','FPSWeapon.Fire2','FPSWeapon.GrenadeShootm','PlayerWeapons.SwitchWeaponGrenade','Grenade.','C4.','Camera.WorldToViewportPoint','EventData.get_Item')
+  wanted=('FPSWeapon.ShootBullet','HitBox.','PlayerNetwork.GetDMG','PlayerNetwork.OnPhotonSerializeView','NetworkingPeer.ExecuteRpc','NetworkingPeer.CheckMasterClient','WorkerInGame.OnDisconnectedFromPhoton','TeamExtensions.','PhotonPlayer.SetCustomProperties','PhotonPlayer.InternalCacheProperties','LoadBalancingPeer.OpSetPropertiesOfActor','NetworkingPeer.SetMasterClient','PhotonNetwork.SetMasterClient','NetworkingPeer.OnEvent','RoomController.RefreshPlayerList','RoomController.PrepareRespawn','RoomController.OnPhoton','RoomController.SpawnPlayer','RoomController.JoinedTeam','<PrepareRespawnCoroutine>','<Restart','PlayerNetwork.Start','RoomController.FixedUpdate','PlayerNetwork.Update','PlayerNetwork.ApplyDamage','PlayerNetwork.DamageRemote','PlayerNetwork.BombDmg','PlayerNetwork.C4Dmg','PlayerNetwork.KillPlayer','FPSWeapon.FireOneShot','FPSWeapon.Fire2','FPSWeapon.GrenadeShootm','PlayerWeapons.SwitchWeaponGrenade','Grenade.','C4.','Camera.WorldToViewportPoint','EventData.get_Item')
   for a in starts:
    rows=mm[a];name=rows[0][1]
    if not any(name.startswith(x) for x in wanted):continue

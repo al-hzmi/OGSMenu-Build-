@@ -1402,6 +1402,8 @@ static void OGSProcessSpeed(void) {
 @property (strong, nonatomic) UILabel *training51Marker;
 @property (strong, nonatomic) CADisplayLink *training51DisplayLink;
 @property (strong, nonatomic) UIButton *training51Button;
+@property (assign, nonatomic) int32_t selectionActor51;
+@property (assign, nonatomic) uintptr_t selectionRoom51;
 @property (strong, nonatomic) UIButton *godModeButton;     // درع الحماية
 @property (strong, nonatomic) UIButton *magicBulletButton; // مدى السكين
 @property (strong, nonatomic) UIButton *grenade31Button; // قنابل متجددة
@@ -1908,9 +1910,9 @@ static void OGSBridgeOutgoingDamage(void *self, void *values, const void *method
 
 // OGS28 PRIVATE TEST. Verified in fps 3.4.0 ARM64:
 // FPSWeapon.FireOneShot() MD30438/MI27851 (RVA 0x137F584),
-// FPSWeapon.bulletRange = float at +0x158,
-// FPSWeapon.knifeRange  = float at +0x15C.
-// Native code passes +/- knifeRange to repeated direction perturbations;
+// Historical OGS28 experiment (unexposed): +0x158 is highestBulletSpread,
+// +0x15C is bulletSpread. These are NOT the native range fields.
+// Native code passes +/- spread to direction perturbations;
 // it is NOT proven to be a server-authoritative melee reach value.
 // Try only a bounded 2x multiplier around ONE shot in a closed, hidden room.
 static void hook_KnifeFire28(void *self, const void *method) {
@@ -4423,6 +4425,7 @@ static void OGSInstallHooks(void) {
 
     if (count == 0) {
         __atomic_store_n(&gOGS.selectedPeer, 0, __ATOMIC_RELEASE);
+        self.selectionActor51=0;self.selectionRoom51=0;
         self.playerLabel.text = hookActive ? @"المحدد: لا يوجد لاعبين معك حالياً" :
             @"قائمة اللاعبين غير متاحة: تحديث اللعبة متوقف";
     } else {
@@ -4433,8 +4436,9 @@ static void OGSInstallHooks(void) {
         OGSPeerSnapshot peer = snapshot.peers[selected];
         NSString *name = [NSString stringWithUTF8String:peer.name];
         if (!name.length) name = @"لاعب";
-        self.playerLabel.text = [NSString stringWithFormat:@"(%u/%u) %@%@",
-                                 selected + 1, count, name, peer.isHost ? @" 👑" : @""];
+        self.selectionActor51=peer.actorID;self.selectionRoom51=snapshot.roomAddress;
+        self.playerLabel.text = [NSString stringWithFormat:@"(%u/%u) %@ [#%d]%@",
+                                 selected + 1, count, name, peer.actorID, peer.isHost ? @" 👑" : @""];
     }
 
     uint32_t blocked = __atomic_load_n(&gOGS.blockedKicksCount, __ATOMIC_RELAXED);
@@ -5395,7 +5399,11 @@ static void OGSInstallHooks(void) {
     OGSRoomSnapshot peers=OGSCurrentSnapshot();
     uint32_t ix=__atomic_load_n(&gOGS.selectedPeer,__ATOMIC_ACQUIRE);
     int target=peers.inRoom && ix<peers.count ? peers.peers[ix].actorID : 0;
+    if(target!=self.selectionActor51 || peers.roomAddress!=self.selectionRoom51)target=0;
     ogs46::training51Toggle(target);
+    os_unfair_lock_lock(&ogs46::lock);bool armed=ogs46::training51.armed;os_unfair_lock_unlock(&ogs46::lock);
+    if(armed){[self.grenade31Button setTitle:@"القنابل: إيقاف" forState:UIControlStateNormal];
+        [self.magicBulletButton setTitle:@"مدى السكين: إيقاف" forState:UIControlStateNormal];}
 }
 
 - (void)changeSelectedTeam:(UIButton *)sender {
@@ -5406,6 +5414,9 @@ static void OGSInstallHooks(void) {
         return;
     }
     int32_t targetActor = peers.peers[selected].actorID;
+    if(targetActor!=self.selectionActor51 || peers.roomAddress!=self.selectionRoom51) {
+        self.remoteTeamLabel.text=@"تغيرت القائمة؛ حدد الحساب الصحيح مجددًا";return;
+    }
     NSInteger team = sender.tag;
     // One tap = one request; no modal confirmation, no UIKit handoff or pause.
     // Only the actor explicitly selected in the room roster is targeted.

@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 """Native bridge execution and source regression checks; NO live gameplay tests."""
-import argparse,struct,subprocess
+import argparse,struct,subprocess,re
 from pathlib import Path
 from audit_ogs51 import BRIDGES,load,require
 from package_ogs51 import patch
-from test_ogs46 import body
+def body(text,name):
+ match=re.search(r'\b'+re.escape(name)+r'\([^;{}]*\)\s*\{',text)
+ require(match is not None,'function missing '+name)
+ start=match.end()-1;depth=1;i=start+1
+ while depth:
+  depth+=(text[i]=='{')-(text[i]=='}');i+=1
+ return text[start:i]
 BASELINE='a4f108446190894791845fd5a48921611e851631'
 
 def regression():
@@ -34,6 +40,24 @@ def emulate(g):
    require(u.reg_read(UC_ARM64_REG_SP)==0x6000800-(0 if installed else displaced),name+' SP')
  print('PASS 8 ARM64 bridge paths: original fallthrough/callback, X0-X5/Q0-Q2/LR/SP preserved')
 
+def cas_branch(g):
+ from unicorn import Uc,UC_ARCH_ARM64,UC_MODE_ARM,UC_HOOK_CODE
+ from unicorn.arm64_const import UC_ARM64_REG_X0,UC_ARM64_REG_X20,UC_ARM64_REG_X22,UC_ARM64_REG_X24,UC_ARM64_REG_PC
+ for count in (0,1):
+  u=Uc(UC_ARCH_ARM64,UC_MODE_ARM);u.mem_map(0,((max(len(g),0x2821000)+4095)//4096)*4096);u.mem_write(0,g)
+  u.mem_map(0x6000000,4096);u.mem_write(0x281b1c8,struct.pack('<Q',0x6000100))
+  u.mem_write(0x6000300,struct.pack('<Q',0x6000100));u.mem_write(0x6000810,struct.pack('<i',2))
+  u.reg_write(UC_ARM64_REG_X20,0x6000800);u.reg_write(UC_ARM64_REG_X22,0x6000500)
+  u.reg_write(UC_ARM64_REG_X0,0x6000500);u.reg_write(UC_ARM64_REG_X24,0x6000300)
+  seen=[]
+  def hook(emu,address,size,user):
+   if address in (0x13d0d68,0x13d0da8,0x13d0de8,0x13d0df4):
+    seen.append(address);emu.reg_write(UC_ARM64_REG_X0,count if address==0x13d0d68 else 0);emu.reg_write(UC_ARM64_REG_PC,address+4)
+  u.hook_add(UC_HOOK_CODE,hook);u.emu_start(0x13d0d54,0x13d0df8,count=150)
+  require(u.reg_read(UC_ARM64_REG_PC)==0x13d0df8,'CAS native guard completed')
+  require((0x13d0de8 in seen)==(count==0),'nonempty expected skips optimistic Merge')
+ print('PASS native CAS guard: expected count 1 skips Merge; count 0 enters Merge (external calls stubbed, not networking)')
+
 def main():
  p=argparse.ArgumentParser();p.add_argument('ipa',type=Path);a=p.parse_args();g,m=load(a.ipa);out=patch(g,m)
  intervals=sorted([(b[2],b[2]+4) for b in BRIDGES]+[(b[3],b[3]+28) for b in BRIDGES]);cursor=0
@@ -44,5 +68,5 @@ def main():
   except ValueError:pass
   else:raise AssertionError('mismatched input accepted')
  print('PASS only four entry/stub spans changed; all old bridges and other native code preserved; tampered input refused')
- emulate(out);regression()
+ emulate(out);cas_branch(g);regression()
 if __name__=='__main__':main()
