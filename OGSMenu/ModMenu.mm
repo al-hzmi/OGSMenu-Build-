@@ -1,3 +1,4 @@
+#include "OGS51TrainingPolicy.h"
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <os/lock.h>
@@ -1397,6 +1398,10 @@ static void OGSProcessSpeed(void) {
 @property (strong, nonatomic) UILabel *gameplayLabel;
 @property (strong, nonatomic) UIButton *receiveTeamButton;
 @property (strong, nonatomic) UILabel *remoteTeamLabel;
+@property (strong, nonatomic) UILabel *training51Label;
+@property (strong, nonatomic) UILabel *training51Marker;
+@property (strong, nonatomic) CADisplayLink *training51DisplayLink;
+@property (strong, nonatomic) UIButton *training51Button;
 @property (strong, nonatomic) UIButton *godModeButton;     // درع الحماية
 @property (strong, nonatomic) UIButton *magicBulletButton; // مدى السكين
 @property (strong, nonatomic) UIButton *grenade31Button; // قنابل متجددة
@@ -1739,8 +1744,8 @@ static volatile uint32_t gOGS42KillPreDeadFlagUnknown = 0;
 static bool OGSReadGrenadeSelectionProbe(void *weapon, int32_t *slotCount,
                                          int32_t *selected) {
     if (!weapon || !slotCount || !selected) return false;
-    uintptr_t playerWeapons = 0, grenadeArray = 0, klass = 0;
-    uintptr_t length = 0;
+    uintptr_t playerWeapons = 0, grenadeList = 0, items = 0, capacity = 0, klass = 0;
+    int32_t length = 0;
     int32_t selectedIndex = -1;
     if (!OGSReadMemory((uintptr_t)weapon + 0xC8u,
                        &playerWeapons, sizeof(playerWeapons)) ||
@@ -1748,13 +1753,16 @@ static bool OGSReadGrenadeSelectionProbe(void *weapon, int32_t *slotCount,
         !OGSReadMemory(playerWeapons, &klass, sizeof(klass)) ||
         klass < 0x100000000ULL ||
         !OGSReadMemory(playerWeapons + 0x60u,
-                       &grenadeArray, sizeof(grenadeArray)) ||
-        grenadeArray < 0x100000000ULL ||
-        !OGSReadMemory(grenadeArray + 0x18u, &length, sizeof(length)) ||
-        length > 64 ||
+                       &grenadeList, sizeof(grenadeList)) ||
+        grenadeList < 0x100000000ULL ||
+        !OGSReadMemory(grenadeList + 0x18u, &length, sizeof(length)) ||
+        length < 0 || length > 64 ||
         !OGSReadMemory(playerWeapons + 0x8Cu,
                        &selectedIndex, sizeof(selectedIndex)) ||
-        selectedIndex < -1 || selectedIndex > 64) return false;
+        !OGSReadMemory(grenadeList + 0x10u, &items, sizeof(items)) ||
+        items < 0x100000000ULL ||
+        !OGSReadMemory(items + 0x18u, &capacity, sizeof(capacity)) ||
+        !ogs51::listSize(length, selectedIndex, capacity)) return false;
     *slotCount = (int32_t)length;
     *selected = selectedIndex;
     return true;
@@ -2692,7 +2700,7 @@ static void OGSProcessRoomCapacityOnPhotonThread(void) {
     // a second account, a second player's reported MaxPlayers, and joins.
 }
 
-namespace ogs46 { static void originalClientTeamPhotonTick(); }
+namespace ogs46 { static void originalClientTeamPhotonTick(); static void originalClientTeamObserveEvent(void *); static void training51PhotonTick(); }
 
 // Executed on the game's Unity/PUN Update thread, never from the UIKit
 // menu timer. Makes standalone room privacy possible with zero other players.
@@ -2722,6 +2730,7 @@ static void hook_PhotonHandlerUpdate(void *self, void *method) {
     // Original-client team changes are Photon player-property operations.
     // Do not strand queued requests behind an inactive RoomController.Update.
     ogs46::originalClientTeamPhotonTick();
+    ogs46::training51PhotonTick();
 
     // Fast-path for verified MasterClient callback notifications and manual
     // recovery taps: sample fresh Photon state on this frame, not after the
@@ -2806,7 +2815,7 @@ static void hook_OnEvent(void *self, void *eventData, void *method) {
     uint32_t observedEventCode = 0; // zero = unknown / unreadable
     // No original Unity/Photon calls from the UIKit timer.
 
-    // حماية مطلقة 100%: حظر حزمة الطرد (203 CloseConnection) فوراً ودائماً تحت أي ظرف
+    // Legacy local Event203 filter; not a guarantee of server membership or Master ownership.
     if (eventData && (uintptr_t)eventData >= 0x100000000ULL) {
         uint8_t eventCode = 0;
         if (OGSReadMemory((uintptr_t)eventData + 0x10, &eventCode, sizeof(uint8_t))) {
@@ -2858,6 +2867,7 @@ static void hook_OnEvent(void *self, void *eventData, void *method) {
     }
     __atomic_fetch_sub(&gOGS.insideNetworkEvent, 1, __ATOMIC_ACQ_REL);
     if (observedEventCode == 253) {
+        ogs46::originalClientTeamObserveEvent(eventData);
         uintptr_t signalRoom = 0;
         double signalAt = 0.;
         os_unfair_lock_lock(&gStateLock);
@@ -3965,7 +3975,7 @@ static void OGSInstallHooks(void) {
         CGFloat menuViewportHeight = MIN(358.0, MAX(160.0, CGRectGetHeight(gw.bounds) - 26.0));
         CGFloat menuX = MAX(8.0, MIN(75.0, CGRectGetWidth(gw.bounds) - 323.0));
         self.menuPanel = [[UIScrollView alloc] initWithFrame:CGRectMake(menuX, 18, 315, menuViewportHeight)];
-        self.menuPanel.contentSize = CGSizeMake(315, 678);
+        self.menuPanel.contentSize = CGSizeMake(315, 750);
         self.menuPanel.alwaysBounceVertical = NO;
         self.menuPanel.showsVerticalScrollIndicator = YES;
         self.menuPanel.clipsToBounds = YES;
@@ -4038,6 +4048,26 @@ static void OGSInstallHooks(void) {
         self.remoteTeamLabel.textAlignment = NSTextAlignmentCenter;
         self.remoteTeamLabel.numberOfLines = 3;
         [self.menuPanel addSubview:self.remoteTeamLabel];
+        self.training51Button = [self makeBtn:CGRectMake(10, 650, 295, 30)
+            title:@"مختبر المحدد: علامة + قياس قنابل" bg:darkGray action:@selector(toggleTraining51:)];
+        [self.menuPanel addSubview:self.training51Button];
+        self.training51Label = [[UILabel alloc] initWithFrame:CGRectMake(10, 684, 295, 56)];
+        self.training51Label.font = [UIFont systemFontOfSize:10];
+        self.training51Label.textColor = UIColor.whiteColor;
+        self.training51Label.textAlignment = NSTextAlignmentCenter;
+        self.training51Label.numberOfLines = 3;
+        [self.menuPanel addSubview:self.training51Label];
+        self.training51Marker = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 76, 20)];
+        self.training51Marker.font = [UIFont boldSystemFontOfSize:11];
+        self.training51Marker.textAlignment = NSTextAlignmentCenter;
+        self.training51Marker.textColor = UIColor.cyanColor;
+        self.training51Marker.backgroundColor = [UIColor colorWithWhite:0 alpha:.55];
+        self.training51Marker.userInteractionEnabled = NO;
+        self.training51Marker.hidden = YES;
+        [self.containerView insertSubview:self.training51Marker atIndex:0];
+        self.training51DisplayLink=[CADisplayLink displayLinkWithTarget:self selector:@selector(refreshTraining51Marker)];
+        self.training51DisplayLink.preferredFramesPerSecond=30;
+        [self.training51DisplayLink addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
         // The stock game's aim/fire controls occupy the far-right edge (as
         // shown by the supplied landscape screenshot). Default this compact
         // pad well to their left; the grip lets the owner move it freely.
@@ -4082,6 +4112,7 @@ static void OGSInstallHooks(void) {
             object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
                 ogs46::stopFlight();
                 ogs46::stopRemote();
+                ogs46::stop51();
             }];
 
 
@@ -4446,6 +4477,13 @@ static void OGSInstallHooks(void) {
     }
     self.gameplayLabel.text = ogs46::statusText();
     self.remoteTeamLabel.text = ogs46::originalClientTeamStatus();
+    os_unfair_lock_lock(&ogs46::lock);
+    ogs46::Training51 lab = ogs46::training51;
+    NSString *labMessage = ogs46::training51Message;
+    os_unfair_lock_unlock(&ogs46::lock);
+    self.training51Label.text = [NSString stringWithFormat:@"%@\nرمي:%llu | إطلاق:%llu | عينات:%llu", labMessage,
+        (unsigned long long)lab.throws, (unsigned long long)lab.shots, (unsigned long long)lab.frames];
+    [self.training51Button setTitle:lab.armed ? @"إيقاف المختبر الخاص" : @"مختبر المحدد: علامة + قياس قنابل" forState:UIControlStateNormal];
     os_unfair_lock_lock(&ogs46::lock); bool flightOn = ogs46::flightWanted; os_unfair_lock_unlock(&ogs46::lock);
     self.flightPad.hidden = !flightOn;
     [self.flightButton setTitle:flightOn ? @"الطيران: مفعّل — اضغط للإيقاف" : @"الطيران: إيقاف" forState:UIControlStateNormal];
@@ -4477,7 +4515,7 @@ static void OGSInstallHooks(void) {
     int32_t queued = __atomic_load_n(&gOGS.forceHostReq, __ATOMIC_ACQUIRE);
     NSString *details = [NSString stringWithFormat:
         @"غرفة: %@ | المالك حسب اللعبة: %@\n"
-         "تحديث اللعبة: %@\n"
+         "تحديث Cash/Chat القديم فقط: %@\n"
          "آخر تحديث منذ: %@\n"
          "Cash hook: %@ | خانة قابلة للكتابة: %@\n"
          "Chat hook: %@ | خانة قابلة للكتابة: %@\n"
@@ -4503,6 +4541,7 @@ static void OGSInstallHooks(void) {
         chatHook ? @"مركب" : (chatReadable ? @"غير مركب" : @"غير قابل للقراءة"),
         chatWritable ? @"نعم" : @"لا",
         queued ? @"نعم" : @"لا"];
+    details = [details stringByAppendingFormat:@"\nOGS51 bounded request trace:\n%@", ogs46::trace51Text()];
     details = [details stringByAppendingFormat:
         @"\nStage22: legacy chat hooks DISABLED (wrong constructor slots)"
          "\nOnEvent install failures=%u | Update install failures=%u"
@@ -4641,7 +4680,7 @@ static void OGSInstallHooks(void) {
          "\nName change is SELF-only; local readback is not server acknowledgement."
          "\nOGS36 shield: enabled=%u | damage callbacks=%u | local bypass=%u"
          "\nOther player passes=%u | unknown owner passes=%u"
-         "\nShield toggle has NO MasterClient requirement. Grenade path unproven.",
+         "\nToggle is unrestricted; protection requires verified local MasterClient + alive identity. Not non-host immunity.",
         __atomic_load_n(&gOGSSelfNicknameQueuedCount, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSSelfNicknameLocalApplied, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSSelfNicknameRejected, __ATOMIC_RELAXED),
@@ -4706,7 +4745,7 @@ static void OGSInstallHooks(void) {
             __atomic_load_n(&gOGS44PreFlagUnknown[i], __ATOMIC_RELAXED)];
     }
     details = [details stringByAppendingString:
-        @"\nOGS45 explosion protection: local actor + master + alive + hidden/closed room only. "
+        @"\nOGS45 explosion protection: verified local actor + master + alive; no privacy or crowd-size gate. "
          "Other and unknown calls forward. Remote authority and server response not verified."];
     details = [details stringByAppendingFormat:
         @"\nOGS45 local explosion blocks near/far/C4near/C4far=%u/%u/%u/%u",
@@ -5333,6 +5372,30 @@ static void OGSInstallHooks(void) {
     if (root && !root.presentedViewController)
         [root presentViewController:dialog animated:YES completion:nil];
     else self.statusLabel.text = @"أغلق النوافذ المفتوحة ثم أعد المحاولة";
+}
+
+- (void)refreshTraining51Marker {
+    os_unfair_lock_lock(&ogs46::lock);ogs46::Training51 lab=ogs46::training51;os_unfair_lock_unlock(&ogs46::lock);
+    CGRect bounds = self.containerView.bounds;
+    BOOL markerOK = lab.armed && ogs51::visible(lab.point, ogs46::now()-lab.sampleAt);
+    CGRect marker = CGRectMake(lab.point.x*bounds.size.width-38,
+        (1-lab.point.y)*bounds.size.height-20, 76, 20);
+    // Keep edge controls clear; the label never captures touches.
+    CGRect safe = CGRectMake(76, 24, MAX(0, bounds.size.width-230), MAX(0, bounds.size.height-112));
+    markerOK = markerOK && CGRectContainsRect(safe, marker) &&
+        (self.flightPad.hidden || !CGRectIntersectsRect(marker, self.flightPad.frame)) &&
+        (self.menuPanel.hidden || !CGRectIntersectsRect(marker, self.menuPanel.frame));
+    self.training51Marker.hidden = !markerOK;
+    if (markerOK) {self.training51Marker.frame=marker;
+        self.training51Marker.text=[NSString stringWithFormat:@"◆ #%d",lab.target];}
+}
+
+- (void)toggleTraining51:(UIButton *)sender {
+    (void)sender;
+    OGSRoomSnapshot peers=OGSCurrentSnapshot();
+    uint32_t ix=__atomic_load_n(&gOGS.selectedPeer,__ATOMIC_ACQUIRE);
+    int target=peers.inRoom && ix<peers.count ? peers.peers[ix].actorID : 0;
+    ogs46::training51Toggle(target);
 }
 
 - (void)changeSelectedTeam:(UIButton *)sender {
