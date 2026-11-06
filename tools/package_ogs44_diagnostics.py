@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build an unsigned, observation-only OGS44 test IPA from exact OGS34 input.
+"""Build an unsigned experimental IPA with OGS44-compatible stubs from exact OGS34 input.
 
 The four new native bridges preserve the original first ARM64 instruction and
 fall through to the unmodified function if no callback is installed. Device,
@@ -99,7 +99,7 @@ def main():
             os.replace(tmp,a.output)
         finally:
             if os.path.exists(tmp): os.unlink(tmp)
-    print('PASS unsigned diagnostic IPA',a.output)
+    print('PASS unsigned experimental IPA',a.output)
     print('game SHA256',digest(game),'dylib SHA256',digest(dylib))
     print('NOT VERIFIED: Apple signature, installation, iOS runtime, network behavior')
 
