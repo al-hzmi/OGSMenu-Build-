@@ -498,6 +498,9 @@ typedef struct {
     bool    isHost;
     void    *playerObject; 
     char    name[OGS_MAX_NAME_BYTES];
+    // PhotonPlayer.get_UserId (fps 3.4.0 RVA 0x13D693C) loads player+0x20.
+    // May be empty when PublishUserId is disabled; never synthesize identity.
+    char    userId[OGS_MAX_NAME_BYTES];
 } OGSPeerSnapshot;
 
 typedef struct {
@@ -525,6 +528,65 @@ static OGSRoomSnapshot OGSCurrentSnapshot(void) {
     return out;
 }
 
+struct OGSUserIdCacheEntry {
+    uintptr_t player = 0;
+    int32_t actor = 0;
+    double lastProbe = 0.;
+    char value[OGS_MAX_NAME_BYTES] = {};
+};
+static os_unfair_lock gOGSUserIdCacheLock = OS_UNFAIR_LOCK_INIT;
+static OGSUserIdCacheEntry gOGSUserIdCache[OGS_MAX_PEERS];
+static uint32_t gOGSUserIdCacheReplace = 0;
+static volatile uint32_t gOGSNameStableIdsAvailable = 0;
+static volatile uint32_t gOGSNameNotifications = 0;
+
+static void OGSReadCachedPeerUserId(void *player, int32_t actor,
+                                   char output[OGS_MAX_NAME_BYTES]) {
+    if (!output) return;
+    output[0] = '\0';
+    if ((uintptr_t)player < 0x100000000ULL || actor <= 0) return;
+    double time = CACurrentMediaTime();
+    int slot = -1;
+    os_unfair_lock_lock(&gOGSUserIdCacheLock);
+    for (int i=0; i<OGS_MAX_PEERS; ++i)
+        if (gOGSUserIdCache[i].player == (uintptr_t)player &&
+            gOGSUserIdCache[i].actor == actor) { slot = i; break; }
+    if (slot < 0) {
+        slot = (int)(gOGSUserIdCacheReplace++ % OGS_MAX_PEERS);
+        gOGSUserIdCache[slot] = {};
+        gOGSUserIdCache[slot].player = (uintptr_t)player;
+        gOGSUserIdCache[slot].actor = actor;
+    }
+    OGSUserIdCacheEntry &entry = gOGSUserIdCache[slot];
+    if (entry.value[0]) {
+        snprintf(output, OGS_MAX_NAME_BYTES, "%s", entry.value);
+        os_unfair_lock_unlock(&gOGSUserIdCacheLock);
+        return;
+    }
+    // One read per 3 seconds for IDs not yet published, rather than rereading
+    // every peer's managed string on every (roughly 6 Hz) roster sample.
+    bool due = entry.lastProbe <= 0. || time-entry.lastProbe >= 3.0;
+    if (due) entry.lastProbe = time;
+    os_unfair_lock_unlock(&gOGSUserIdCacheLock);
+    if (!due) return;
+    int32_t currentActor = 0;
+    void *userObject = NULL;
+    if (!OGSReadMemory((uintptr_t)player + 0x10,&currentActor,sizeof(currentActor)) ||
+        currentActor != actor ||
+        !OGSReadPointer((uintptr_t)player + 0x20,&userObject) || !userObject) return;
+    NSString *uid = OGSReadIl2CppString(userObject);
+    const char *utf8 = uid.UTF8String;
+    if (!utf8 || !utf8[0] || strlen(utf8) >= OGS_MAX_NAME_BYTES) return;
+    os_unfair_lock_lock(&gOGSUserIdCacheLock);
+    // A new player may have replaced the cache slot while VM was read.
+    if (gOGSUserIdCache[slot].player == (uintptr_t)player &&
+        gOGSUserIdCache[slot].actor == actor) {
+        snprintf(gOGSUserIdCache[slot].value, OGS_MAX_NAME_BYTES, "%s", utf8);
+        snprintf(output, OGS_MAX_NAME_BYTES, "%s", utf8);
+    }
+    os_unfair_lock_unlock(&gOGSUserIdCacheLock);
+}
+
 static bool OGSReadPeer(void *peer, void *master, OGSPeerSnapshot *output) {
     if (!peer || (uintptr_t)peer < 0x100000000ULL || !output) return false;
     memset(output, 0, sizeof(*output));
@@ -541,6 +603,7 @@ static bool OGSReadPeer(void *peer, void *master, OGSPeerSnapshot *output) {
     output->actorID = ((PlayerGetIDFn)idAddress)(peer, NULL);
     void *nameObject = ((PlayerGetNameFn)nameAddress)(peer, NULL);
     NSString *name = OGSReadIl2CppString(nameObject);
+    OGSReadCachedPeerUserId(peer, output->actorID, output->userId);
 
     if (!name.length) {
         snprintf(output->name, sizeof(output->name), "ID:%d", output->actorID);
@@ -1410,15 +1473,25 @@ static void OGSProcessSpeed(void) {
 @property (strong, nonatomic) UIButton *antiKickLockButton;
 @property (strong, nonatomic) UIButton *muteChatButton;
 @property (strong, nonatomic) UIButton *speedSetButton;
+@property (strong, nonatomic) UIButton *moreButton;
+@property (strong, nonatomic) NSMutableArray<UIView *> *advancedControls;
+@property (assign, nonatomic) BOOL advancedVisible;
+@property (strong, nonatomic) UILabel *nameChangeToast;
+@property (assign, nonatomic) NSUInteger toastSequence;
+@property (assign, nonatomic) uint64_t handoffNoticeVersion;
 @property (strong, nonatomic) NSMutableSet<NSString *> *bannedNames;
 @property (strong, nonatomic) NSMutableSet<NSNumber *> *bannedActorIDs;
 @property (strong, nonatomic) NSMutableSet<NSString *> *allowedNamesWhenLocked;
 @property (assign, nonatomic) BOOL roomLockActive;
 @property (strong, nonatomic) NSTimer *masterTimer;
-// Names observed for the same actor *in this room session only*.
-// Actor numbers can change after rejoining and are not user identities.
-@property (strong, nonatomic) NSMutableDictionary<NSNumber *, NSMutableArray<NSString *> *> *sessionNameHistory;
+// Prefer a nonempty Photon UserId, if the room publishes one; otherwise the
+// room-scoped actor ID is a fallback, never proof of identity after rejoin.
+@property (strong, nonatomic) NSMutableDictionary<NSString *, NSMutableArray<NSString *> *> *sessionNameHistory;
+@property (strong, nonatomic) NSMutableDictionary<NSString *, NSString *> *sessionNameCandidates;
+@property (strong, nonatomic) NSMutableDictionary<NSString *, NSNumber *> *sessionNameCandidateSamples;
+@property (strong, nonatomic) NSMutableDictionary<NSString *, NSNumber *> *sessionNameLastActor;
 @property (assign, nonatomic) uintptr_t sessionNameRoom;
+@property (assign, nonatomic) int32_t sessionNameLocalActor;
 + (instancetype)sharedInstance;
 - (void)setupMenu;
 - (void)ensureMenuVisible;
@@ -2703,6 +2776,7 @@ static void OGSProcessRoomCapacityOnPhotonThread(void) {
 }
 
 namespace ogs46 { static void originalClientTeamPhotonTick(); static void originalClientTeamObserveEvent(void *); static void training51PhotonTick(); }
+static void OGSProcessHostHandoffOnPhotonThread(void);
 
 // Executed on the game's Unity/PUN Update thread, never from the UIKit
 // menu timer. Makes standalone room privacy possible with zero other players.
@@ -2729,6 +2803,7 @@ static void hook_PhotonHandlerUpdate(void *self, void *method) {
         OGSProcessRoomPrivacyOnEvent();
     OGSProcessSelfNicknameOnPhotonThread();
     OGSProcessRoomCapacityOnPhotonThread();
+    OGSProcessHostHandoffOnPhotonThread();
     // Original-client team changes are Photon player-property operations.
     // Do not strand queued requests behind an inactive RoomController.Update.
     ogs46::originalClientTeamPhotonTick();
@@ -3329,6 +3404,106 @@ static void OGS44InstallExplosionDiagnostics(void) {
 
 #include "OGSGameplayRuntime.h"
 
+// A deliberate, one-shot MasterClient handoff. Queued by UIKit and executed
+// only by PhotonHandler.Update; no IL2CPP call is made from the touch handler.
+// The game server may refuse this request. "true" is submission, not an ACK.
+struct OGSHostHandoff {
+    uintptr_t room = 0;
+    int32_t actor = 0;
+    int32_t target = 0;
+};
+static os_unfair_lock gOGSHandoffLock = OS_UNFAIR_LOCK_INIT;
+static OGSHostHandoff gOGSHandoffPending;
+static double gOGSHandoffLastQueued = -100.;
+static NSString *gOGSHandoffMessage = @"";
+static uint64_t gOGSHandoffStatusVersion = 0;
+
+static NSString *OGSHostHandoffStatus(void) {
+    os_unfair_lock_lock(&gOGSHandoffLock);
+    NSString *s = gOGSHandoffMessage;
+    os_unfair_lock_unlock(&gOGSHandoffLock);
+    return s;
+}
+
+static bool OGSQueueHostHandoff(int32_t target) {
+    uintptr_t room = 0;
+    int32_t actor = 0, master = 0;
+    OGSRoomSnapshot peers = OGSCurrentSnapshot();
+    bool valid = OGSReadAutoRoom(&room, &actor, &master) &&
+        room && actor > 0 && master == actor && target > 0 && target != actor &&
+        peers.inRoom && peers.roomAddress == room;
+    int matches = 0;
+    if (valid) for (uint32_t i=0; i<peers.count; ++i)
+        if (peers.peers[i].actorID == target) ++matches;
+    if (!valid || matches != 1) {
+        os_unfair_lock_lock(&gOGSHandoffLock);
+        gOGSHandoffMessage = @"تسليم الهوست يتطلب أن تكون المالك وتختار لاعبًا موجودًا";
+        ++gOGSHandoffStatusVersion;
+        os_unfair_lock_unlock(&gOGSHandoffLock);
+        return false;
+    }
+    double t = CFAbsoluteTimeGetCurrent();
+    os_unfair_lock_lock(&gOGSHandoffLock);
+    bool ready = !gOGSHandoffPending.room && t-gOGSHandoffLastQueued >= 3.0;
+    if (ready) {
+        gOGSHandoffPending = {room,actor,target};
+        gOGSHandoffLastQueued = t;
+        gOGSHandoffMessage = @"تسليم الهوست في انتظار إطار Photon؛ لا يوجد تأكيد من السيرفر";
+    } else gOGSHandoffMessage = @"طلب التسليم السابق قيد التنفيذ؛ انتظر قليلًا";
+    ++gOGSHandoffStatusVersion;
+    os_unfair_lock_unlock(&gOGSHandoffLock);
+    if (ready) {
+        // An explicit handoff must not race an armed automatic host recovery.
+        OGSDisarmAutoRoom();
+        __atomic_store_n(&gOGSManualRecoveryPending, 0u, __ATOMIC_RELEASE);
+        __atomic_store_n(&gOGS.forceHostReq, 0, __ATOMIC_RELEASE);
+    }
+    return ready;
+}
+
+static void OGSProcessHostHandoffOnPhotonThread(void) {
+    os_unfair_lock_lock(&gOGSHandoffLock);
+    OGSHostHandoff request = gOGSHandoffPending;
+    gOGSHandoffPending = {};
+    os_unfair_lock_unlock(&gOGSHandoffLock);
+    if (!request.room) return;
+    uintptr_t room = 0;
+    int32_t actor = 0, master = 0;
+    bool valid = OGSReadAutoRoom(&room,&actor,&master) &&
+        room == request.room && actor == request.actor && master == actor &&
+        request.target != actor;
+    OGSRoomSnapshot roster = OGSCurrentSnapshot();
+    int matches = 0;
+    if (valid && roster.inRoom && roster.roomAddress == room)
+        for (uint32_t i=0; i<roster.count; ++i)
+            if (roster.peers[i].actorID == request.target) ++matches;
+    if (!valid || matches != 1) {
+        os_unfair_lock_lock(&gOGSHandoffLock);
+        gOGSHandoffMessage = @"أُلغي التسليم: تغير المالك أو اللاعب أو الجلسة";
+        ++gOGSHandoffStatusVersion;
+        os_unfair_lock_unlock(&gOGSHandoffLock);
+        return;
+    }
+    void *target = ogs46::findActor(request.target);
+    uintptr_t slot = OGSResolveRVA(gOffsets.tblSetMaster);
+    void *setMaster = nullptr;
+    if (!target || !slot || !OGSReadPointer(slot,&setMaster) ||
+        !setMaster || !OGSIsExecutableGameAddress((uintptr_t)setMaster)) {
+        os_unfair_lock_lock(&gOGSHandoffLock);
+        gOGSHandoffMessage = @"تعذر تسليم الهوست: دالة Photon أو الهدف غير متاح";
+        ++gOGSHandoffStatusVersion;
+        os_unfair_lock_unlock(&gOGSHandoffLock);
+        return;
+    }
+    bool submitted = ((PeerAction1Fn)setMaster)(target,NULL);
+    os_unfair_lock_lock(&gOGSHandoffLock);
+    gOGSHandoffMessage = submitted ?
+        @"أُرسل طلب تسليم الهوست؛ تأكد من الحساب الآخر، ولا عودة تلقائية" :
+        @"رفضت واجهة اللعبة طلب تسليم الهوست؛ لم يُثبت انتقاله";
+    ++gOGSHandoffStatusVersion;
+    os_unfair_lock_unlock(&gOGSHandoffLock);
+}
+
 static bool OGSIsWritableMappedSlot(uintptr_t address) {
     if (address < 0x100000000ULL || (address & (sizeof(void *) - 1))) return false;
     vm_address_t regionAddress = (vm_address_t)address;
@@ -3650,6 +3825,7 @@ static void OGSRefreshReadOnlyRoster(void) {
         p->isHost = id == master;
         p->playerObject = NULL; // no managed pointers survive into UI snapshot
         snprintf(p->name, sizeof(p->name), "%s", name.UTF8String ?: "");
+        OGSReadCachedPeerUserId(player, id, p->userId);
     }
     uintptr_t roomAfter = 0;
     if (!OGSReadMemory((uintptr_t)netPeer + 0x158, &roomAfter, sizeof(roomAfter)) ||
@@ -3852,6 +4028,10 @@ static void OGSInstallHooks(void) {
         inst.bannedActorIDs = [NSMutableSet set];
         inst.allowedNamesWhenLocked = [NSMutableSet set];
         inst.sessionNameHistory = [NSMutableDictionary dictionary];
+        inst.sessionNameCandidates = [NSMutableDictionary dictionary];
+        inst.sessionNameCandidateSamples = [NSMutableDictionary dictionary];
+        inst.sessionNameLastActor = [NSMutableDictionary dictionary];
+        inst.advancedControls = [NSMutableArray array];
         NSArray *savedBans = [[NSUserDefaults standardUserDefaults] stringArrayForKey:@"OGS_SavedBannedNames"];
         if (savedBans) [inst.bannedNames addObjectsFromArray:savedBans];
     });
@@ -3974,21 +4154,21 @@ static void OGSInstallHooks(void) {
         [self.floatingButton addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)]];
         [self.containerView addSubview:self.floatingButton];
 
-        CGFloat menuViewportHeight = MIN(358.0, MAX(160.0, CGRectGetHeight(gw.bounds) - 26.0));
-        CGFloat menuX = MAX(8.0, MIN(75.0, CGRectGetWidth(gw.bounds) - 323.0));
-        self.menuPanel = [[UIScrollView alloc] initWithFrame:CGRectMake(menuX, 18, 315, menuViewportHeight)];
-        self.menuPanel.contentSize = CGSizeMake(315, 750);
+        CGFloat menuViewportHeight = MIN(332.0, MAX(160.0, CGRectGetHeight(gw.bounds) - 20.0));
+        CGFloat menuX = MAX(8.0, MIN(70.0, CGRectGetWidth(gw.bounds) - 298.0));
+        self.menuPanel = [[UIScrollView alloc] initWithFrame:CGRectMake(menuX, 12, 290, menuViewportHeight)];
+        self.menuPanel.contentSize = CGSizeMake(290, 353);
         self.menuPanel.alwaysBounceVertical = NO;
-        self.menuPanel.showsVerticalScrollIndicator = YES;
+        self.menuPanel.showsVerticalScrollIndicator = NO;
         self.menuPanel.clipsToBounds = YES;
         self.menuPanel.backgroundColor = [UIColor colorWithRed:0.09 green:0.09 blue:0.11 alpha:0.96];
-        self.menuPanel.layer.cornerRadius = 14.0;
-        self.menuPanel.layer.borderWidth = 2.0f;
-        self.menuPanel.layer.borderColor = [UIColor systemRedColor].CGColor;
+        self.menuPanel.layer.cornerRadius = 12.0;
+        self.menuPanel.layer.borderWidth = 1.0f;
+        self.menuPanel.layer.borderColor = [UIColor colorWithWhite:0.45 alpha:0.65].CGColor;
         self.menuPanel.hidden = YES;
 
-        self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 5, 260, 18)];
-        self.titleLabel.text = @"OGS50 | تحكم سريع + طيران قابل للسحب";
+        self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(8, 5, 240, 18)];
+        self.titleLabel.text = @"OGS53";
         self.titleLabel.textColor = [UIColor whiteColor];
         self.titleLabel.textAlignment = NSTextAlignmentCenter;
         self.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
@@ -3996,24 +4176,24 @@ static void OGSInstallHooks(void) {
         [self.titleLabel addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(showHookDiagnostics:)]];
         [self.menuPanel addSubview:self.titleLabel];
 
-        self.syncCloudButton = [self makeBtn:CGRectMake(273, 3, 32, 21)
+        self.syncCloudButton = [self makeBtn:CGRectMake(255, 3, 27, 21)
                                        title:@"🔄"
                                           bg:[UIColor colorWithRed:0.18 green:0.45 blue:0.75 alpha:1.0]
                                       action:@selector(syncCloudTapped:)];
         [self.menuPanel addSubview:self.syncCloudButton];
 
-        UIView *infoBox = [[UIView alloc] initWithFrame:CGRectMake(10, 25, 295, 40)];
+        UIView *infoBox = [[UIView alloc] initWithFrame:CGRectMake(8, 25, 274, 40)];
         infoBox.backgroundColor = [UIColor colorWithRed:0.16 green:0.17 blue:0.20 alpha:1.0];
         infoBox.layer.cornerRadius = 8.0;
 
-        self.playerLabel = [[UILabel alloc] initWithFrame:CGRectMake(6, 2, 283, 18)];
+        self.playerLabel = [[UILabel alloc] initWithFrame:CGRectMake(6, 2, 262, 18)];
         self.playerLabel.text = @"المحدد: لا يوجد لاعبين";
         self.playerLabel.textColor = [UIColor systemYellowColor];
         self.playerLabel.textAlignment = NSTextAlignmentCenter;
         self.playerLabel.font = [UIFont boldSystemFontOfSize:12.0];
         [infoBox addSubview:self.playerLabel];
 
-        self.statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(6, 20, 283, 17)];
+        self.statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(6, 20, 262, 17)];
         self.statusLabel.text = @"الغرفة: غير متصل";
         self.statusLabel.textColor = [UIColor systemGreenColor];
         self.statusLabel.textAlignment = NSTextAlignmentCenter;
@@ -4023,20 +4203,18 @@ static void OGSInstallHooks(void) {
 
         UIColor *darkGray   = [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
         UIColor *kickOrange = [UIColor colorWithRed:0.80 green:0.35 blue:0.10 alpha:1.0];
-        UIColor *banRed     = [UIColor colorWithRed:0.70 green:0.12 blue:0.15 alpha:1.0];
         UIColor *hostBlue   = [UIColor colorWithRed:0.14 green:0.42 blue:0.72 alpha:1.0];
-        UIColor *wpnGreen   = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
 
         NSArray *teams = @[@"المحدد: مشاهد", @"المحدد: شرطة", @"المحدد: لصوص"];
         for (NSInteger i = 0; i < 3; ++i) {
-            UIButton *b = [self makeBtn:CGRectMake(10 + 100*i, 472, 95, 30)
+            UIButton *b = [self makeBtn:CGRectMake(8 + 93*i, 105, 88, 31)
                 title:teams[i] bg:hostBlue action:@selector(changeSelectedTeam:)];
             b.tag = i; [self.menuPanel addSubview:b];
         }
-        self.flightButton = [self makeBtn:CGRectMake(10, 507, 295, 30)
+        self.flightButton = [self makeBtn:CGRectMake(8, 177, 134, 30)
             title:@"الطيران: إيقاف" bg:darkGray action:@selector(toggleSelfFlight:)];
         [self.menuPanel addSubview:self.flightButton];
-        self.gameplayLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 540, 295, 40)];
+        self.gameplayLabel = [[UILabel alloc] initWithFrame:CGRectMake(8, 526, 274, 36)];
         self.gameplayLabel.font = [UIFont systemFontOfSize:10];
         self.gameplayLabel.textColor = UIColor.whiteColor;
         self.gameplayLabel.textAlignment = NSTextAlignmentCenter;
@@ -4044,43 +4222,25 @@ static void OGSInstallHooks(void) {
         [self.menuPanel addSubview:self.gameplayLabel];
         // Original-client transition requires no receiving control on the other
         // account. Keep the old cooperative receiver disabled and unexposed.
-        self.remoteTeamLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 580, 295, 65)];
+        self.remoteTeamLabel = [[UILabel alloc] initWithFrame:CGRectMake(8, 140, 274, 34)];
         self.remoteTeamLabel.font = [UIFont systemFontOfSize:10];
         self.remoteTeamLabel.textColor = UIColor.whiteColor;
         self.remoteTeamLabel.textAlignment = NSTextAlignmentCenter;
-        self.remoteTeamLabel.numberOfLines = 3;
+        self.remoteTeamLabel.numberOfLines = 2;
         [self.menuPanel addSubview:self.remoteTeamLabel];
-        self.training51Button = [self makeBtn:CGRectMake(10, 650, 295, 30)
-            title:@"مختبر المحدد: علامة + قياس قنابل" bg:darkGray action:@selector(toggleTraining51:)];
-        [self.menuPanel addSubview:self.training51Button];
-        self.training51Label = [[UILabel alloc] initWithFrame:CGRectMake(10, 684, 295, 56)];
-        self.training51Label.font = [UIFont systemFontOfSize:10];
-        self.training51Label.textColor = UIColor.whiteColor;
-        self.training51Label.textAlignment = NSTextAlignmentCenter;
-        self.training51Label.numberOfLines = 3;
-        [self.menuPanel addSubview:self.training51Label];
-        self.training51Marker = [[UILabel alloc] initWithFrame:CGRectMake(0, 0, 76, 20)];
-        self.training51Marker.font = [UIFont boldSystemFontOfSize:11];
-        self.training51Marker.textAlignment = NSTextAlignmentCenter;
-        self.training51Marker.textColor = UIColor.cyanColor;
-        self.training51Marker.backgroundColor = [UIColor colorWithWhite:0 alpha:.55];
-        self.training51Marker.userInteractionEnabled = NO;
-        self.training51Marker.hidden = YES;
-        [self.containerView insertSubview:self.training51Marker atIndex:0];
-        self.training51DisplayLink=[CADisplayLink displayLinkWithTarget:self selector:@selector(refreshTraining51Marker)];
-        self.training51DisplayLink.preferredFramesPerSecond=30;
-        [self.training51DisplayLink addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
+        // The experimental marker/debug button was visual noise; background
+        // instrumentation stays intact without a 30 FPS HUD display link.
         // The stock game's aim/fire controls occupy the far-right edge (as
         // shown by the supplied landscape screenshot). Default this compact
         // pad well to their left; the grip lets the owner move it freely.
-        const CGFloat padW = 46.0, padH = 106.0;
+        const CGFloat padW = 36.0, padH = 86.0;
         CGFloat maxX = MAX(0.0, CGRectGetWidth(gw.bounds) - padW - 4.0);
         CGFloat maxY = MAX(0.0, CGRectGetHeight(gw.bounds) - padH - 4.0);
-        CGFloat flightX = MIN(maxX, MAX(4.0, CGRectGetWidth(gw.bounds) - 185.0));
-        CGFloat flightY = MIN(maxY, 80.0);
+        CGFloat flightX = MIN(maxX, MAX(4.0, CGRectGetWidth(gw.bounds) - 202.0));
+        CGFloat flightY = MIN(maxY, 30.0);
         NSUserDefaults *flightPrefs = NSUserDefaults.standardUserDefaults;
-        NSNumber *savedX = [flightPrefs objectForKey:@"ogs50.flightPadX"];
-        NSNumber *savedY = [flightPrefs objectForKey:@"ogs50.flightPadY"];
+        NSNumber *savedX = [flightPrefs objectForKey:@"ogs53.flightPadX"];
+        NSNumber *savedY = [flightPrefs objectForKey:@"ogs53.flightPadY"];
         if (savedX && savedY) {
             flightX = MIN(maxX, MAX(0.0, savedX.doubleValue * maxX));
             flightY = MIN(maxY, MAX(0.0, savedY.doubleValue * maxY));
@@ -4089,19 +4249,19 @@ static void OGSInstallHooks(void) {
         self.flightPad.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
         self.flightPad.hidden = YES;
         UIButton *flightGrip = [UIButton buttonWithType:UIButtonTypeCustom];
-        flightGrip.frame = CGRectMake(2, 0, 42, 18);
+        flightGrip.frame = CGRectMake(2, 0, 32, 15);
         flightGrip.backgroundColor = [UIColor colorWithWhite:0.1 alpha:0.72];
         flightGrip.layer.cornerRadius = 6.0;
         [flightGrip setTitle:@"⋮⋮" forState:UIControlStateNormal];
-        flightGrip.titleLabel.font = [UIFont boldSystemFontOfSize:12];
+        flightGrip.titleLabel.font = [UIFont boldSystemFontOfSize:10];
         flightGrip.accessibilityLabel = @"اسحب لتغيير مكان أزرار الطيران";
         [flightGrip addGestureRecognizer:[[UIPanGestureRecognizer alloc]
             initWithTarget:self action:@selector(moveFlightPad:)]];
         [self.flightPad addSubview:flightGrip];
         for (NSInteger i = 0; i < 2; ++i) {
-            UIButton *b = [self makeBtn:CGRectMake(2, 20 + i*43, 42, 40)
+            UIButton *b = [self makeBtn:CGRectMake(2, 17 + i*34, 32, 32)
                 title:i == 0 ? @"▲" : @"▼" bg:hostBlue action:@selector(stopFlightAxis:)];
-            b.layer.cornerRadius = 10.0;
+            b.layer.cornerRadius = 8.0;
             b.tag = i == 0 ? 1 : -1;
             [b addTarget:self action:@selector(startFlightAxis:) forControlEvents:UIControlEventTouchDown];
             [b addTarget:self action:@selector(stopFlightAxis:) forControlEvents:
@@ -4110,6 +4270,20 @@ static void OGSInstallHooks(void) {
         }
         [self.containerView addSubview:self.flightPad];
         self.containerView.flightPad = self.flightPad;
+        self.nameChangeToast = [[UILabel alloc] initWithFrame:CGRectMake(
+            MAX(8.0, (CGRectGetWidth(gw.bounds)-320.0)/2.0), 67, 320, 37)];
+        self.nameChangeToast.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin |
+            UIViewAutoresizingFlexibleRightMargin;
+        self.nameChangeToast.backgroundColor = [UIColor colorWithRed:.08 green:.26 blue:.21 alpha:.94];
+        self.nameChangeToast.textColor = UIColor.whiteColor;
+        self.nameChangeToast.textAlignment = NSTextAlignmentCenter;
+        self.nameChangeToast.font = [UIFont boldSystemFontOfSize:11.0];
+        self.nameChangeToast.numberOfLines = 2;
+        self.nameChangeToast.layer.cornerRadius = 9.0;
+        self.nameChangeToast.layer.masksToBounds = YES;
+        self.nameChangeToast.userInteractionEnabled = NO;
+        self.nameChangeToast.hidden = YES;
+        [self.containerView addSubview:self.nameChangeToast];
         [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationWillResignActiveNotification
             object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
                 ogs46::stopFlight();
@@ -4118,65 +4292,65 @@ static void OGSInstallHooks(void) {
             }];
 
 
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(10, 70, 95, 30) title:@"▶ السابق" bg:darkGray action:@selector(prevPlayer:)]];
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(110, 70, 95, 30) title:@"سحب الهوست 👑" bg:hostBlue action:@selector(claimHostNow:)]];
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(210, 70, 95, 30) title:@"التالي ◀" bg:darkGray action:@selector(nextPlayer:)]];
+        // One-hand workflow: choose player, then choose spectator/police/thief
+        // without scrolling past irrelevant debugging or unused hook buttons.
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(8, 69, 84, 30)
+            title:@"◀ السابق" bg:darkGray action:@selector(prevPlayer:)]];
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(98, 69, 94, 30)
+            title:@"سحب الهوست 👑" bg:hostBlue action:@selector(claimHostNow:)]];
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(198, 69, 84, 30)
+            title:@"التالي ▶" bg:darkGray action:@selector(nextPlayer:)]];
 
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(161, 105, 144, 32) title:@"طرد المحدد فقط" bg:kickOrange action:@selector(kickSelected:)]];
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(10, 105, 144, 32) title:@"طرد وحظر (Ban)" bg:banRed action:@selector(banSelected:)]];
-
-        self.hostLockButton = [self makeBtn:CGRectMake(155, 142, 150, 32) title:@"استعادة تلقائية: إيقاف" bg:darkGray action:@selector(toggleAutoHost:)];
-        [self.menuPanel addSubview:self.hostLockButton];
-
-        self.antiKickLockButton = [self makeBtn:CGRectMake(10, 142, 140, 32) title:@"قفل البقاء: تلقائي 🛡️" bg:darkGray action:@selector(toggleAntiKickHardLock:)];
-        [self.menuPanel addSubview:self.antiKickLockButton];
-
-        self.godModeButton = [self makeBtn:CGRectMake(155, 179, 150, 30) title:@"درع الحماية: متوقف 🛡️" bg:darkGray action:@selector(toggleGodMode:)];
+        self.godModeButton = [self makeBtn:CGRectMake(148, 177, 134, 30)
+            title:@"الدرع: إيقاف" bg:darkGray action:@selector(toggleGodMode:)];
         [self.menuPanel addSubview:self.godModeButton];
-
-        self.magicBulletButton = [self makeBtn:CGRectMake(10, 179, 140, 30) title:@"مدى السكين: إيقاف" bg:darkGray action:@selector(cycleKnife29:)];
-        [self.menuPanel addSubview:self.magicBulletButton];
-
-        self.muteChatButton = [self makeBtn:CGRectMake(105, 214, 95, 30) title:@"الشات: معطل مؤقتًا" bg:darkGray action:@selector(cycleChatMode:)];
-        [self.menuPanel addSubview:self.muteChatButton];
-
-        self.unbanButton = [self makeBtn:CGRectMake(10, 214, 90, 30) title:@"فك الحظر (0)" bg:darkGray action:@selector(clearBanList:)];
-        [self.menuPanel addSubview:self.unbanButton];
-
-        self.lockButton = [self makeBtn:CGRectMake(205, 214, 100, 30) title:@"حظر محلي: إيقاف" bg:darkGray action:@selector(toggleRoomLock:)];
-        [self.menuPanel addSubview:self.lockButton];
-
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(10, 249, 55, 30) title:@"سرعة -" bg:darkGray action:@selector(speedDown:)]];
-        self.speedSetButton = [self makeBtn:CGRectMake(70, 249, 175, 30) title:@"السرعة: 1.0x (اضغط للكتابة)" bg:hostBlue action:@selector(promptCustomSpeed:)];
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(8, 212, 52, 29)
+            title:@"−" bg:darkGray action:@selector(speedDown:)]];
+        self.speedSetButton = [self makeBtn:CGRectMake(65, 212, 160, 29)
+            title:@"السرعة: 1.0x" bg:hostBlue action:@selector(promptCustomSpeed:)];
         [self.menuPanel addSubview:self.speedSetButton];
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(250, 249, 55, 30) title:@"سرعة +" bg:darkGray action:@selector(speedUp:)]];
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(10, 284, 144, 30)
-            title:@"نسخ اسم المحدد 📋" bg:hostBlue action:@selector(copySelectedName:)]];
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(161, 284, 144, 30)
-            title:@"أسماء نفس الجلسة" bg:darkGray action:@selector(showSelectedNameHistory:)]];
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(230, 212, 52, 29)
+            title:@"+" bg:darkGray action:@selector(speedUp:)]];
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(8, 246, 134, 31)
+            title:@"إعطاء الهوست للمحدد 👑" bg:hostBlue action:@selector(giveHostToSelected:)]];
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(148, 246, 134, 31)
+            title:@"طرد المحدد" bg:kickOrange action:@selector(kickSelected:)]];
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(8, 282, 134, 30)
+            title:@"نسخ اسم المحدد" bg:darkGray action:@selector(copySelectedName:)]];
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(148, 282, 134, 30)
+            title:@"تغيير اسمي" bg:darkGray action:@selector(promptSelfNickname:)]];
 
-        // Exactly two optional privacy choices; tapping the active choice
-        // again restores the public and joinable default.
-        self.privacyHiddenButton = [self makeBtn:CGRectMake(10, 319, 144, 30)
+        self.moreButton = [self makeBtn:CGRectMake(8, 317, 274, 29)
+            title:@"المزيد من إعدادات الروم ▾" bg:darkGray action:@selector(toggleAdvancedMenu:)];
+        [self.menuPanel addSubview:self.moreButton];
+        void (^addAdvanced)(UIView *) = ^(UIView *view) {
+            view.hidden = YES;
+            [self.advancedControls addObject:view];
+            [self.menuPanel addSubview:view];
+        };
+        self.hostLockButton = [self makeBtn:CGRectMake(148, 352, 134, 30)
+            title:@"استعادة تلقائية: إيقاف" bg:darkGray action:@selector(toggleAutoHost:)];
+        addAdvanced(self.hostLockButton);
+        self.antiKickLockButton = [self makeBtn:CGRectMake(8, 352, 134, 30)
+            title:@"قفل البقاء: تلقائي" bg:darkGray action:@selector(toggleAntiKickHardLock:)];
+        addAdvanced(self.antiKickLockButton);
+        self.privacyHiddenButton = [self makeBtn:CGRectMake(8, 387, 134, 30)
             title:@"مخفي: إيقاف" bg:darkGray action:@selector(togglePrivacyHidden:)];
-        [self.menuPanel addSubview:self.privacyHiddenButton];
-        self.privacyClosedButton = [self makeBtn:CGRectMake(161, 319, 144, 30)
+        addAdvanced(self.privacyHiddenButton);
+        self.privacyClosedButton = [self makeBtn:CGRectMake(148, 387, 134, 30)
             title:@"خاص ومغلق: إيقاف" bg:darkGray action:@selector(togglePrivacyClosed:)];
-        [self.menuPanel addSubview:self.privacyClosedButton];
-
-        // One extra bottom row. No overlapping buttons; scroll down slightly.
-        self.grenade31Button = [self makeBtn:CGRectMake(10, 354, 295, 30)
-            title:@"قنابل متجددة: إيقاف" bg:darkGray
-            action:@selector(toggleGrenade31:)];
-        [self.menuPanel addSubview:self.grenade31Button];
-
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(10, 389, 295, 30)
-            title:@"تغيير اسمي داخل الروم" bg:hostBlue
-            action:@selector(promptSelfNickname:)]];
-
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(10, 424, 295, 30)
-            title:@"تحديد سعة الروم (2–32): زيادة أو نقصان" bg:hostBlue
-            action:@selector(promptRoomCapacity:)]];
+        addAdvanced(self.privacyClosedButton);
+        self.grenade31Button = [self makeBtn:CGRectMake(8, 422, 274, 30)
+            title:@"قنابل متجددة: إيقاف" bg:darkGray action:@selector(toggleGrenade31:)];
+        addAdvanced(self.grenade31Button);
+        addAdvanced([self makeBtn:CGRectMake(8, 457, 274, 30)
+            title:@"سعة الروم (2–32)" bg:hostBlue action:@selector(promptRoomCapacity:)]);
+        addAdvanced([self makeBtn:CGRectMake(8, 492, 274, 30)
+            title:@"سجل الأسماء المرصودة للمحدد" bg:darkGray action:@selector(showSelectedNameHistory:)]);
+        // The stale knife-range, chat-hook and local-ban switches are omitted;
+        // none has a verified working runtime effect in the supplied trace.
+        self.gameplayLabel.hidden = YES;
+        [self.advancedControls addObject:self.gameplayLabel];
 
         [self.containerView addSubview:self.menuPanel];
         self.containerView.floatingButton = self.floatingButton;
@@ -4189,6 +4363,46 @@ static void OGSInstallHooks(void) {
 
         [self fetchGitHubCloudConfigWithFeedback:NO];
     });
+}
+
+- (void)toggleAdvancedMenu:(UIButton *)sender {
+    (void)sender;
+    self.advancedVisible = !self.advancedVisible;
+    for (UIView *view in self.advancedControls) view.hidden = !self.advancedVisible;
+    self.menuPanel.contentSize = CGSizeMake(290, self.advancedVisible ? 568 : 353);
+    [self.moreButton setTitle:self.advancedVisible ? @"إخفاء إعدادات الروم ▴" :
+        @"المزيد من إعدادات الروم ▾" forState:UIControlStateNormal];
+    if (!self.advancedVisible) [self.menuPanel setContentOffset:CGPointZero animated:YES];
+}
+
+- (void)showQuickNotice:(NSString *)message {
+    if (!message.length || !self.nameChangeToast) return;
+    NSUInteger token = ++self.toastSequence;
+    self.nameChangeToast.alpha = 1.0f;
+    self.nameChangeToast.text = message;
+    self.nameChangeToast.hidden = NO;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.5 * NSEC_PER_SEC)),
+        dispatch_get_main_queue(), ^{
+            if (self.toastSequence != token) return;
+            [UIView animateWithDuration:0.2 animations:^{ self.nameChangeToast.alpha = 0.0; }
+                completion:^(BOOL finished) { if (finished && self.toastSequence == token) {
+                    self.nameChangeToast.hidden = YES; self.nameChangeToast.alpha = 1.0;
+                }}];
+        });
+}
+
+- (void)giveHostToSelected:(UIButton *)sender {
+    (void)sender;
+    OGSRoomSnapshot peers = OGSCurrentSnapshot();
+    uint32_t ix = __atomic_load_n(&gOGS.selectedPeer,__ATOMIC_ACQUIRE);
+    int32_t target = peers.inRoom && ix < peers.count ? peers.peers[ix].actorID : 0;
+    if (!target || target != self.selectionActor51 ||
+        peers.roomAddress != self.selectionRoom51) {
+        [self showQuickNotice:@"اختر لاعبًا وانتظر تحديث القائمة قبل تسليم الهوست"];
+        return;
+    }
+    OGSQueueHostHandoff(target);
+    [self showQuickNotice:OGSHostHandoffStatus()];
 }
 
 - (void)syncCloudTapped:(UIButton *)sender {
@@ -4295,38 +4509,104 @@ static void OGSInstallHooks(void) {
     }
     [self updateSessionNameHistory];
     [self presentTeamConsentIfNeeded];
+    uint64_t version = 0;
+    NSString *handoff = nil;
+    os_unfair_lock_lock(&gOGSHandoffLock);
+    version = gOGSHandoffStatusVersion;
+    if (version != self.handoffNoticeVersion) handoff = gOGSHandoffMessage;
+    os_unfair_lock_unlock(&gOGSHandoffLock);
+    if (version != self.handoffNoticeVersion) {
+        self.handoffNoticeVersion = version;
+        [self showQuickNotice:handoff];
+    }
 
     if (!self.menuPanel || self.menuPanel.hidden) return;
     [self refreshUI];
 }
 
+- (NSString *)sessionIdentityKey:(const OGSPeerSnapshot *)peer
+                         roster:(const OGSRoomSnapshot *)roster {
+    if (!peer || peer->actorID <= 0) return nil;
+    NSString *uid = [NSString stringWithUTF8String:peer->userId];
+    if (uid.length && roster) {
+        int matches = 0;
+        for (uint32_t i = 0; i < roster->count; ++i)
+            if (strcmp(roster->peers[i].userId, peer->userId) == 0) ++matches;
+        if (matches == 1) return [@"u:" stringByAppendingString:uid];
+    }
+    // The actor fallback cannot identify the same account after reconnect.
+    return [NSString stringWithFormat:@"a:%d", peer->actorID];
+}
+
 - (void)updateSessionNameHistory {
-    // Observations only; never infer an identity across different actor IDs or rooms.
-    uintptr_t room = gOGSRosterLastRoom;
-    if (room != self.sessionNameRoom) {
+    OGSRoomSnapshot snapshot = OGSCurrentSnapshot();
+    // Use the actual published snapshot room: gOGSRosterLastRoom is populated
+    // only by the read-only fallback and can remain zero when Unity Update
+    // is healthy. That caused the previous tracker to appear permanently off.
+    uintptr_t room = snapshot.inRoom ? snapshot.roomAddress : 0;
+    int32_t localActor = snapshot.inRoom ?
+        __atomic_load_n(&gOGSPresenceActorID,__ATOMIC_ACQUIRE) : 0;
+    bool changedLocal = localActor > 0 && self.sessionNameLocalActor > 0 &&
+        localActor != self.sessionNameLocalActor;
+    if (room != self.sessionNameRoom || changedLocal) {
         self.sessionNameRoom = room;
         [self.sessionNameHistory removeAllObjects];
+        [self.sessionNameCandidates removeAllObjects];
+        [self.sessionNameCandidateSamples removeAllObjects];
+        [self.sessionNameLastActor removeAllObjects];
+        os_unfair_lock_lock(&gOGSUserIdCacheLock);
+        for (auto &entry : gOGSUserIdCache) entry = {};
+        gOGSUserIdCacheReplace = 0;
+        os_unfair_lock_unlock(&gOGSUserIdCacheLock);
     }
-    if (!room) return;
-    OGSRoomSnapshot snapshot = OGSCurrentSnapshot();
-    if (!snapshot.inRoom) return;
+    if (localActor > 0) self.sessionNameLocalActor = localActor;
+    if (!room) {
+        self.sessionNameLocalActor = 0;
+        __atomic_store_n(&gOGSNameStableIdsAvailable,0u,__ATOMIC_RELEASE);
+        return;
+    }
+    uint32_t stableIds = 0;
     for (uint32_t i = 0; i < snapshot.count; ++i) {
         const OGSPeerSnapshot *peer = &snapshot.peers[i];
         if (peer->actorID <= 0) continue;
         NSString *name = [NSString stringWithUTF8String:peer->name];
         if (!name.length) continue;
-        NSNumber *actorKey = @(peer->actorID);
-        NSMutableArray<NSString *> *names = self.sessionNameHistory[actorKey];
+        NSString *key = [self sessionIdentityKey:peer roster:&snapshot];
+        if (!key.length) continue;
+        if ([key hasPrefix:@"u:"]) ++stableIds;
+        NSMutableArray<NSString *> *names = self.sessionNameHistory[key];
         if (!names) {
             names = [NSMutableArray arrayWithObject:name];
-            self.sessionNameHistory[actorKey] = names;
-        } else if (![names.lastObject isEqualToString:name] &&
-                   ![names containsObject:name]) {
-            // Keep at most 8 distinct names for this one actor in this room.
+            self.sessionNameHistory[key] = names;
+            self.sessionNameLastActor[key] = @(peer->actorID);
+        } else if ([names.lastObject isEqualToString:name]) {
+            [self.sessionNameCandidates removeObjectForKey:key];
+            [self.sessionNameCandidateSamples removeObjectForKey:key];
+            self.sessionNameLastActor[key] = @(peer->actorID);
+        } else {
+            // Require two consecutive consistent snapshots: roster updates
+            // can briefly show stale/uninitialized names during scene changes.
+            NSString *candidate = self.sessionNameCandidates[key];
+            NSUInteger samples = [candidate isEqualToString:name] ?
+                [self.sessionNameCandidateSamples[key] unsignedIntegerValue]+1 : 1;
+            self.sessionNameCandidates[key] = name;
+            self.sessionNameCandidateSamples[key] = @(samples);
+            if (samples < 2) continue;
+            NSString *previous = names.lastObject;
+            BOOL sameUserRejoined = [key hasPrefix:@"u:"] &&
+                [self.sessionNameLastActor[key] intValue] != peer->actorID;
             if (names.count >= 8) [names removeObjectAtIndex:0];
             [names addObject:name];
+            self.sessionNameLastActor[key] = @(peer->actorID);
+            [self.sessionNameCandidates removeObjectForKey:key];
+            [self.sessionNameCandidateSamples removeObjectForKey:key];
+            [self showQuickNotice:[NSString stringWithFormat:
+                sameUserRejoined ? @"عاد حساب باسم جديد #%d\n%@ ← %@" :
+                    @"تغيّر اسم اللاعب #%d\n%@ ← %@", peer->actorID, previous, name]];
+            __atomic_fetch_add(&gOGSNameNotifications,1u,__ATOMIC_RELAXED);
         }
     }
+    __atomic_store_n(&gOGSNameStableIdsAvailable,stableIds,__ATOMIC_RELEASE);
 }
 - (void)copySelectedName:(UIButton *)sender {
     (void)sender;
@@ -4350,13 +4630,17 @@ static void OGSInstallHooks(void) {
         return;
     }
     OGSPeerSnapshot peer = snapshot.peers[index];
-    NSArray<NSString *> *names = [self.sessionNameHistory[@(peer.actorID)] copy];
+    NSString *identityKey = [self sessionIdentityKey:&peer roster:&snapshot];
+    NSArray<NSString *> *names = [self.sessionNameHistory[identityKey] copy];
     NSString *last = [NSString stringWithUTF8String:peer.name] ?: @"غير معروف";
+    BOOL hasUserId = [identityKey hasPrefix:@"u:"];
     NSString *message = names.count > 1 ?
-        [NSString stringWithFormat:@"أسماء شوهدت لنفس Actor #%d في هذه الغرفة فقط:\n%@\n\nلا يمكن ربط أسماء أشخاص بعد الخروج والدخول أو عبر الأيام بهذه البيانات.",
-             peer.actorID, [names componentsJoinedByString:@" ← "]] :
-        [NSString stringWithFormat:@"Actor #%d: %@\nلم يُرصد تغيير اسم لهذا الرقم أثناء هذه الجلسة. رقم Actor ليس هوية حساب دائمة.",
-             peer.actorID, last];
+        [NSString stringWithFormat:@"أسماء رُصدت لهذا اللاعب أثناء الغرفة:\n%@\n\n%@",
+             [names componentsJoinedByString:@" ← "],
+             hasUserId ? @"المطابقة تستخدم UserId المنشور من Photon؛ ليست إثبات ملكية حساب." :
+                 @"UserId غير متاح؛ المطابقة محصورة برقم Actor الحالي."] :
+        [NSString stringWithFormat:@"Actor #%d: %@\nلم يُرصد تغيير بعد اكتمال قراءتين متتاليتين. %@",
+             peer.actorID, last, hasUserId ? @"UserId متاح محليًا" : @"UserId غير متاح"];
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"سجل الأسماء المحلي"
         message:message preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"نسخ" style:UIAlertActionStyleDefault
@@ -4409,18 +4693,11 @@ static void OGSInstallHooks(void) {
             [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0] :
             [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
     }
-    int32_t pending = __atomic_load_n(&gOGS.forceHostReq, __ATOMIC_ACQUIRE);
-    // UNKNOWN is safer than falsely declaring room ownership with a stale tick.
+    // Keep the release label exact and stable; live state belongs below it.
     int32_t readPresence = __atomic_load_n(&gOGSPresenceReadOnly, __ATOMIC_ACQUIRE);
     int32_t localActor = __atomic_load_n(&gOGSPresenceActorID, __ATOMIC_ACQUIRE);
     int32_t localMaster = __atomic_load_n(&gOGSLocalMasterActorID, __ATOMIC_ACQUIRE);
-    NSString *masterStatus = hookActive ?
-        (!snapshot.inRoom ? @"خارج" : (snapshot.isMaster ? @"أنت" : @"غيرك")) :
-        (readPresence == 1 && localMaster > 0 && localActor > 0 ?
-            (localActor == localMaster ? @"أنت (محليًا)" :
-             [NSString stringWithFormat:@"#%d (محليًا)", localMaster]) :
-            @"غير مؤكد");
-    self.titleLabel.text = [NSString stringWithFormat:@"OGS | هوست:%@ | تحديث:%@ | طلب:%@", masterStatus, hookActive ? @"نشط" : @"متوقف", pending ? @"معلق" : @"لا"];
+    self.titleLabel.text = @"OGS53";
     uint32_t selected = __atomic_load_n(&gOGS.selectedPeer, __ATOMIC_ACQUIRE);
 
     if (count == 0) {
@@ -4826,11 +5103,14 @@ static void OGSInstallHooks(void) {
         __atomic_load_n(&gOGS.speedDirty, __ATOMIC_ACQUIRE),
         __atomic_load_n(&gOGSSpeedDeferred, __ATOMIC_RELAXED)];
     details = [details stringByAppendingFormat:
-        @"\nRead-only roster: active=%u | list=%u | failures=%u | names tracked=%lu",
+        @"\nRead-only roster: active=%u | list=%u | failures=%u | names tracked=%lu"
+         " | UserId available=%u | rename notices=%u",
         __atomic_load_n(&gOGSRosterReadOK, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSRosterLastCount, __ATOMIC_ACQUIRE),
         __atomic_load_n(&gOGSRosterReadFail, __ATOMIC_RELAXED),
-        (unsigned long)self.sessionNameHistory.count];
+        (unsigned long)self.sessionNameHistory.count,
+        __atomic_load_n(&gOGSNameStableIdsAvailable,__ATOMIC_ACQUIRE),
+        __atomic_load_n(&gOGSNameNotifications,__ATOMIC_RELAXED)];
     details = [details stringByAppendingFormat:
         @"\nRead-only presence: %@ | polls: %u | read failures: %u | local actor: %d",
         __atomic_load_n(&gOGSPresenceReadOnly, __ATOMIC_ACQUIRE) == 1 ? @"IN" :
@@ -5466,8 +5746,8 @@ static void OGSInstallHooks(void) {
     [gesture setTranslation:CGPointZero inView:parent];
     if (gesture.state == UIGestureRecognizerStateEnded) {
         NSUserDefaults *prefs = NSUserDefaults.standardUserDefaults;
-        [prefs setDouble:maxX > 0.0 ? next.origin.x / maxX : 0.0 forKey:@"ogs50.flightPadX"];
-        [prefs setDouble:maxY > 0.0 ? next.origin.y / maxY : 0.0 forKey:@"ogs50.flightPadY"];
+        [prefs setDouble:maxX > 0.0 ? next.origin.x / maxX : 0.0 forKey:@"ogs53.flightPadX"];
+        [prefs setDouble:maxY > 0.0 ? next.origin.y / maxY : 0.0 forKey:@"ogs53.flightPadY"];
     }
 }
 - (void)startFlightAxis:(UIButton *)sender {

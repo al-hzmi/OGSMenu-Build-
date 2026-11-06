@@ -6,7 +6,7 @@
 namespace ogs46 {
 struct Snapshot {
     Identity id; double at = 0;
-    bool valid = false, privateRoom = false, alive = false, aliveVerified = false, master = false;
+    bool valid = false, alive = false, aliveVerified = false, master = false;
     int team = -1, respawn = -2, a = -1, b = -1;
     Mode mode = Mode::Unknown;
 };
@@ -58,8 +58,6 @@ static Snapshot sample(void *rc) {
         !OGSReadAutoRoom(&room, &actor, &master)) return s;
     s.id.room = room; s.id.actor = actor; s.id.controller = (uintptr_t)rc;
     s.master = actor == master;
-    bool open = true, visible = true;
-    s.privateRoom = OGSReadRoomPrivacy(room, &open, &visible) && !open && !visible;
     void *player = nullptr, *mode = nullptr;
     if (!read(rc, 0x108, player) || !read(rc, 0x1B0, s.team) ||
         !read(rc, 0x1C0, s.respawn) || !read(rc, 0x1B8, mode) ||
@@ -152,7 +150,10 @@ static void roomUpdate(void *self, void *method) {
 static void processSelfRequest(void *self, const Snapshot &s, const Request &req) {
     if (req.team < 0) return;
     int result = -1;
-    if (s.valid && s.privateRoom && same(req.id, s.id) && now() - req.at < 3.) {
+    // Visibility/open status is a matchmaking preference, not proof that the
+    // local player can or cannot enter a team. The native scene/respawn state
+    // and the same room/controller/actor binding remain required.
+    if (s.valid && same(req.id, s.id) && now() - req.at < 3.) {
         Denial d = teamDecision(req.team, s.team, s.respawn, s.a, s.b, s.mode);
         if (d == Denial::None && awaitingTeam < 0) {
             // Verify all dependencies dereferenced by the normal positive-team
@@ -286,7 +287,7 @@ static void install() {
 static bool queueTeam(int team) {
     Snapshot s = snapshot();
     os_unfair_lock_lock(&lock);
-    bool ok = s.valid && s.privateRoom && pending.team < 0 && status != 2;
+    bool ok = s.valid && pending.team < 0 && status != 2;
     if (ok) { pending = {s.id, team, now()}; status = 1; }
     else status = -1;
     os_unfair_lock_unlock(&lock); return ok;

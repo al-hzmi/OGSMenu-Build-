@@ -21,9 +21,11 @@ static void team51Message(NSString *s) {
     os_unfair_lock_lock(&lock);originalClientMessage=s;os_unfair_lock_unlock(&lock);
 }
 static bool team51Session(const OriginalClientTeamRequest &r, bool dispatch) {
-    uintptr_t room=0;int32_t me=0,master=0;bool open=true,visible=true;
-    if(!OGSReadAutoRoom(&room,&me,&master) || room!=r.room || me!=r.actor ||
-       !OGSReadRoomPrivacy(room,&open,&visible) || open || visible) return false;
+    uintptr_t room=0;int32_t me=0,master=0;
+    // Room visibility is a matchmaking setting, not a Photon permission check.
+    // Keep exact room/local-actor/target binding so a stale UI selection cannot
+    // be replayed after a leave/rejoin or against a different actor.
+    if(!OGSReadAutoRoom(&room,&me,&master) || room!=r.room || me!=r.actor) return false;
     OGSRoomSnapshot roster=OGSCurrentSnapshot();
     ogs48::TeamRequestFacts f;
     f.queuedRoom=r.room;f.liveRoom=room;f.queuedActor=r.actor;f.liveActor=me;
@@ -38,8 +40,8 @@ static bool queueOriginalClientTeam(int target,int team) {
     os_unfair_lock_lock(&lock);r.id=++originalClientNextID;os_unfair_lock_unlock(&lock);
     trace51Add(r.id,[NSString stringWithFormat:@"UI target=%d Team=%d",target,team]);
     if(target<=0 || team<0 || team>2 || !team51Session(r,true)) {
-        trace51Add(r.id,@"DENIED scope/identity: requires private closed room and selected other actor");
-        team51Message(@"اختبار النقل: غرفة مخفية ومغلقة، وحدد حسابك الثاني");return false;
+        trace51Add(r.id,@"DENIED session/target/mode identity; room visibility does not gate requests");
+        team51Message(@"تعذر النقل: اختر لاعبًا موجودًا في الجلسة وتحقق من حالة الغرفة");return false;
     }
     r.marker=NSUUID.UUID.UUIDString;
     os_unfair_lock_lock(&lock);
@@ -124,6 +126,8 @@ static void originalClientTeamPhotonTick() {
     }
     int32_t team=-1;bool ok=gameTeam51Read(findActor(active.target),team);
     if(ok&&team!=active.last)trace51Add(active.id,[NSString stringWithFormat:@"CACHE CHANGE Team %d -> %d; may reflect native round/respawn; not recipient view",active.last,team]);
+    if(ok && active.echo && active.last==active.team && team!=active.team)
+        team51Message(@"وصل النقل ثم تغيّر الفريق مجددًا أثناء الجولة/الإحياء؛ السبب الفعلي يحتاج تحققًا من الجهاز الثاني");
     bool timeout=!active.echo&&now()-active.at>=12.&&active.nextPoll<active.at+12.;
     if(timeout){trace51Add(active.id,@"NO correlated echo after 12s; rejection/permission reason UNKNOWN");team51Message(@"لم يصل تحديث مطابق؛ لا يمكن نسبة ردود Op252 العامة لهذا الطلب");}
     os_unfair_lock_lock(&lock);if(originalClientIssued.id==active.id){originalClientIssued.nextPoll=now()+.25;if(ok)originalClientIssued.last=team;}os_unfair_lock_unlock(&lock);
