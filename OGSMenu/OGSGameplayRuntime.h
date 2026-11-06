@@ -253,7 +253,8 @@ static NSString *statusText() {
     Snapshot s = snapshot(); int code; bool flying;
     os_unfair_lock_lock(&lock); code = status; flying = flightWanted;
     // An expired snapshot disarms controls even if the old room no longer ticks.
-    if (!s.valid) { flightWanted = false; axis = 0; pending.team = -1; flying = false; }
+    if (!s.valid) { flightWanted = false; axis = 0; pending.team = -1; flying = false;
+        __atomic_store_n(&gOGS.godModeOn, 0, __ATOMIC_RELEASE); }
     os_unfair_lock_unlock(&lock);
     if (!s.valid) return @"انتظار دخول غرفة وتحديث اللاعب";
     if (!s.privateRoom) return @"الميزات الذاتية تحتاج غرفة مخفية ومغلقة";

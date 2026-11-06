@@ -1,5 +1,6 @@
 #include "../OGSMenu/OGSGameplayPolicy.h"
 #include <cassert>
+#include <initializer_list>
 #include <limits>
 #include <stdexcept>
 using namespace ogs46;

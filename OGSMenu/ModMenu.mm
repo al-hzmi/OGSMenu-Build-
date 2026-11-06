@@ -1785,9 +1785,11 @@ static bool OGSIsDamageToLocalPlayerWithActor(void *playerNetwork, bool *verifie
 }
 static uintptr_t gOGS46ShieldRoom = 0; // published before godModeOn
 static int32_t gOGS46ShieldActor = 0;
+static uintptr_t gOGS46ShieldPlayer = 0;
 
 static bool OGS46ShouldBlockSelfDamage(void *pn) {
-    if (!__atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE)) return false;
+    if (!__atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE) ||
+        (uintptr_t)pn != __atomic_load_n(&gOGS46ShieldPlayer, __ATOMIC_ACQUIRE)) return false;
     bool verified = false; int32_t ownerActor = 0;
     if (!OGSIsDamageToLocalPlayerWithActor(pn, &verified, &ownerActor) || !verified) return false;
     uintptr_t room = 0; int32_t actor = 0, master = 0;
@@ -5329,6 +5331,7 @@ static void OGSInstallHooks(void) {
     if (next) {
         __atomic_store_n(&gOGS46ShieldRoom, shieldState.id.room, __ATOMIC_RELEASE);
         __atomic_store_n(&gOGS46ShieldActor, shieldState.id.actor, __ATOMIC_RELEASE);
+        __atomic_store_n(&gOGS46ShieldPlayer, shieldState.id.player, __ATOMIC_RELEASE);
     }
     __atomic_store_n(&gOGS.godModeOn, next, __ATOMIC_RELEASE);
     if (next) {
