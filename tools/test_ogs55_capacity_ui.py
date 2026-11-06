@@ -71,5 +71,9 @@ require("queueOriginalClientTeam" not in self_return and
         "self return must never mutate remote players or host privileges")
 require("for (" not in self_return and "while (" not in self_return,
         "self return must not run a continuous fight against Photon state")
+require('OGS55 self-team (read only): snapshot=%d actor=%d team=%d respawn=%d' in code,
+        "diagnostic must expose game respawn state when a spectator is stuck")
+require('native RoomController.Update bridge=%u' in code,
+        "diagnostic must distinguish a missing original Unity callback")
 print("PASS capacity picker: 31 grid buttons, gray disabled states, "
       "in-bounds layout, identity/occupancy re-checks, guarded self return")

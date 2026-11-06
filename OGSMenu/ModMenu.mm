@@ -4789,6 +4789,18 @@ static void OGSInstallHooks(void) {
         chatHook ? @"مركب" : (chatReadable ? @"غير مركب" : @"غير قابل للقراءة"),
         chatWritable ? @"نعم" : @"لا",
         queued ? @"نعم" : @"لا"];
+    ogs46::Snapshot selfDiag = ogs46::snapshot();
+    NSString *selfMode = selfDiag.mode == ogs46::Mode::TDM ? @"TDM" :
+        selfDiag.mode == ogs46::Mode::Normal ? @"NORMAL" :
+        selfDiag.mode == ogs46::Mode::FFA ? @"FFA" : @"UNKNOWN";
+    details = [details stringByAppendingFormat:
+        @"\nOGS55 self-team (read only): snapshot=%d actor=%d team=%d respawn=%d mode=%@"
+         "\nAlive=%d verified=%d | native RoomController.Update bridge=%u"
+         "\nSelf-return uses one native PrepareTeam request only when the game permits it; no loop or server proof.",
+        selfDiag.valid ? 1 : 0, selfDiag.id.actor, selfDiag.team,
+        selfDiag.respawn, selfMode, selfDiag.alive ? 1 : 0,
+        selfDiag.aliveVerified ? 1 : 0,
+        __atomic_load_n(&ogs46::bridgeStatus[0], __ATOMIC_ACQUIRE)];
     details = [details stringByAppendingFormat:@"\nOGS51 bounded request trace:\n%@", ogs46::trace51Text()];
     details = [details stringByAppendingFormat:
         @"\nStage22: legacy chat hooks DISABLED (wrong constructor slots)"
