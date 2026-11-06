@@ -10,6 +10,7 @@
 #include <math.h>
 #include <mach/vm_region.h>
 #include "OGSShieldPolicy.h"
+#include <initializer_list>
 
 #define OGS_MAX_PEERS       64
 #define OGS_MAX_NAME_BYTES  128
@@ -1363,12 +1364,14 @@ static void OGSProcessSpeed(void) {
 // MARK: - UI Forward Declarations
 // ============================================================
 @interface OGSPassthroughContainer : UIView
+@property (weak, nonatomic) UIView *flightPad;
 @property (weak, nonatomic) UIButton *floatingButton;
 @property (weak, nonatomic) UIView *menuPanel;
 @end
 
 @implementation OGSPassthroughContainer
 - (BOOL)pointInside:(CGPoint)p withEvent:(UIEvent *)e {
+    if (self.flightPad && !self.flightPad.hidden && [self.flightPad pointInside:[self convertPoint:p toView:self.flightPad] withEvent:e]) return YES;
     if (self.floatingButton && !self.floatingButton.hidden && [self.floatingButton pointInside:[self convertPoint:p toView:self.floatingButton] withEvent:e]) return YES;
     if (self.menuPanel && !self.menuPanel.hidden && [self.menuPanel pointInside:[self convertPoint:p toView:self.menuPanel] withEvent:e]) return YES;
     return NO;
@@ -1388,6 +1391,9 @@ static void OGSProcessSpeed(void) {
 @property (strong, nonatomic) UIButton *hostLockButton;
 @property (strong, nonatomic) UIButton *privacyHiddenButton;
 @property (strong, nonatomic) UIButton *privacyClosedButton;
+@property (strong, nonatomic) UIView *flightPad;
+@property (strong, nonatomic) UIButton *flightButton;
+@property (strong, nonatomic) UILabel *gameplayLabel;
 @property (strong, nonatomic) UIButton *godModeButton;     // درع الحماية
 @property (strong, nonatomic) UIButton *magicBulletButton; // مدى السكين
 @property (strong, nonatomic) UIButton *grenade31Button; // قنابل متجددة
@@ -1777,6 +1783,22 @@ static bool OGSIsDamageToLocalPlayerWithActor(void *playerNetwork, bool *verifie
     if (actorOut) *actorOut = localActorID;
     return localActorID == ownerActorID;
 }
+static uintptr_t gOGS46ShieldRoom = 0; // published before godModeOn
+static int32_t gOGS46ShieldActor = 0;
+
+static bool OGS46ShouldBlockSelfDamage(void *pn) {
+    if (!__atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE)) return false;
+    bool verified = false; int32_t ownerActor = 0;
+    if (!OGSIsDamageToLocalPlayerWithActor(pn, &verified, &ownerActor) || !verified) return false;
+    uintptr_t room = 0; int32_t actor = 0, master = 0;
+    bool open = true, visible = true; uint8_t killed = 255;
+    return OGSReadAutoRoom(&room, &actor, &master) && actor == master && actor == ownerActor &&
+        room == __atomic_load_n(&gOGS46ShieldRoom, __ATOMIC_ACQUIRE) &&
+        actor == __atomic_load_n(&gOGS46ShieldActor, __ATOMIC_ACQUIRE) &&
+        OGSReadRoomPrivacy(room, &open, &visible) && !open && !visible &&
+        OGSReadMemory((uintptr_t)pn + 0x12C, &killed, 1) && killed == 0;
+}
+
 static bool OGSIsDamageToLocalPlayer(void *playerNetwork, bool *verified) {
     return OGSIsDamageToLocalPlayerWithActor(playerNetwork, verified, NULL);
 }
@@ -1834,7 +1856,7 @@ static void OGSBridgeOutgoingDamage(void *self, void *values, const void *method
     if (self && __atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE)) {
         bool verified = false;
         bool isLocalOwner = OGSIsDamageToLocalPlayer(self, &verified);
-        if (verified && isLocalOwner) {
+        if (verified && isLocalOwner && OGS46ShouldBlockSelfDamage(self)) {
             __atomic_fetch_add(&gGodApplyLocalBypasses, 1u,
                                __ATOMIC_RELAXED);
             return;
@@ -2204,7 +2226,7 @@ static void OGSBridgeIncomingDamage(void *self, void *values, int32_t killerID, 
     if (self && __atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE)) {
         bool verified = false;
         bool isLocalOwner = OGSIsDamageToLocalPlayer(self, &verified);
-        if (verified && isLocalOwner) {
+        if (verified && isLocalOwner && OGS46ShouldBlockSelfDamage(self)) {
             __atomic_fetch_add(&gGodLocalBypasses, 1u, __ATOMIC_RELAXED);
             return;
         }
@@ -3210,7 +3232,7 @@ static bool OGS44ObserveExplosion(unsigned index, void *self) {
         roomVerified && actor == master, privacyVerified, !visible, !open,
         deadFlagVerified, deadFlagVerified && flag == 0
     };
-    bool blocked = OGSShouldBlockLocalExplosion(facts);
+    bool blocked = OGSShouldBlockLocalExplosion(facts) && OGS46ShouldBlockSelfDamage(self);
     if (blocked) __atomic_fetch_add(&gOGS45ExplosionBlocked[index], 1u, __ATOMIC_RELAXED);
     return blocked;
 }
@@ -3279,6 +3301,8 @@ static void OGS44InstallExplosionDiagnostics(void) {
         __atomic_store_n(&gOGS44Status[i], 1u, __ATOMIC_RELEASE);
     }
 }
+
+#include "OGSGameplayRuntime.h"
 
 static bool OGSIsWritableMappedSlot(uintptr_t address) {
     if (address < 0x100000000ULL || (address & (sizeof(void *) - 1))) return false;
@@ -3725,6 +3749,7 @@ static void OGSRefreshReadOnlyPresence(void) {
 
 static void OGSInstallHooks(void) {
     if (!OGSFindGameImage()) return;
+    ogs46::install();
     OGSInstallPointerSlotHook(gOffsets.tblCashUpdate, (void *)&hook_CashUpdate, (void **)&orig_CashUpdate);
     // Stage 22: DO NOT hook the former "chat" slots! For this exact iOS
     // executable they are NamePickGui..ctor() and NetworkCharacter..ctor(),
@@ -3926,7 +3951,7 @@ static void OGSInstallHooks(void) {
         CGFloat menuViewportHeight = MIN(358.0, MAX(160.0, CGRectGetHeight(gw.bounds) - 26.0));
         CGFloat menuX = MAX(8.0, MIN(75.0, CGRectGetWidth(gw.bounds) - 323.0));
         self.menuPanel = [[UIScrollView alloc] initWithFrame:CGRectMake(menuX, 18, 315, menuViewportHeight)];
-        self.menuPanel.contentSize = CGSizeMake(315, 467);
+        self.menuPanel.contentSize = CGSizeMake(315, 585);
         self.menuPanel.alwaysBounceVertical = NO;
         self.menuPanel.showsVerticalScrollIndicator = YES;
         self.menuPanel.clipsToBounds = YES;
@@ -3937,7 +3962,7 @@ static void OGSInstallHooks(void) {
         self.menuPanel.hidden = YES;
 
         self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 5, 260, 18)];
-        self.titleLabel.text = @"OGS45 | درع الانفجار التجريبي";
+        self.titleLabel.text = @"OGS46 | ميزات ذاتية للاختبار";
         self.titleLabel.textColor = [UIColor whiteColor];
         self.titleLabel.textAlignment = NSTextAlignmentCenter;
         self.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
@@ -3975,6 +4000,41 @@ static void OGSInstallHooks(void) {
         UIColor *banRed     = [UIColor colorWithRed:0.70 green:0.12 blue:0.15 alpha:1.0];
         UIColor *hostBlue   = [UIColor colorWithRed:0.14 green:0.42 blue:0.72 alpha:1.0];
         UIColor *wpnGreen   = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
+
+        NSArray *teams = @[@"مشاهد", @"شرطة", @"لصوص"];
+        for (NSInteger i = 0; i < 3; ++i) {
+            UIButton *b = [self makeBtn:CGRectMake(10 + 100*i, 472, 95, 30)
+                title:teams[i] bg:hostBlue action:@selector(changeSelfTeam:)];
+            b.tag = i; [self.menuPanel addSubview:b];
+        }
+        self.flightButton = [self makeBtn:CGRectMake(10, 507, 295, 30)
+            title:@"الطيران: إيقاف" bg:darkGray action:@selector(toggleSelfFlight:)];
+        [self.menuPanel addSubview:self.flightButton];
+        self.gameplayLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 540, 295, 40)];
+        self.gameplayLabel.font = [UIFont systemFontOfSize:10];
+        self.gameplayLabel.textColor = UIColor.whiteColor;
+        self.gameplayLabel.textAlignment = NSTextAlignmentCenter;
+        self.gameplayLabel.numberOfLines = 2;
+        [self.menuPanel addSubview:self.gameplayLabel];
+        self.flightPad = [[UIView alloc] initWithFrame:CGRectMake(CGRectGetWidth(gw.bounds)-65, 80, 55, 110)];
+        self.flightPad.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
+        self.flightPad.hidden = YES;
+        for (NSInteger i = 0; i < 2; ++i) {
+            UIButton *b = [self makeBtn:CGRectMake(2, i*55, 50, 50)
+                title:i == 0 ? @"▲" : @"▼" bg:hostBlue action:@selector(stopFlightAxis:)];
+            b.tag = i == 0 ? 1 : -1;
+            [b addTarget:self action:@selector(startFlightAxis:) forControlEvents:UIControlEventTouchDown];
+            [b addTarget:self action:@selector(stopFlightAxis:) forControlEvents:
+                UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchCancel | UIControlEventTouchDragExit];
+            [self.flightPad addSubview:b];
+        }
+        [self.containerView addSubview:self.flightPad];
+        self.containerView.flightPad = self.flightPad;
+        [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationWillResignActiveNotification
+            object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
+                ogs46::stopFlight();
+            }];
+
 
         [self.menuPanel addSubview:[self makeBtn:CGRectMake(10, 70, 95, 30) title:@"▶ السابق" bg:darkGray action:@selector(prevPlayer:)]];
         [self.menuPanel addSubview:[self makeBtn:CGRectMake(110, 70, 95, 30) title:@"سحب الهوست 👑" bg:hostBlue action:@selector(claimHostNow:)]];
@@ -4334,6 +4394,12 @@ static void OGSInstallHooks(void) {
         self.statusLabel.text = [NSString stringWithFormat:@"%@ | صد طرد: %u 🛡️",
                                  roomLine, blocked];
     }
+    self.gameplayLabel.text = ogs46::statusText();
+    os_unfair_lock_lock(&ogs46::lock); bool flightOn = ogs46::flightWanted; os_unfair_lock_unlock(&ogs46::lock);
+    self.flightPad.hidden = !flightOn;
+    [self.flightButton setTitle:flightOn ? @"الطيران: مفعّل — اضغط للإيقاف" : @"الطيران: إيقاف" forState:UIControlStateNormal];
+    BOOL shieldOn = __atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE) != 0;
+    [self.godModeButton setTitle:shieldOn ? @"درع الهوست: مفعّل للاختبار" : @"درع الهوست: إيقاف" forState:UIControlStateNormal];
     [self.unbanButton setTitle:[NSString stringWithFormat:@"فك الحظر (%lu)", (unsigned long)[self bannedCountSafe]] forState:UIControlStateNormal];
 }
 
@@ -5215,9 +5281,30 @@ static void OGSInstallHooks(void) {
     else self.statusLabel.text = @"أغلق النوافذ المفتوحة ثم أعد المحاولة";
 }
 
+- (void)changeSelfTeam:(UIButton *)sender {
+    ogs46::queueTeam((int)sender.tag);
+    self.gameplayLabel.text = ogs46::statusText();
+}
+- (void)toggleSelfFlight:(UIButton *)sender {
+    if (!ogs46::toggleFlight()) self.gameplayLabel.text = @"يلزم لاعب حي وغرفة خاصة وIPA46 كامل";
+}
+- (void)startFlightAxis:(UIButton *)sender {
+    os_unfair_lock_lock(&ogs46::lock);
+    if (ogs46::flightWanted) ogs46::axis = (int)sender.tag;
+    os_unfair_lock_unlock(&ogs46::lock);
+}
+- (void)stopFlightAxis:(UIButton *)sender {
+    os_unfair_lock_lock(&ogs46::lock); ogs46::axis = 0; os_unfair_lock_unlock(&ogs46::lock);
+}
+
 - (void)toggleGodMode:(UIButton *)s {
     int32_t current = __atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE);
     int32_t next = current ? 0 : 1;
+    ogs46::Snapshot shieldState = ogs46::snapshot();
+    if (next && (!shieldState.valid || !shieldState.privateRoom || !shieldState.master || !shieldState.alive)) {
+        self.gameplayLabel.text = @"الدرع يتطلب أن تكون الهوست وحيًا بغرفة مخفية ومغلقة";
+        return;
+    }
     if (next && (!OGSInstallDamageHookOnDemand(true) ||
                  !OGSInstallDamageHookOnDemand(false) ||
                  !OGSInstallKillBridgeOnDemand())) {
@@ -5238,6 +5325,10 @@ static void OGSInstallHooks(void) {
                 return;
             }
         }
+    }
+    if (next) {
+        __atomic_store_n(&gOGS46ShieldRoom, shieldState.id.room, __ATOMIC_RELEASE);
+        __atomic_store_n(&gOGS46ShieldActor, shieldState.id.actor, __ATOMIC_RELEASE);
     }
     __atomic_store_n(&gOGS.godModeOn, next, __ATOMIC_RELEASE);
     if (next) {
