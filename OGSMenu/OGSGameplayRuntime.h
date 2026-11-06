@@ -91,7 +91,6 @@ static void stopFlight() {
     os_unfair_lock_lock(&lock); flightWanted = false; axis = 0; flightLastGoodAt = 0.; os_unfair_lock_unlock(&lock);
 }
 static void remoteTick(void *self, const Snapshot &s);
-static void originalClientTeamTick(const Snapshot &s);
 static void processSelfRequest(void *self, const Snapshot &s, const Request &req);
 static void roomUpdate(void *self, void *method) {
     if (roomOriginal) roomOriginal(self, method);
@@ -149,7 +148,6 @@ static void roomUpdate(void *self, void *method) {
     }
     processSelfRequest(self, s, req);
     remoteTick(self, s);
-    originalClientTeamTick(s);
 }
 static void processSelfRequest(void *self, const Snapshot &s, const Request &req) {
     if (req.team < 0) return;

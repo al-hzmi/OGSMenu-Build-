@@ -7,7 +7,8 @@
 // native void return or from the sender's local team cache.
 namespace ogs46 {
 struct OriginalClientTeamRequest {
-    Identity id;
+    uintptr_t room = 0;
+    int actor = 0;
     int target = 0;
     int team = -1;
     double at = 0;
@@ -31,28 +32,32 @@ static NSString *originalClientTeamStatus() {
 }
 
 static bool queueOriginalClientTeam(int target, int team) {
-    Snapshot s = snapshot();
+    uintptr_t room = 0;
+    int32_t localActor = 0, masterActor = 0;
+    bool photonRoomValid = OGSReadAutoRoom(&room, &localActor, &masterActor);
     OGSRoomSnapshot roster = OGSCurrentSnapshot();
     double t = now();
     ogs48::TeamRequestFacts f = {};
-    f.queued = s.id;
-    f.live = s.id;
-    f.snapshotValid = s.valid;
-    f.rosterValid = roster.inRoom && roster.roomAddress == s.id.room;
+    f.queuedRoom = room;
+    f.liveRoom = room;
+    f.queuedActor = localActor;
+    f.liveActor = localActor;
+    f.photonRoomValid = photonRoomValid;
+    f.rosterValid = roster.inRoom && roster.roomAddress == room;
     f.otherPlayers = (int)roster.count;
     f.targetMatches = selectedActorMatches(roster, target);
     f.targetActor = target;
     f.destination = team;
-    f.mode = s.mode;
+    f.mode = snapshot().mode;
     f.age = 0.;
     bool accepted = ogs48::allowTeamRequest(f);
     os_unfair_lock_lock(&lock);
     if (!accepted) originalClientMessage = @"تعذر التحقق من هوية اللاعب المحدد أو حالة الغرفة؛ أعد اختياره";
-    else if (originalClientPending.target || t - originalClientLastSubmitAt < 15.) {
+    else if (originalClientPending.target || t - originalClientLastSubmitAt < 3.) {
         accepted = false;
-        originalClientMessage = @"انتظر 15 ثانية قبل طلب نقل آخر";
+        originalClientMessage = @"انتظر 3 ثوانٍ قبل طلب نقل آخر";
     } else {
-        originalClientPending = {s.id, target, team, t};
+        originalClientPending = {room, localActor, target, team, t};
         originalClientLastSubmitAt = t;
         originalClientMessage = @"تجهيز تغيير فريق الحساب الثاني الأصلي";
     }
@@ -60,7 +65,9 @@ static bool queueOriginalClientTeam(int target, int team) {
     return accepted;
 }
 
-static void originalClientTeamTick(const Snapshot &s) {
+// Called on the verified, continuously active PhotonHandler.Update hook, not
+// RoomController.Update. The latter can be absent even while Photon runs.
+static void originalClientTeamPhotonTick() {
     OriginalClientTeamRequest req;
     os_unfair_lock_lock(&lock);
     req = originalClientPending;
@@ -68,17 +75,22 @@ static void originalClientTeamTick(const Snapshot &s) {
     os_unfair_lock_unlock(&lock);
     if (!req.target) return;
 
+    uintptr_t room = 0;
+    int32_t localActor = 0, masterActor = 0;
+    bool photonRoomValid = OGSReadAutoRoom(&room, &localActor, &masterActor);
     OGSRoomSnapshot roster = OGSCurrentSnapshot();
     ogs48::TeamRequestFacts f = {};
-    f.queued = req.id;
-    f.live = s.id;
-    f.snapshotValid = s.valid;
-    f.rosterValid = roster.inRoom && roster.roomAddress == s.id.room;
+    f.queuedRoom = req.room;
+    f.liveRoom = room;
+    f.queuedActor = req.actor;
+    f.liveActor = localActor;
+    f.photonRoomValid = photonRoomValid;
+    f.rosterValid = roster.inRoom && roster.roomAddress == room;
     f.otherPlayers = (int)roster.count;
     f.targetMatches = selectedActorMatches(roster, req.target);
     f.targetActor = req.target;
     f.destination = req.team;
-    f.mode = s.mode;
+    f.mode = snapshot().mode;
     f.age = now() - req.at;
     NSString *result = @"ألغي الطلب: تغيّرت الغرفة أو لم يعد الحساب المحدد ظاهرًا";
     if (ogs48::allowTeamRequest(f)) {

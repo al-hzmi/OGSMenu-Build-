@@ -2692,6 +2692,8 @@ static void OGSProcessRoomCapacityOnPhotonThread(void) {
     // a second account, a second player's reported MaxPlayers, and joins.
 }
 
+namespace ogs46 { static void originalClientTeamPhotonTick(); }
+
 // Executed on the game's Unity/PUN Update thread, never from the UIKit
 // menu timer. Makes standalone room privacy possible with zero other players.
 static void hook_PhotonHandlerUpdate(void *self, void *method) {
@@ -2717,6 +2719,9 @@ static void hook_PhotonHandlerUpdate(void *self, void *method) {
         OGSProcessRoomPrivacyOnEvent();
     OGSProcessSelfNicknameOnPhotonThread();
     OGSProcessRoomCapacityOnPhotonThread();
+    // Original-client team changes are Photon player-property operations.
+    // Do not strand queued requests behind an inactive RoomController.Update.
+    ogs46::originalClientTeamPhotonTick();
 
     // Fast-path for verified MasterClient callback notifications and manual
     // recovery taps: sample fresh Photon state on this frame, not after the
@@ -3971,7 +3976,7 @@ static void OGSInstallHooks(void) {
         self.menuPanel.hidden = YES;
 
         self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 5, 260, 18)];
-        self.titleLabel.text = @"OGS49 | درع بلا قيد للغرفة + الطيران";
+        self.titleLabel.text = @"OGS50 | تحكم سريع + طيران قابل للسحب";
         self.titleLabel.textColor = [UIColor whiteColor];
         self.titleLabel.textAlignment = NSTextAlignmentCenter;
         self.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
@@ -4033,12 +4038,38 @@ static void OGSInstallHooks(void) {
         self.remoteTeamLabel.textAlignment = NSTextAlignmentCenter;
         self.remoteTeamLabel.numberOfLines = 3;
         [self.menuPanel addSubview:self.remoteTeamLabel];
-        self.flightPad = [[UIView alloc] initWithFrame:CGRectMake(CGRectGetWidth(gw.bounds)-65, 80, 55, 110)];
+        // The stock game's aim/fire controls occupy the far-right edge (as
+        // shown by the supplied landscape screenshot). Default this compact
+        // pad well to their left; the grip lets the owner move it freely.
+        const CGFloat padW = 46.0, padH = 106.0;
+        CGFloat maxX = MAX(0.0, CGRectGetWidth(gw.bounds) - padW - 4.0);
+        CGFloat maxY = MAX(0.0, CGRectGetHeight(gw.bounds) - padH - 4.0);
+        CGFloat flightX = MIN(maxX, MAX(4.0, CGRectGetWidth(gw.bounds) - 185.0));
+        CGFloat flightY = MIN(maxY, 80.0);
+        NSUserDefaults *flightPrefs = NSUserDefaults.standardUserDefaults;
+        NSNumber *savedX = [flightPrefs objectForKey:@"ogs50.flightPadX"];
+        NSNumber *savedY = [flightPrefs objectForKey:@"ogs50.flightPadY"];
+        if (savedX && savedY) {
+            flightX = MIN(maxX, MAX(0.0, savedX.doubleValue * maxX));
+            flightY = MIN(maxY, MAX(0.0, savedY.doubleValue * maxY));
+        }
+        self.flightPad = [[UIView alloc] initWithFrame:CGRectMake(flightX, flightY, padW, padH)];
         self.flightPad.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
         self.flightPad.hidden = YES;
+        UIButton *flightGrip = [UIButton buttonWithType:UIButtonTypeCustom];
+        flightGrip.frame = CGRectMake(2, 0, 42, 18);
+        flightGrip.backgroundColor = [UIColor colorWithWhite:0.1 alpha:0.72];
+        flightGrip.layer.cornerRadius = 6.0;
+        [flightGrip setTitle:@"⋮⋮" forState:UIControlStateNormal];
+        flightGrip.titleLabel.font = [UIFont boldSystemFontOfSize:12];
+        flightGrip.accessibilityLabel = @"اسحب لتغيير مكان أزرار الطيران";
+        [flightGrip addGestureRecognizer:[[UIPanGestureRecognizer alloc]
+            initWithTarget:self action:@selector(moveFlightPad:)]];
+        [self.flightPad addSubview:flightGrip];
         for (NSInteger i = 0; i < 2; ++i) {
-            UIButton *b = [self makeBtn:CGRectMake(2, i*55, 50, 50)
+            UIButton *b = [self makeBtn:CGRectMake(2, 20 + i*43, 42, 40)
                 title:i == 0 ? @"▲" : @"▼" bg:hostBlue action:@selector(stopFlightAxis:)];
+            b.layer.cornerRadius = 10.0;
             b.tag = i == 0 ? 1 : -1;
             [b addTarget:self action:@selector(startFlightAxis:) forControlEvents:UIControlEventTouchDown];
             [b addTarget:self action:@selector(stopFlightAxis:) forControlEvents:
@@ -5313,23 +5344,15 @@ static void OGSInstallHooks(void) {
     }
     int32_t targetActor = peers.peers[selected].actorID;
     NSInteger team = sender.tag;
+    // One tap = one request; no modal confirmation, no UIKit handoff or pause.
+    // Only the actor explicitly selected in the room roster is targeted.
+    bool queued = ogs46::queueOriginalClientTeam(targetActor, (int)team);
+    NSString *actorName = [NSString stringWithUTF8String:peers.peers[selected].name] ?: @"اللاعب المحدد";
     NSString *destination = team == 0 ? @"مشاهد" : team == 1 ? @"شرطة" : @"لصوص";
-    NSString *actorName = [NSString stringWithUTF8String:peers.peers[selected].name] ?: @"الحساب الثاني";
-    UIViewController *root = [self gameMainWindow].rootViewController;
-    if (!root || root.presentedViewController) {
-        self.remoteTeamLabel.text = @"أغلق أي نافذة مفتوحة قبل تأكيد النقل";
-        return;
-    }
-    NSString *message = [NSString stringWithFormat:@"تأكد أن %@ هو حسابك الثاني الذي تملكه. سيُطلب تحديث فريقه إلى %@ عبر واجهة اللعبة الأصلية. قبول خادم Photon غير مؤكد وقد يتأخر أثره حتى الموت أو نهاية الجولة.", actorName, destination];
-    UIAlertController *confirm = [UIAlertController alertControllerWithTitle:@"اختبار نقل حسابك الأصلي"
-        message:message preferredStyle:UIAlertControllerStyleAlert];
-    [confirm addAction:[UIAlertAction actionWithTitle:@"إلغاء" style:UIAlertActionStyleCancel handler:nil]];
-    [confirm addAction:[UIAlertAction actionWithTitle:@"أؤكد ملكية الحساب — إرسال" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-        (void)action;
-        ogs46::queueOriginalClientTeam(targetActor, (int)team);
-        self.remoteTeamLabel.text = ogs46::originalClientTeamStatus();
-    }]];
-    [root presentViewController:confirm animated:YES completion:nil];
+    self.remoteTeamLabel.text = queued ?
+        [NSString stringWithFormat:@"طلب %@ للّاعب %@ (#%d)؛ قبول الخادم غير مؤكد",
+            destination, actorName, targetActor] :
+        ogs46::originalClientTeamStatus();
 }
 - (void)toggleTeamReceiving:(UIButton *)sender {
     (void)sender; ogs46::toggleReceiving();
@@ -5353,7 +5376,25 @@ static void OGSInstallHooks(void) {
     [root presentViewController:dialog animated:YES completion:nil];
 }
 - (void)toggleSelfFlight:(UIButton *)sender {
-    if (!ogs46::toggleFlight()) self.gameplayLabel.text = @"يلزم لاعب حي واكتمال إعادة الظهور وIPA48 كامل";
+    if (!ogs46::toggleFlight()) self.gameplayLabel.text = @"يلزم لاعب حي واكتمال إعادة الظهور وIPA50 كامل";
+}
+- (void)moveFlightPad:(UIPanGestureRecognizer *)gesture {
+    UIView *parent = self.containerView;
+    UIView *pad = self.flightPad;
+    if (!parent || !pad) return;
+    CGPoint movement = [gesture translationInView:parent];
+    CGRect next = pad.frame;
+    CGFloat maxX = MAX(0.0, CGRectGetWidth(parent.bounds) - CGRectGetWidth(next) - 4.0);
+    CGFloat maxY = MAX(0.0, CGRectGetHeight(parent.bounds) - CGRectGetHeight(next) - 4.0);
+    next.origin.x = MIN(maxX, MAX(0.0, next.origin.x + movement.x));
+    next.origin.y = MIN(maxY, MAX(0.0, next.origin.y + movement.y));
+    pad.frame = next;
+    [gesture setTranslation:CGPointZero inView:parent];
+    if (gesture.state == UIGestureRecognizerStateEnded) {
+        NSUserDefaults *prefs = NSUserDefaults.standardUserDefaults;
+        [prefs setDouble:maxX > 0.0 ? next.origin.x / maxX : 0.0 forKey:@"ogs50.flightPadX"];
+        [prefs setDouble:maxY > 0.0 ? next.origin.y / maxY : 0.0 forKey:@"ogs50.flightPadY"];
+    }
 }
 - (void)startFlightAxis:(UIButton *)sender {
     os_unfair_lock_lock(&ogs46::lock);
@@ -5371,13 +5412,8 @@ static void OGSInstallHooks(void) {
     if (next && (!OGSInstallDamageHookOnDemand(true) ||
                  !OGSInstallDamageHookOnDemand(false) ||
                  !OGSInstallKillBridgeOnDemand())) {
-        self.statusLabel.text = @"يلزم IPA كامل بجسور DamageRemote وApplyDamage وKillPlayer";
-        UIAlertController *warning = [UIAlertController alertControllerWithTitle:@"حماية من الكراش"
-            message:@"يلزم تجهيز جسور الضرر المباشر والبعيد والقتل في IPA كامل. جرّب OGS42 بعد إعادة توقيعه؛ تبديل dylib في نسخة أصلية غير مجهزة لا يكفي."
-            preferredStyle:UIAlertControllerStyleAlert];
-        [warning addAction:[UIAlertAction actionWithTitle:@"فهمت" style:UIAlertActionStyleDefault handler:nil]];
-        UIViewController *root = [self gameMainWindow].rootViewController;
-        if (root && !root.presentedViewController) [root presentViewController:warning animated:YES completion:nil];
+        // Fail closed without a full-screen UIKit alert interrupting gameplay.
+        self.statusLabel.text = @"الدرع غير مفعل: جسور الضرر أو القتل غير متاحة في IPA";
         return;
     }
     if (next) {

@@ -27,7 +27,7 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def package(source, dylib, output):
+def package(source, dylib, output, release='OGS49'):
     if source.resolve() == output.resolve():
         raise ValueError('refusing to overwrite the original game IPA')
     replacement = dylib.read_bytes()
@@ -39,7 +39,7 @@ def package(source, dylib, output):
         for name, sha in EXPECTED.items():
             if digest(src.read(name)) != sha:
                 raise ValueError('input IPA identity mismatch: ' + name)
-        fd, temporary = tempfile.mkstemp(prefix='ogs49-', suffix='.ipa', dir=output.parent)
+        fd, temporary = tempfile.mkstemp(prefix=release.lower() + '-', suffix='.ipa', dir=output.parent)
         os.close(fd)
         try:
             with zipfile.ZipFile(temporary, 'w') as dest:
@@ -57,7 +57,7 @@ def package(source, dylib, output):
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
-    print('PASS OGS49: OGSMenu.dylib replaced, all 171 other IPA entries unchanged')
+    print(f'PASS {release}: OGSMenu.dylib replaced, all 171 other IPA entries unchanged')
     print('dylib SHA256:', digest(replacement))
     print('IPA SHA256:', digest(output.read_bytes()))
     print('UNSIGNED: no installation or live-device verification performed')

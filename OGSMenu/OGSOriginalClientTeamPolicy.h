@@ -6,9 +6,11 @@
 // setting a different actor's player properties.
 namespace ogs48 {
 struct TeamRequestFacts {
-    ogs46::Identity queued;
-    ogs46::Identity live;
-    bool snapshotValid = false;
+    uintptr_t queuedRoom = 0;
+    uintptr_t liveRoom = 0;
+    int queuedActor = 0;
+    int liveActor = 0;
+    bool photonRoomValid = false;
     bool rosterValid = false;
     int otherPlayers = 0;
     int targetMatches = 0;
@@ -19,11 +21,13 @@ struct TeamRequestFacts {
 };
 
 static inline bool allowTeamRequest(const TeamRequestFacts &f) {
-    ogs46::Identity queued = f.queued, live = f.live;
-    queued.player = live.player = 0;
-    if (!f.snapshotValid || !f.rosterValid || !ogs46::same(queued, live) ||
+    // PhotonHandler.Update continues while the separate RoomController.Update
+    // may be absent. Remote actor property writes only require the room and
+    // actor to remain stable; they do not need an FPS avatar/controller.
+    if (!f.photonRoomValid || !f.queuedRoom || f.queuedRoom != f.liveRoom ||
+        f.queuedActor <= 0 || f.queuedActor != f.liveActor || !f.rosterValid ||
         f.otherPlayers < 1 || f.targetMatches != 1 ||
-        f.targetActor <= 0 || f.targetActor == f.live.actor ||
+        f.targetActor <= 0 || f.targetActor == f.liveActor ||
         f.destination < 0 || f.destination > 2 ||
         !std::isfinite(f.age) || f.age < 0.0 || f.age > 3.0) return false;
     // Native SetTeam can be reached regardless of the local game-mode text.

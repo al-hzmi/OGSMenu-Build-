@@ -6,9 +6,11 @@ int main() {
     using namespace ogs46;
     using namespace ogs48;
     TeamRequestFacts f;
-    f.queued = {100, 200, 300, 1};
-    f.live = f.queued;
-    f.snapshotValid = true;
+    f.queuedRoom = 100;
+    f.liveRoom = 100;
+    f.queuedActor = 1;
+    f.liveActor = 1;
+    f.photonRoomValid = true;
     f.rosterValid = true;
     f.otherPlayers = 1;
     f.targetMatches = 1;
@@ -34,20 +36,19 @@ int main() {
     f.targetActor = 2;
     f.rosterValid = false; assert(!allowTeamRequest(f));
     f.rosterValid = true;
-    f.snapshotValid = false; assert(!allowTeamRequest(f));
-    f.snapshotValid = true;
+    f.photonRoomValid = false; assert(!allowTeamRequest(f));
+    f.photonRoomValid = true;
     f.age = -1.; assert(!allowTeamRequest(f));
     f.age = 3.1; assert(!allowTeamRequest(f));
     f.age = std::numeric_limits<double>::quiet_NaN(); assert(!allowTeamRequest(f));
     f.age = .1;
-    ++f.live.room; assert(!allowTeamRequest(f));
-    --f.live.room;
-    ++f.live.actor; assert(!allowTeamRequest(f));
-    --f.live.actor;
-    ++f.live.controller; assert(!allowTeamRequest(f));
-    --f.live.controller;
-    // A respawn can replace the local avatar while staying in the same room.
-    ++f.live.player; assert(allowTeamRequest(f));
+    ++f.liveRoom; assert(!allowTeamRequest(f));
+    --f.liveRoom;
+    ++f.liveActor; assert(!allowTeamRequest(f));
+    --f.liveActor;
+    // A respawn or stopped RoomController.Update must not interrupt a
+    // Photon-bound property submission for a selected actor.
+    assert(allowTeamRequest(f));
     f.destination = -1; assert(!allowTeamRequest(f));
     f.destination = 3; assert(!allowTeamRequest(f));
 }
