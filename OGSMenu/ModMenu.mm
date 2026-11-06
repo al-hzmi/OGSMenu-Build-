@@ -1458,9 +1458,7 @@ static void OGSProcessSpeed(void) {
 @property (strong, nonatomic) UIButton *privacyClosedButton;
 @property (strong, nonatomic) UIView *flightPad;
 @property (strong, nonatomic) UIButton *flightButton;
-@property (strong, nonatomic) UILabel *gameplayLabel;
 @property (strong, nonatomic) UIButton *receiveTeamButton;
-@property (strong, nonatomic) UILabel *remoteTeamLabel;
 @property (strong, nonatomic) UILabel *training51Label;
 @property (strong, nonatomic) UILabel *training51Marker;
 @property (strong, nonatomic) CADisplayLink *training51DisplayLink;
@@ -1473,9 +1471,6 @@ static void OGSProcessSpeed(void) {
 @property (strong, nonatomic) UIButton *antiKickLockButton;
 @property (strong, nonatomic) UIButton *muteChatButton;
 @property (strong, nonatomic) UIButton *speedSetButton;
-@property (strong, nonatomic) UIButton *moreButton;
-@property (strong, nonatomic) NSMutableArray<UIView *> *advancedControls;
-@property (assign, nonatomic) BOOL advancedVisible;
 @property (strong, nonatomic) UILabel *nameChangeToast;
 @property (assign, nonatomic) NSUInteger toastSequence;
 @property (assign, nonatomic) uint64_t handoffNoticeVersion;
@@ -4031,7 +4026,6 @@ static void OGSInstallHooks(void) {
         inst.sessionNameCandidates = [NSMutableDictionary dictionary];
         inst.sessionNameCandidateSamples = [NSMutableDictionary dictionary];
         inst.sessionNameLastActor = [NSMutableDictionary dictionary];
-        inst.advancedControls = [NSMutableArray array];
         NSArray *savedBans = [[NSUserDefaults standardUserDefaults] stringArrayForKey:@"OGS_SavedBannedNames"];
         if (savedBans) [inst.bannedNames addObjectsFromArray:savedBans];
     });
@@ -4097,6 +4091,9 @@ static void OGSInstallHooks(void) {
     [b setTitle:t forState:UIControlStateNormal];
     [b setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     b.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
+    b.titleLabel.adjustsFontSizeToFitWidth = YES;
+    b.titleLabel.minimumScaleFactor = 0.78;
+    b.contentEdgeInsets = UIEdgeInsetsMake(0, 3, 0, 3);
     b.layer.cornerRadius = 7.0;
     [b addTarget:self action:a forControlEvents:UIControlEventTouchUpInside];
     return b;
@@ -4154,12 +4151,13 @@ static void OGSInstallHooks(void) {
         [self.floatingButton addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)]];
         [self.containerView addSubview:self.floatingButton];
 
-        CGFloat menuViewportHeight = MIN(332.0, MAX(160.0, CGRectGetHeight(gw.bounds) - 20.0));
+        CGFloat menuViewportHeight = MIN(358.0, MAX(160.0, CGRectGetHeight(gw.bounds) - 26.0));
         CGFloat menuX = MAX(8.0, MIN(70.0, CGRectGetWidth(gw.bounds) - 298.0));
         self.menuPanel = [[UIScrollView alloc] initWithFrame:CGRectMake(menuX, 12, 290, menuViewportHeight)];
-        self.menuPanel.contentSize = CGSizeMake(290, 353);
+        // All controls are directly available; only compact displays scroll.
+        self.menuPanel.contentSize = CGSizeMake(290, 352);
         self.menuPanel.alwaysBounceVertical = NO;
-        self.menuPanel.showsVerticalScrollIndicator = NO;
+        self.menuPanel.showsVerticalScrollIndicator = YES;
         self.menuPanel.clipsToBounds = YES;
         self.menuPanel.backgroundColor = [UIColor colorWithRed:0.09 green:0.09 blue:0.11 alpha:0.96];
         self.menuPanel.layer.cornerRadius = 12.0;
@@ -4168,7 +4166,7 @@ static void OGSInstallHooks(void) {
         self.menuPanel.hidden = YES;
 
         self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(8, 5, 240, 18)];
-        self.titleLabel.text = @"OGS53";
+        self.titleLabel.text = @"OGS54";
         self.titleLabel.textColor = [UIColor whiteColor];
         self.titleLabel.textAlignment = NSTextAlignmentCenter;
         self.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
@@ -4182,18 +4180,18 @@ static void OGSInstallHooks(void) {
                                       action:@selector(syncCloudTapped:)];
         [self.menuPanel addSubview:self.syncCloudButton];
 
-        UIView *infoBox = [[UIView alloc] initWithFrame:CGRectMake(8, 25, 274, 40)];
+        UIView *infoBox = [[UIView alloc] initWithFrame:CGRectMake(8, 24, 274, 36)];
         infoBox.backgroundColor = [UIColor colorWithRed:0.16 green:0.17 blue:0.20 alpha:1.0];
         infoBox.layer.cornerRadius = 8.0;
 
-        self.playerLabel = [[UILabel alloc] initWithFrame:CGRectMake(6, 2, 262, 18)];
+        self.playerLabel = [[UILabel alloc] initWithFrame:CGRectMake(6, 1, 262, 17)];
         self.playerLabel.text = @"المحدد: لا يوجد لاعبين";
         self.playerLabel.textColor = [UIColor systemYellowColor];
         self.playerLabel.textAlignment = NSTextAlignmentCenter;
         self.playerLabel.font = [UIFont boldSystemFontOfSize:12.0];
         [infoBox addSubview:self.playerLabel];
 
-        self.statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(6, 20, 262, 17)];
+        self.statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(6, 18, 262, 16)];
         self.statusLabel.text = @"الغرفة: غير متصل";
         self.statusLabel.textColor = [UIColor systemGreenColor];
         self.statusLabel.textAlignment = NSTextAlignmentCenter;
@@ -4207,27 +4205,15 @@ static void OGSInstallHooks(void) {
 
         NSArray *teams = @[@"المحدد: مشاهد", @"المحدد: شرطة", @"المحدد: لصوص"];
         for (NSInteger i = 0; i < 3; ++i) {
-            UIButton *b = [self makeBtn:CGRectMake(8 + 93*i, 105, 88, 31)
+            UIButton *b = [self makeBtn:CGRectMake(8 + 93*i, 95, 88, 29)
                 title:teams[i] bg:hostBlue action:@selector(changeSelectedTeam:)];
             b.tag = i; [self.menuPanel addSubview:b];
         }
-        self.flightButton = [self makeBtn:CGRectMake(8, 177, 134, 30)
+        self.flightButton = [self makeBtn:CGRectMake(8, 128, 134, 28)
             title:@"الطيران: إيقاف" bg:darkGray action:@selector(toggleSelfFlight:)];
         [self.menuPanel addSubview:self.flightButton];
-        self.gameplayLabel = [[UILabel alloc] initWithFrame:CGRectMake(8, 526, 274, 36)];
-        self.gameplayLabel.font = [UIFont systemFontOfSize:10];
-        self.gameplayLabel.textColor = UIColor.whiteColor;
-        self.gameplayLabel.textAlignment = NSTextAlignmentCenter;
-        self.gameplayLabel.numberOfLines = 2;
-        [self.menuPanel addSubview:self.gameplayLabel];
-        // Original-client transition requires no receiving control on the other
-        // account. Keep the old cooperative receiver disabled and unexposed.
-        self.remoteTeamLabel = [[UILabel alloc] initWithFrame:CGRectMake(8, 140, 274, 34)];
-        self.remoteTeamLabel.font = [UIFont systemFontOfSize:10];
-        self.remoteTeamLabel.textColor = UIColor.whiteColor;
-        self.remoteTeamLabel.textAlignment = NSTextAlignmentCenter;
-        self.remoteTeamLabel.numberOfLines = 2;
-        [self.menuPanel addSubview:self.remoteTeamLabel];
+        // Verbose Team and gameplay status stays in tap-to-open diagnostics;
+        // never occupy valuable landscape play space with status strips.
         // The experimental marker/debug button was visual noise; background
         // instrumentation stays intact without a 30 FPS HUD display link.
         // The stock game's aim/fire controls occupy the far-right edge (as
@@ -4294,63 +4280,53 @@ static void OGSInstallHooks(void) {
 
         // One-hand workflow: choose player, then choose spectator/police/thief
         // without scrolling past irrelevant debugging or unused hook buttons.
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(8, 69, 84, 30)
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(8, 64, 84, 27)
             title:@"◀ السابق" bg:darkGray action:@selector(prevPlayer:)]];
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(98, 69, 94, 30)
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(98, 64, 94, 27)
             title:@"سحب الهوست 👑" bg:hostBlue action:@selector(claimHostNow:)]];
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(198, 69, 84, 30)
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(198, 64, 84, 27)
             title:@"التالي ▶" bg:darkGray action:@selector(nextPlayer:)]];
 
-        self.godModeButton = [self makeBtn:CGRectMake(148, 177, 134, 30)
+        self.godModeButton = [self makeBtn:CGRectMake(148, 128, 134, 28)
             title:@"الدرع: إيقاف" bg:darkGray action:@selector(toggleGodMode:)];
         [self.menuPanel addSubview:self.godModeButton];
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(8, 212, 52, 29)
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(8, 160, 52, 28)
             title:@"−" bg:darkGray action:@selector(speedDown:)]];
-        self.speedSetButton = [self makeBtn:CGRectMake(65, 212, 160, 29)
+        self.speedSetButton = [self makeBtn:CGRectMake(65, 160, 160, 28)
             title:@"السرعة: 1.0x" bg:hostBlue action:@selector(promptCustomSpeed:)];
         [self.menuPanel addSubview:self.speedSetButton];
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(230, 212, 52, 29)
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(230, 160, 52, 28)
             title:@"+" bg:darkGray action:@selector(speedUp:)]];
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(8, 246, 134, 31)
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(8, 192, 134, 28)
             title:@"إعطاء الهوست للمحدد 👑" bg:hostBlue action:@selector(giveHostToSelected:)]];
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(148, 246, 134, 31)
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(148, 192, 134, 28)
             title:@"طرد المحدد" bg:kickOrange action:@selector(kickSelected:)]];
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(8, 282, 134, 30)
-            title:@"نسخ اسم المحدد" bg:darkGray action:@selector(copySelectedName:)]];
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(148, 282, 134, 30)
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(8, 224, 87, 28)
+            title:@"نسخ الاسم" bg:darkGray action:@selector(copySelectedName:)]];
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(101, 224, 88, 28)
+            title:@"سجل الأسماء" bg:darkGray action:@selector(showSelectedNameHistory:)]];
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(195, 224, 87, 28)
             title:@"تغيير اسمي" bg:darkGray action:@selector(promptSelfNickname:)]];
 
-        self.moreButton = [self makeBtn:CGRectMake(8, 317, 274, 29)
-            title:@"المزيد من إعدادات الروم ▾" bg:darkGray action:@selector(toggleAdvancedMenu:)];
-        [self.menuPanel addSubview:self.moreButton];
-        void (^addAdvanced)(UIView *) = ^(UIView *view) {
-            view.hidden = YES;
-            [self.advancedControls addObject:view];
-            [self.menuPanel addSubview:view];
-        };
-        self.hostLockButton = [self makeBtn:CGRectMake(148, 352, 134, 30)
+        self.hostLockButton = [self makeBtn:CGRectMake(148, 256, 134, 28)
             title:@"استعادة تلقائية: إيقاف" bg:darkGray action:@selector(toggleAutoHost:)];
-        addAdvanced(self.hostLockButton);
-        self.antiKickLockButton = [self makeBtn:CGRectMake(8, 352, 134, 30)
+        [self.menuPanel addSubview:self.hostLockButton];
+        self.antiKickLockButton = [self makeBtn:CGRectMake(8, 256, 134, 28)
             title:@"قفل البقاء: تلقائي" bg:darkGray action:@selector(toggleAntiKickHardLock:)];
-        addAdvanced(self.antiKickLockButton);
-        self.privacyHiddenButton = [self makeBtn:CGRectMake(8, 387, 134, 30)
+        [self.menuPanel addSubview:self.antiKickLockButton];
+        self.privacyHiddenButton = [self makeBtn:CGRectMake(8, 288, 134, 28)
             title:@"مخفي: إيقاف" bg:darkGray action:@selector(togglePrivacyHidden:)];
-        addAdvanced(self.privacyHiddenButton);
-        self.privacyClosedButton = [self makeBtn:CGRectMake(148, 387, 134, 30)
+        [self.menuPanel addSubview:self.privacyHiddenButton];
+        self.privacyClosedButton = [self makeBtn:CGRectMake(148, 288, 134, 28)
             title:@"خاص ومغلق: إيقاف" bg:darkGray action:@selector(togglePrivacyClosed:)];
-        addAdvanced(self.privacyClosedButton);
-        self.grenade31Button = [self makeBtn:CGRectMake(8, 422, 274, 30)
+        [self.menuPanel addSubview:self.privacyClosedButton];
+        self.grenade31Button = [self makeBtn:CGRectMake(8, 320, 134, 28)
             title:@"قنابل متجددة: إيقاف" bg:darkGray action:@selector(toggleGrenade31:)];
-        addAdvanced(self.grenade31Button);
-        addAdvanced([self makeBtn:CGRectMake(8, 457, 274, 30)
-            title:@"سعة الروم (2–32)" bg:hostBlue action:@selector(promptRoomCapacity:)]);
-        addAdvanced([self makeBtn:CGRectMake(8, 492, 274, 30)
-            title:@"سجل الأسماء المرصودة للمحدد" bg:darkGray action:@selector(showSelectedNameHistory:)]);
+        [self.menuPanel addSubview:self.grenade31Button];
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(148, 320, 134, 28)
+            title:@"سعة الروم (2–32)" bg:hostBlue action:@selector(promptRoomCapacity:)]];
         // The stale knife-range, chat-hook and local-ban switches are omitted;
         // none has a verified working runtime effect in the supplied trace.
-        self.gameplayLabel.hidden = YES;
-        [self.advancedControls addObject:self.gameplayLabel];
 
         [self.containerView addSubview:self.menuPanel];
         self.containerView.floatingButton = self.floatingButton;
@@ -4363,16 +4339,6 @@ static void OGSInstallHooks(void) {
 
         [self fetchGitHubCloudConfigWithFeedback:NO];
     });
-}
-
-- (void)toggleAdvancedMenu:(UIButton *)sender {
-    (void)sender;
-    self.advancedVisible = !self.advancedVisible;
-    for (UIView *view in self.advancedControls) view.hidden = !self.advancedVisible;
-    self.menuPanel.contentSize = CGSizeMake(290, self.advancedVisible ? 568 : 353);
-    [self.moreButton setTitle:self.advancedVisible ? @"إخفاء إعدادات الروم ▴" :
-        @"المزيد من إعدادات الروم ▾" forState:UIControlStateNormal];
-    if (!self.advancedVisible) [self.menuPanel setContentOffset:CGPointZero animated:YES];
 }
 
 - (void)showQuickNotice:(NSString *)message {
@@ -4697,7 +4663,7 @@ static void OGSInstallHooks(void) {
     int32_t readPresence = __atomic_load_n(&gOGSPresenceReadOnly, __ATOMIC_ACQUIRE);
     int32_t localActor = __atomic_load_n(&gOGSPresenceActorID, __ATOMIC_ACQUIRE);
     int32_t localMaster = __atomic_load_n(&gOGSLocalMasterActorID, __ATOMIC_ACQUIRE);
-    self.titleLabel.text = @"OGS53";
+    self.titleLabel.text = @"OGS54";
     uint32_t selected = __atomic_load_n(&gOGS.selectedPeer, __ATOMIC_ACQUIRE);
 
     if (count == 0) {
@@ -4756,8 +4722,6 @@ static void OGSInstallHooks(void) {
         self.statusLabel.text = [NSString stringWithFormat:@"%@ | صد طرد: %u 🛡️",
                                  roomLine, blocked];
     }
-    self.gameplayLabel.text = ogs46::statusText();
-    self.remoteTeamLabel.text = ogs46::originalClientTeamStatus();
     os_unfair_lock_lock(&ogs46::lock);
     ogs46::Training51 lab = ogs46::training51;
     NSString *labMessage = ogs46::training51Message;
@@ -5282,6 +5246,8 @@ static void OGSInstallHooks(void) {
 - (void)toggleMenu {
     self.menuPanel.hidden = !self.menuPanel.hidden;
     if (!self.menuPanel.hidden) {
+        // The first tap should always reveal the player picker and team row.
+        [self.menuPanel setContentOffset:CGPointZero animated:NO];
         OGSInstallHooks();
         [self refreshUI];
     }
@@ -5690,23 +5656,20 @@ static void OGSInstallHooks(void) {
     OGSRoomSnapshot peers = OGSCurrentSnapshot();
     uint32_t selected = __atomic_load_n(&gOGS.selectedPeer, __ATOMIC_ACQUIRE);
     if (!peers.inRoom || !peers.count || selected >= peers.count) {
-        self.remoteTeamLabel.text = @"حدد حسابك الثاني من قائمة اللاعبين الحالية أولًا";
+        [self showQuickNotice:@"اختر لاعبًا من القائمة أولًا"];
         return;
     }
     int32_t targetActor = peers.peers[selected].actorID;
     if(targetActor!=self.selectionActor51 || peers.roomAddress!=self.selectionRoom51) {
-        self.remoteTeamLabel.text=@"تغيرت القائمة؛ حدد الحساب الصحيح مجددًا";return;
+        [self showQuickNotice:@"تغيرت قائمة اللاعبين؛ اختر الحساب مجددًا"];return;
     }
     NSInteger team = sender.tag;
     // One tap = one request; no modal confirmation, no UIKit handoff or pause.
     // Only the actor explicitly selected in the room roster is targeted.
     bool queued = ogs46::queueOriginalClientTeam(targetActor, (int)team);
-    NSString *actorName = [NSString stringWithUTF8String:peers.peers[selected].name] ?: @"اللاعب المحدد";
-    NSString *destination = team == 0 ? @"مشاهد" : team == 1 ? @"شرطة" : @"لصوص";
-    self.remoteTeamLabel.text = queued ?
-        [NSString stringWithFormat:@"طلب %@ للّاعب %@ (#%d)؛ قبول الخادم غير مؤكد",
-            destination, actorName, targetActor] :
-        ogs46::originalClientTeamStatus();
+    // Successful dispatches stay quiet during play. Rejection is a short
+    // non-modal notice; complete correlated traces remain in diagnostics.
+    if (!queued) [self showQuickNotice:ogs46::originalClientTeamStatus()];
 }
 - (void)toggleTeamReceiving:(UIButton *)sender {
     (void)sender; ogs46::toggleReceiving();
@@ -5730,7 +5693,7 @@ static void OGSInstallHooks(void) {
     [root presentViewController:dialog animated:YES completion:nil];
 }
 - (void)toggleSelfFlight:(UIButton *)sender {
-    if (!ogs46::toggleFlight()) self.gameplayLabel.text = @"يلزم لاعب حي واكتمال إعادة الظهور وIPA50 كامل";
+    if (!ogs46::toggleFlight()) [self showQuickNotice:@"الطيران يتطلب لاعبًا حيًا بعد اكتمال الظهور"];
 }
 - (void)moveFlightPad:(UIPanGestureRecognizer *)gesture {
     UIView *parent = self.containerView;
