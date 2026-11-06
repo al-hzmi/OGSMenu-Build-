@@ -4321,11 +4321,13 @@ static void OGSInstallHooks(void) {
         self.privacyClosedButton = [self makeBtn:CGRectMake(148, 288, 134, 28)
             title:@"خاص ومغلق: إيقاف" bg:darkGray action:@selector(togglePrivacyClosed:)];
         [self.menuPanel addSubview:self.privacyClosedButton];
-        self.grenade31Button = [self makeBtn:CGRectMake(8, 320, 134, 28)
-            title:@"قنابل متجددة: إيقاف" bg:darkGray action:@selector(toggleGrenade31:)];
+        self.grenade31Button = [self makeBtn:CGRectMake(8, 320, 87, 28)
+            title:@"قنابل: إيقاف" bg:darkGray action:@selector(toggleGrenade31:)];
         [self.menuPanel addSubview:self.grenade31Button];
-        [self.menuPanel addSubview:[self makeBtn:CGRectMake(148, 320, 134, 28)
-            title:@"سعة الروم (2–32)" bg:hostBlue action:@selector(promptRoomCapacity:)]];
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(101, 320, 88, 28)
+            title:@"سعة الروم" bg:hostBlue action:@selector(promptRoomCapacity:)]];
+        [self.menuPanel addSubview:[self makeBtn:CGRectMake(195, 320, 87, 28)
+            title:@"العودة للعب" bg:hostBlue action:@selector(requestSelfReturn:)]];
         // The stale knife-range, chat-hook and local-ban switches are omitted;
         // none has a verified working runtime effect in the supplied trace.
 
@@ -5656,6 +5658,37 @@ static void OGSInstallHooks(void) {
     self.statusLabel.text = @"طلب السعة أُرسل؛ قبول الخادم يحتاج تحققًا من جهاز ثانٍ";
 }
 
+- (void)requestSelfReturn:(UIButton *)button {
+    (void)button;
+    // Owner-only, one-shot native gameplay path. No Photon actor-property
+    // spoofing or automatic contention loop is attempted here.
+    ogs46::Snapshot selfState = ogs46::snapshot();
+    if (!selfState.valid || selfState.id.actor <= 0) {
+        [self showQuickNotice:@"انتظر اكتمال تحديث شخصيتك داخل الروم"];
+        return;
+    }
+    if (selfState.team != 0) {
+        [self showQuickNotice:@"أنت ضمن فريق بالفعل؛ هذا الزر للخروج من المشاهد"];
+        return;
+    }
+    int desired = -1;
+    if (ogs46::teamDecision(1, selfState.team, selfState.respawn,
+                            selfState.a, selfState.b, selfState.mode) == ogs46::Denial::None)
+        desired = 1;
+    else if (ogs46::teamDecision(2, selfState.team, selfState.respawn,
+                                 selfState.a, selfState.b, selfState.mode) == ogs46::Denial::None)
+        desired = 2;
+    if (desired < 0) {
+        [self showQuickNotice:@"اللعبة تمنع العودة الآن: الإحياء أو توازن الفرق"];
+        return;
+    }
+    if (!ogs46::queueTeam(desired)) {
+        [self showQuickNotice:@"طلب العودة مشغول أو تحديث اللاعب غير جاهز"];
+        return;
+    }
+    self.statusLabel.text = @"طلب عودتك إلى اللعب ينتظر مسار اللعبة الأصلي";
+}
+
 - (void)refreshTraining51Marker {
     os_unfair_lock_lock(&ogs46::lock);ogs46::Training51 lab=ogs46::training51;os_unfair_lock_unlock(&ogs46::lock);
     CGRect bounds = self.containerView.bounds;
@@ -5824,13 +5857,13 @@ static void OGSInstallHooks(void) {
     uint32_t next = wasOn ? 0u : 1u;
     __atomic_store_n(&gOGSGrenade31Enabled, next, __ATOMIC_RELEASE);
     if (!next) {
-        [button setTitle:@"قنابل متجددة: إيقاف" forState:UIControlStateNormal];
+        [button setTitle:@"قنابل: إيقاف" forState:UIControlStateNormal];
         button.backgroundColor = [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
         self.statusLabel.text = @"OGS33: تم إيقاف تجربة القنابل";
         return;
     }
     __atomic_fetch_add(&gOGSGrenade33ArmedCount, 1u, __ATOMIC_RELAXED);
-    [button setTitle:@"قنابل متجددة: مفعّل" forState:UIControlStateNormal];
+    [button setTitle:@"قنابل: مفعّلة" forState:UIControlStateNormal];
     button.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
     uint32_t fire = __atomic_load_n(&gOGSMasterCacheStatus[10], __ATOMIC_ACQUIRE);
     uint32_t shoot = __atomic_load_n(&gOGSMasterCacheStatus[11], __ATOMIC_ACQUIRE);

@@ -42,7 +42,7 @@ actions = (
     "promptSelfNickname:", "toggleAutoHost:",
     "toggleAntiKickHardLock:", "togglePrivacyHidden:",
     "togglePrivacyClosed:", "toggleGrenade31:",
-    "promptRoomCapacity:",
+    "promptRoomCapacity:", "requestSelfReturn:",
 )
 for action in actions:
     check(f"@selector({action})" in menu, f"missing play-menu action: {action}")

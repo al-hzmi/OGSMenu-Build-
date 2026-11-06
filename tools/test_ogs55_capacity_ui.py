@@ -52,5 +52,24 @@ for occupants in (1, 2, 8, 16, 31, 32):
         require(all(n >= occupants for n in enabled),
                 "choice would admit below-occupancy capacity")
         require(current not in enabled, "choice would submit a no-op")
+
+# A one-shot, self-only recovery must use the game's original PrepareTeam
+# lifecycle via the existing guarded queue, never a remote actor mutation.
+return_start = code.index("- (void)requestSelfReturn:(UIButton *)button {")
+return_stop = code.index("- (void)refreshTraining51Marker", return_start)
+self_return = code[return_start:return_stop]
+require('@selector(requestSelfReturn:)' in code, "self return is not accessible")
+require("selfState.team != 0" in self_return,
+        "return action must be limited to the local spectator state")
+require("ogs46::teamDecision(1" in self_return and
+        "ogs46::teamDecision(2" in self_return,
+        "self return must use the native game mode/respawn/balance rules")
+require("ogs46::queueTeam(desired)" in self_return,
+        "self return must use the guarded native gameplay queue")
+require("queueOriginalClientTeam" not in self_return and
+        "OGSClaimMasterReal" not in self_return,
+        "self return must never mutate remote players or host privileges")
+require("for (" not in self_return and "while (" not in self_return,
+        "self return must not run a continuous fight against Photon state")
 print("PASS capacity picker: 31 grid buttons, gray disabled states, "
-      "in-bounds layout, identity/occupancy re-checks")
+      "in-bounds layout, identity/occupancy re-checks, guarded self return")
