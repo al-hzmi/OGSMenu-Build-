@@ -88,6 +88,8 @@ static bool sameSession(Identity a, Identity b) {
 static void stopFlight() {
     os_unfair_lock_lock(&lock); flightWanted = false; axis = 0; os_unfair_lock_unlock(&lock);
 }
+static void remoteTick(void *self, const Snapshot &s);
+static void processSelfRequest(void *self, const Snapshot &s, const Request &req);
 static void roomUpdate(void *self, void *method) {
     if (roomOriginal) roomOriginal(self, method);
     Snapshot s = sample(self);
@@ -99,7 +101,7 @@ static void roomUpdate(void *self, void *method) {
     Request req;
     os_unfair_lock_lock(&lock);
     latest = s;
-    if (flightWanted && (!s.valid || !s.privateRoom || !s.alive || !same(s.id, flightIdentity))) {
+    if (flightWanted && (!s.valid || !s.alive || !same(s.id, flightIdentity))) {
         flightWanted = false; axis = 0;
     }
     req = pending; pending.team = -1;
@@ -113,6 +115,10 @@ static void roomUpdate(void *self, void *method) {
             awaitingTeam = -1; // local observation only; remote acceptance unmeasured
         }
     }
+    processSelfRequest(self, s, req);
+    remoteTick(self, s);
+}
+static void processSelfRequest(void *self, const Snapshot &s, const Request &req) {
     if (req.team < 0) return;
     int result = -1;
     if (s.valid && s.privateRoom && same(req.id, s.id) && now() - req.at < 3.) {
@@ -149,7 +155,7 @@ static void fpsUpdate(void *self, void *method) {
         if (fpsOriginal) fpsOriginal(self, method); return;
     }
     Snapshot s = sample((void *)id.controller);
-    bool usable = s.valid && s.privateRoom && s.alive && same(s.id, id) &&
+    bool usable = s.valid && s.alive && same(s.id, id) &&
         read(pn, 0xF8, back) && back == self && objectAlive(self) &&
         read(self, 0x90, cc) && objectAlive(cc) && read(self, 0x98, transform) && objectAlive(transform) &&
         read(self, 0x108, ladder) && !objectAlive(ladder);
@@ -243,7 +249,7 @@ static bool toggleFlight() {
     Snapshot s = snapshot();
     os_unfair_lock_lock(&lock);
     if (flightWanted) { flightWanted = false; axis = 0; os_unfair_lock_unlock(&lock); return true; }
-    bool ok = s.valid && s.privateRoom && s.alive && s.respawn == -1 &&
+    bool ok = s.valid && s.alive && s.respawn == -1 &&
         __atomic_load_n(&bridgeStatus[1], __ATOMIC_ACQUIRE) == 1 &&
         __atomic_load_n(&bridgeStatus[2], __ATOMIC_ACQUIRE) == 1;
     if (ok) { flightIdentity = s.id; flightWanted = true; axis = 0; }
@@ -257,7 +263,6 @@ static NSString *statusText() {
         __atomic_store_n(&gOGS.godModeOn, 0, __ATOMIC_RELEASE); }
     os_unfair_lock_unlock(&lock);
     if (!s.valid) return @"انتظار دخول غرفة وتحديث اللاعب";
-    if (!s.privateRoom) return @"الميزات الذاتية تحتاج غرفة مخفية ومغلقة";
     if (flying) return @"الطيران مفعّل • الأسهم للارتفاع وعصا اللعبة للحركة";
     if (code == 1) return @"طلب انتقال ينتظر تحديث اللعبة";
     if (code == 2) return @"نُفّذ المسار الأصلي • انتظار الحالة المحلية";
@@ -269,3 +274,5 @@ static NSString *statusText() {
         s.team == 0 ? @"مشاهد" : s.team == 1 ? @"شرطة" : @"لصوص"];
 }
 }
+
+#include "OGSRemoteTeam.h"

@@ -1394,6 +1394,8 @@ static void OGSProcessSpeed(void) {
 @property (strong, nonatomic) UIView *flightPad;
 @property (strong, nonatomic) UIButton *flightButton;
 @property (strong, nonatomic) UILabel *gameplayLabel;
+@property (strong, nonatomic) UIButton *receiveTeamButton;
+@property (strong, nonatomic) UILabel *remoteTeamLabel;
 @property (strong, nonatomic) UIButton *godModeButton;     // درع الحماية
 @property (strong, nonatomic) UIButton *magicBulletButton; // مدى السكين
 @property (strong, nonatomic) UIButton *grenade31Button; // قنابل متجددة
@@ -3953,7 +3955,7 @@ static void OGSInstallHooks(void) {
         CGFloat menuViewportHeight = MIN(358.0, MAX(160.0, CGRectGetHeight(gw.bounds) - 26.0));
         CGFloat menuX = MAX(8.0, MIN(75.0, CGRectGetWidth(gw.bounds) - 323.0));
         self.menuPanel = [[UIScrollView alloc] initWithFrame:CGRectMake(menuX, 18, 315, menuViewportHeight)];
-        self.menuPanel.contentSize = CGSizeMake(315, 585);
+        self.menuPanel.contentSize = CGSizeMake(315, 678);
         self.menuPanel.alwaysBounceVertical = NO;
         self.menuPanel.showsVerticalScrollIndicator = YES;
         self.menuPanel.clipsToBounds = YES;
@@ -3964,7 +3966,7 @@ static void OGSInstallHooks(void) {
         self.menuPanel.hidden = YES;
 
         self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 5, 260, 18)];
-        self.titleLabel.text = @"OGS46 | ميزات ذاتية للاختبار";
+        self.titleLabel.text = @"OGS47 | الطيران ونقل الحساب الثاني";
         self.titleLabel.textColor = [UIColor whiteColor];
         self.titleLabel.textAlignment = NSTextAlignmentCenter;
         self.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
@@ -4003,10 +4005,10 @@ static void OGSInstallHooks(void) {
         UIColor *hostBlue   = [UIColor colorWithRed:0.14 green:0.42 blue:0.72 alpha:1.0];
         UIColor *wpnGreen   = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
 
-        NSArray *teams = @[@"مشاهد", @"شرطة", @"لصوص"];
+        NSArray *teams = @[@"المحدد: مشاهد", @"المحدد: شرطة", @"المحدد: لصوص"];
         for (NSInteger i = 0; i < 3; ++i) {
             UIButton *b = [self makeBtn:CGRectMake(10 + 100*i, 472, 95, 30)
-                title:teams[i] bg:hostBlue action:@selector(changeSelfTeam:)];
+                title:teams[i] bg:hostBlue action:@selector(changeSelectedTeam:)];
             b.tag = i; [self.menuPanel addSubview:b];
         }
         self.flightButton = [self makeBtn:CGRectMake(10, 507, 295, 30)
@@ -4018,6 +4020,15 @@ static void OGSInstallHooks(void) {
         self.gameplayLabel.textAlignment = NSTextAlignmentCenter;
         self.gameplayLabel.numberOfLines = 2;
         [self.menuPanel addSubview:self.gameplayLabel];
+        self.receiveTeamButton = [self makeBtn:CGRectMake(10, 583, 295, 30)
+            title:@"استقبال طلبات النقل: إيقاف" bg:darkGray action:@selector(toggleTeamReceiving:)];
+        [self.menuPanel addSubview:self.receiveTeamButton];
+        self.remoteTeamLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 616, 295, 55)];
+        self.remoteTeamLabel.font = [UIFont systemFontOfSize:10];
+        self.remoteTeamLabel.textColor = UIColor.whiteColor;
+        self.remoteTeamLabel.textAlignment = NSTextAlignmentCenter;
+        self.remoteTeamLabel.numberOfLines = 3;
+        [self.menuPanel addSubview:self.remoteTeamLabel];
         self.flightPad = [[UIView alloc] initWithFrame:CGRectMake(CGRectGetWidth(gw.bounds)-65, 80, 55, 110)];
         self.flightPad.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
         self.flightPad.hidden = YES;
@@ -4035,6 +4046,7 @@ static void OGSInstallHooks(void) {
         [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationWillResignActiveNotification
             object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *note) {
                 ogs46::stopFlight();
+                ogs46::stopRemote();
             }];
 
 
@@ -4214,6 +4226,7 @@ static void OGSInstallHooks(void) {
         @autoreleasepool { OGSRefreshReadOnlyRoster(); }
     }
     [self updateSessionNameHistory];
+    [self presentTeamConsentIfNeeded];
 
     if (!self.menuPanel || self.menuPanel.hidden) return;
     [self refreshUI];
@@ -4397,6 +4410,9 @@ static void OGSInstallHooks(void) {
                                  roomLine, blocked];
     }
     self.gameplayLabel.text = ogs46::statusText();
+    self.remoteTeamLabel.text = ogs46::remoteStatusText();
+    os_unfair_lock_lock(&ogs46::lock); bool receiving = ogs46::receivingUI; os_unfair_lock_unlock(&ogs46::lock);
+    [self.receiveTeamButton setTitle:receiving ? @"استقبال طلبات النقل: مفعّل" : @"استقبال طلبات النقل: إيقاف" forState:UIControlStateNormal];
     os_unfair_lock_lock(&ogs46::lock); bool flightOn = ogs46::flightWanted; os_unfair_lock_unlock(&ogs46::lock);
     self.flightPad.hidden = !flightOn;
     [self.flightButton setTitle:flightOn ? @"الطيران: مفعّل — اضغط للإيقاف" : @"الطيران: إيقاف" forState:UIControlStateNormal];
@@ -5283,12 +5299,39 @@ static void OGSInstallHooks(void) {
     else self.statusLabel.text = @"أغلق النوافذ المفتوحة ثم أعد المحاولة";
 }
 
-- (void)changeSelfTeam:(UIButton *)sender {
-    ogs46::queueTeam((int)sender.tag);
-    self.gameplayLabel.text = ogs46::statusText();
+- (void)changeSelectedTeam:(UIButton *)sender {
+    OGSRoomSnapshot peers = OGSCurrentSnapshot();
+    uint32_t selected = __atomic_load_n(&gOGS.selectedPeer, __ATOMIC_ACQUIRE);
+    if (!peers.inRoom || selected >= peers.count) {
+        self.remoteTeamLabel.text = @"اختر حسابك الثاني من السابق / التالي أولًا";
+        return;
+    }
+    ogs46::queueRemoteTeam(peers.peers[selected].actorID, (int)sender.tag);
+    self.remoteTeamLabel.text = ogs46::remoteStatusText();
+}
+- (void)toggleTeamReceiving:(UIButton *)sender {
+    (void)sender; ogs46::toggleReceiving();
+}
+- (void)presentTeamConsentIfNeeded {
+    UIViewController *root = [self gameMainWindow].rootViewController;
+    if (!root || root.presentedViewController) return;
+    ogs46::RemoteRequest r = ogs46::takeConsentPrompt();
+    if (!r.nonce) return;
+    NSString *team = r.team == 0 ? @"مشاهد" : r.team == 1 ? @"شرطة" : @"لصوص";
+    NSString *message = [NSString stringWithFormat:@"طلب نقل حسابك إلى %@. وافق فقط إذا أرسلت هذا الطلب من جهازك الآخر. قد تُزال شخصيتك الحالية وتُعاد تهيئتها. ينتهي الطلب خلال 30 ثانية.", team];
+    UIAlertController *dialog = [UIAlertController alertControllerWithTitle:@"نقل حسابك الثاني"
+        message:message preferredStyle:UIAlertControllerStyleAlert];
+    NSString *nonce = r.nonce;
+    [dialog addAction:[UIAlertAction actionWithTitle:@"رفض" style:UIAlertActionStyleCancel handler:^(UIAlertAction *action) {
+        (void)action; ogs46::decideConsent(nonce, false);
+    }]];
+    [dialog addAction:[UIAlertAction actionWithTitle:@"موافق، انقل حسابي" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        (void)action; ogs46::decideConsent(nonce, true);
+    }]];
+    [root presentViewController:dialog animated:YES completion:nil];
 }
 - (void)toggleSelfFlight:(UIButton *)sender {
-    if (!ogs46::toggleFlight()) self.gameplayLabel.text = @"يلزم لاعب حي وغرفة خاصة وIPA46 كامل";
+    if (!ogs46::toggleFlight()) self.gameplayLabel.text = @"يلزم لاعب حي واكتمال إعادة الظهور وIPA47 كامل";
 }
 - (void)startFlightAxis:(UIButton *)sender {
     os_unfair_lock_lock(&ogs46::lock);

@@ -37,6 +37,8 @@ jobs:
         run: clang++ -std=c++17 -Wall -Wextra -pedantic tests/test_shield_policy.cpp -o /tmp/ogs-shield-policy && /tmp/ogs-shield-policy
       - name: Test gameplay lifecycle policy
         run: clang++ -std=c++17 -Wall -Wextra -Werror -pedantic tests/test_gameplay_policy.cpp -o /tmp/ogs-gameplay-policy && /tmp/ogs-gameplay-policy
+      - name: Test remote team request lifecycle
+        run: clang++ -std=c++17 -Wall -Wextra -Werror -pedantic tests/test_remote_team_policy.cpp -o /tmp/ogs-remote-team && /tmp/ogs-remote-team
       - name: Compile iOS arm64 dylib
         shell: bash
         run: |
@@ -46,9 +48,9 @@ jobs:
           xcrun --sdk iphoneos clang++ -target arm64-apple-ios14.0 -isysroot "$SDK" -std=c++17 -fobjc-arc -fblocks -dynamiclib -Ivendor/dobby/build/iphoneos -framework UIKit -framework Foundation -framework QuartzCore -framework CoreGraphics -Wl,-install_name,@rpath/OGSMenu.dylib OGSMenu/ModMenu.mm vendor/dobby/build/iphoneos/arm64/libdobby.a -lc++ -o dist/OGSMenu.dylib
           # The game links @rpath/OGSMenu.dylib internally. Ship the same
           # bytes under an explicit release name for unambiguous downloads.
-          cp dist/OGSMenu.dylib dist/OGS46.dylib
+          cp dist/OGSMenu.dylib dist/OGS47.dylib
           file dist/OGSMenu.dylib
-          shasum -a 256 dist/OGSMenu.dylib dist/OGS46.dylib
+          shasum -a 256 dist/OGSMenu.dylib dist/OGS47.dylib
           xcrun vtool -show-build dist/OGSMenu.dylib
       - uses: actions/upload-artifact@v4
         with:
@@ -56,8 +58,8 @@ jobs:
           path: dist/OGSMenu.dylib
       - uses: actions/upload-artifact@v4
         with:
-          name: OGS46-ARM64-Artifact
-          path: dist/OGS46.dylib
+          name: OGS47-ARM64-Artifact
+          path: dist/OGS47.dylib
       - uses: actions/upload-artifact@v4
         with:
           name: OGSMenu-Stage12-Source-Review
