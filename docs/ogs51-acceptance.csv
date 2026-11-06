@@ -1,0 +1,133 @@
+feature,scenario,master,repetitions,code_path,correlated_call,local_result,server_result,stock_client_result,next_round,crash_hang_check,final_status,evidence_or_blocker
+team,1->2 mid-round,local,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+team,1->2 mid-round,other,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+team,1->2 after-death,local,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+team,1->2 after-death,other,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+team,1->2 round-end,local,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+team,1->2 round-end,other,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+team,1->2 next-round-start,local,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+team,1->2 next-round-start,other,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+team,2->1 mid-round,local,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+team,2->1 mid-round,other,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+team,2->1 after-death,local,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+team,2->1 after-death,other,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+team,2->1 round-end,local,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+team,2->1 round-end,other,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+team,2->1 next-round-start,local,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+team,2->1 next-round-start,other,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+team,1->0 mid-round,local,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+team,1->0 mid-round,other,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+team,1->0 after-death,local,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+team,1->0 after-death,other,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+team,1->0 round-end,local,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+team,1->0 round-end,other,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+team,1->0 next-round-start,local,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+team,1->0 next-round-start,other,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+team,2->0 mid-round,local,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+team,2->0 mid-round,other,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+team,2->0 after-death,local,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+team,2->0 after-death,other,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+team,2->0 round-end,local,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+team,2->0 round-end,other,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+team,2->0 next-round-start,local,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+team,2->0 next-round-start,other,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+team,0->1 mid-round,local,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+team,0->1 mid-round,other,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+team,0->1 after-death,local,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+team,0->1 after-death,other,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+team,0->1 round-end,local,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+team,0->1 round-end,other,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+team,0->1 next-round-start,local,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+team,0->1 next-round-start,other,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+team,0->2 mid-round,local,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+team,0->2 mid-round,other,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+team,0->2 after-death,local,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+team,0->2 after-death,other,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+team,0->2 round-end,local,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+team,0->2 round-end,other,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+team,0->2 next-round-start,local,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+team,0->2 next-round-start,other,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+shield,bullet shield=off,local,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+shield,bullet shield=on,local,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+shield,knife shield=off,local,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+shield,knife shield=on,local,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+shield,fall shield=off,local,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+shield,fall shield=on,local,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+shield,grenade-near shield=off,local,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+shield,grenade-near shield=on,local,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+shield,grenade-far shield=off,local,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+shield,grenade-far shield=on,local,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+shield,C4-near shield=off,local,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+shield,C4-near shield=on,local,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+shield,C4-far shield=off,local,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+shield,C4-far shield=on,local,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+grenade-inventory,five-single-throws,local,5,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+grenade-inventory,purchase,local,5,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+grenade-inventory,weapon-switch,local,5,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+grenade-inventory,death-respawn,local,5,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+grenade-damage,inside-6 game units,local,3,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+grenade-damage,just-outside-6 game units,local,3,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+grenade-damage,inside-12 game units,local,3,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+grenade-damage,outside-12 game units,local,3,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+host,join-leave,local,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+host,disconnect-reconnect,local,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+host,one-manual-restore,local,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+host,room-change,local,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+flight,speed-and-flight,local,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+flight,up-down-stop,local,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+flight,death-respawn,local,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+flight,leave-room,local,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+flight,saved-pad-position,local,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+shield,bullet shield=off,other,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+shield,bullet shield=on,other,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+shield,knife shield=off,other,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+shield,knife shield=on,other,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+shield,fall shield=off,other,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+shield,fall shield=on,other,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+shield,grenade-near shield=off,other,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+shield,grenade-near shield=on,other,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+shield,grenade-far shield=off,other,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+shield,grenade-far shield=on,other,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+shield,C4-near shield=off,other,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+shield,C4-near shield=on,other,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+shield,C4-far shield=off,other,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+shield,C4-far shield=on,other,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+grenade-inventory,five-single-throws,other,5,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+grenade-inventory,purchase,other,5,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+grenade-inventory,weapon-switch,other,5,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+grenade-inventory,death-respawn,other,5,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+grenade-damage,inside-6 game units,other,3,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+grenade-damage,just-outside-6 game units,other,3,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+grenade-damage,inside-12 game units,other,3,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+grenade-damage,outside-12 game units,other,3,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+host,join-leave,other,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+host,disconnect-reconnect,other,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+host,one-manual-restore,other,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+host,room-change,other,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+flight,speed-and-flight,other,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+flight,up-down-stop,other,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+flight,death-respawn,other,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+flight,leave-room,other,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+flight,saved-pad-position,other,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+target-identity,duplicate-names,both,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+target-identity,rename-same-actor,both,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+target-identity,target-leaves,both,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+target-identity,rejoin-new-actor,both,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+target-identity,different-room,both,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+target-identity,double-tap,both,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+target-identity,offline,both,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+training-marker,occluded-target,both,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+training-marker,behind-camera,both,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+training-marker,moving-target,both,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+training-marker,death-respawn,both,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+training-marker,iPhone-landscape-controls,both,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+training-marker,60s-frame-time-baseline,both,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+hit-validation,knife-in-range,both,3,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+hit-validation,knife-outside-range,both,3,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+hit-validation,knife-wall,both,3,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+hit-validation,duplicate-display-names,both,3,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+regression,nickname,both,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+regression,decorated-nickname,both,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+regression,100-graphemes,both,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+regression,capacity-increase,both,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide
+regression,capacity-decrease,both,1,STATIC REVIEWED,NOT RUN,NOT RUN,UNVERIFIED,NOT RUN,NOT RUN,NOT RUN,NOT VERIFIED,No connected iOS device / private Photon session; see test guide

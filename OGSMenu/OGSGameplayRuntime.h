@@ -22,7 +22,7 @@ static int status = 0; // 1=requested, 2=issued, 3=local state observed, negativ
 static int awaitingTeam = -1;
 static double issuedAt = 0;
 static Identity issuedIdentity;
-static volatile uint32_t bridgeStatus[3] = {};
+static volatile uint32_t bridgeStatus[7] = {};
 static volatile uint32_t flightFrames = 0;
 static Update0Fn roomOriginal = nullptr, fpsOriginal = nullptr;
 using MoveFn = int32_t (*)(void *, Vector3, const void *);
@@ -269,6 +269,7 @@ static bool installBridge(unsigned i, uintptr_t entry, uintptr_t stub, uintptr_t
     __atomic_store_n((uintptr_t *)(base + slot), callback, __ATOMIC_RELEASE);
     __atomic_store_n(&bridgeStatus[i], 1u, __ATOMIC_RELEASE); return true;
 }
+static void install51();
 static void install() {
     os_unfair_lock_lock(&gHookInstallLock);
     // Install the movement dependency before allowing FPS.Update to use it.
@@ -280,6 +281,7 @@ static void install() {
     installBridge(0, 0x13F3F2C, 0x31C0, 0x2A98DF8, 0x6DBC23E9,
         (uintptr_t)&roomUpdate, (uintptr_t *)&roomOriginal);
     os_unfair_lock_unlock(&gHookInstallLock);
+    install51();
 }
 static bool queueTeam(int team) {
     Snapshot s = snapshot();
@@ -322,4 +324,6 @@ static NSString *statusText() {
 }
 
 #include "OGSRemoteTeam.h"
+#include "OGS51Native.h"
 #include "OGSOriginalClientTeam.h"
+#include "OGS51Training.h"
