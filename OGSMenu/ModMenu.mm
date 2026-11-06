@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include <mach/vm_region.h>
+#include "OGSShieldPolicy.h"
 
 #define OGS_MAX_PEERS       64
 #define OGS_MAX_NAME_BYTES  128
@@ -1749,8 +1750,9 @@ static bool OGSReadGrenadeSelectionProbe(void *weapon, int32_t *slotCount,
 // PhotonView.ownerId at +0x20,
 // PhotonNetwork.get_player RVA 0x13CABF0 (PhotonPlayer),
 // PhotonPlayer.ID at +0x10.
-static bool OGSIsDamageToLocalPlayer(void *playerNetwork, bool *verified) {
+static bool OGSIsDamageToLocalPlayerWithActor(void *playerNetwork, bool *verified, int32_t *actorOut) {
     if (verified) *verified = false;
+    if (actorOut) *actorOut = 0;
     if (!playerNetwork || (uintptr_t)playerNetwork < 0x100000000ULL) return false;
     void *klass = NULL;
     if (!OGSReadPointer((uintptr_t)playerNetwork, &klass)) return false;
@@ -1772,7 +1774,11 @@ static bool OGSIsDamageToLocalPlayer(void *playerNetwork, bool *verified) {
     if (!OGSReadMemory((uintptr_t)photonView + 0x20, &ownerActorID, sizeof(ownerActorID)) ||
         ownerActorID <= 0) return false;
     if (verified) *verified = true;
+    if (actorOut) *actorOut = localActorID;
     return localActorID == ownerActorID;
+}
+static bool OGSIsDamageToLocalPlayer(void *playerNetwork, bool *verified) {
+    return OGSIsDamageToLocalPlayerWithActor(playerNetwork, verified, NULL);
 }
 
 // OGS42: KillPlayer is NOT a safe invulnerability interception point: the
@@ -3147,9 +3153,9 @@ static bool OGSInstallKillBridgeOnDemand(void) {
     return true;
 }
 
-// OGS44: passive explosion diagnostics. Four pre-signed stubs ALWAYS fall
-// through to the relocated original while slots are empty. No HP, network,
-// movement or death state is changed by these callbacks.
+// OGS45: local explosion protection only in a verified private room where the
+// local actor is master and alive. All other targets/unknowns forward original.
+// Empty callback slots fall through to the original relocated prologue.
 typedef void (*OGSExplosionOneFn)(void *, int32_t, const void *);
 typedef void (*OGSExplosionZeroFn)(void *, const void *);
 static OGSExplosionOneFn gOGS44BombOriginal[2] = {NULL, NULL};
@@ -3165,52 +3171,66 @@ static volatile uint32_t gOGS44LocalMasterUnknown[4] = {};
 static volatile uint32_t gOGS44PreFlagZero[4] = {};
 static volatile uint32_t gOGS44PreFlagOne[4] = {};
 static volatile uint32_t gOGS44PreFlagUnknown[4] = {};
+static volatile uint32_t gOGS45ExplosionBlocked[4] = {};
 
-static void OGS44ObserveExplosion(unsigned index, void *self) {
+static bool OGS44ObserveExplosion(unsigned index, void *self) {
     __atomic_fetch_add(&gOGS44Total[index], 1u, __ATOMIC_RELAXED);
-    bool verified = false;
-    bool mine = OGSIsDamageToLocalPlayer(self, &verified);
+    bool verified = false; int32_t ownerContextActor = 0;
+    bool mine = OGSIsDamageToLocalPlayerWithActor(self, &verified, &ownerContextActor);
     if (!verified) {
         __atomic_fetch_add(&gOGS44Unknown[index], 1u, __ATOMIC_RELAXED);
-        return;
+        return false;
     }
     if (!mine) {
         __atomic_fetch_add(&gOGS44Other[index], 1u, __ATOMIC_RELAXED);
-        return;
+        return false;
     }
     __atomic_fetch_add(&gOGS44Local[index], 1u, __ATOMIC_RELAXED);
     uintptr_t room = 0; int32_t actor = 0, master = 0;
-    if (!OGSReadAutoRoom(&room, &actor, &master))
+    bool roomVerified = OGSReadAutoRoom(&room, &actor, &master);
+    if (!roomVerified)
         __atomic_fetch_add(&gOGS44LocalMasterUnknown[index], 1u, __ATOMIC_RELAXED);
     else if (actor == master)
         __atomic_fetch_add(&gOGS44LocalMaster[index], 1u, __ATOMIC_RELAXED);
     else
         __atomic_fetch_add(&gOGS44LocalNonMaster[index], 1u, __ATOMIC_RELAXED);
     uint8_t flag = 255;
-    if (!OGSReadMemory((uintptr_t)self + 0x12Cu, &flag, sizeof(flag)) || flag > 1)
+    bool deadFlagVerified = OGSReadMemory((uintptr_t)self + 0x12Cu, &flag, sizeof(flag)) && flag <= 1;
+    if (!deadFlagVerified)
         __atomic_fetch_add(&gOGS44PreFlagUnknown[index], 1u, __ATOMIC_RELAXED);
     else if (flag == 0)
         __atomic_fetch_add(&gOGS44PreFlagZero[index], 1u, __ATOMIC_RELAXED);
     else
         __atomic_fetch_add(&gOGS44PreFlagOne[index], 1u, __ATOMIC_RELAXED);
+    bool open = true, visible = true;
+    bool privacyVerified = roomVerified && OGSReadRoomPrivacy(room, &open, &visible);
+    OGSExplosionFacts facts = {
+        __atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE) != 0,
+        verified, mine, roomVerified, ownerContextActor == actor,
+        roomVerified && actor == master, privacyVerified, !visible, !open,
+        deadFlagVerified, deadFlagVerified && flag == 0
+    };
+    bool blocked = OGSShouldBlockLocalExplosion(facts);
+    if (blocked) __atomic_fetch_add(&gOGS45ExplosionBlocked[index], 1u, __ATOMIC_RELAXED);
+    return blocked;
 }
 static void OGS44BombNear(void *self, int32_t actor, const void *method) {
-    OGS44ObserveExplosion(0, self);
+    if (OGS44ObserveExplosion(0, self)) return;
     OGSExplosionOneFn original = __atomic_load_n(&gOGS44BombOriginal[0], __ATOMIC_ACQUIRE);
     if (original) original(self, actor, method);
 }
 static void OGS44BombFar(void *self, int32_t actor, const void *method) {
-    OGS44ObserveExplosion(1, self);
+    if (OGS44ObserveExplosion(1, self)) return;
     OGSExplosionOneFn original = __atomic_load_n(&gOGS44BombOriginal[1], __ATOMIC_ACQUIRE);
     if (original) original(self, actor, method);
 }
 static void OGS44C4Near(void *self, const void *method) {
-    OGS44ObserveExplosion(2, self);
+    if (OGS44ObserveExplosion(2, self)) return;
     OGSExplosionZeroFn original = __atomic_load_n(&gOGS44C4Original[0], __ATOMIC_ACQUIRE);
     if (original) original(self, method);
 }
 static void OGS44C4Far(void *self, const void *method) {
-    OGS44ObserveExplosion(3, self);
+    if (OGS44ObserveExplosion(3, self)) return;
     OGSExplosionZeroFn original = __atomic_load_n(&gOGS44C4Original[1], __ATOMIC_ACQUIRE);
     if (original) original(self, method);
 }
@@ -3917,7 +3937,7 @@ static void OGSInstallHooks(void) {
         self.menuPanel.hidden = YES;
 
         self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(10, 5, 260, 18)];
-        self.titleLabel.text = @"OGS44 | تشخيص ضرر الانفجار";
+        self.titleLabel.text = @"OGS45 | درع الانفجار التجريبي";
         self.titleLabel.textColor = [UIColor whiteColor];
         self.titleLabel.textAlignment = NSTextAlignmentCenter;
         self.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
@@ -4566,8 +4586,14 @@ static void OGSInstallHooks(void) {
             __atomic_load_n(&gOGS44PreFlagUnknown[i], __ATOMIC_RELAXED)];
     }
     details = [details stringByAppendingString:
-        @"\nOGS44 bridge: 1=installed; 2=unavailable or wrong IPA. "
-         "Observation only. Counters persist when shield is off; no RPC acknowledgment implied."];
+        @"\nOGS45 explosion protection: local actor + master + alive + hidden/closed room only. "
+         "Other and unknown calls forward. Remote authority and server response not verified."];
+    details = [details stringByAppendingFormat:
+        @"\nOGS45 local explosion blocks near/far/C4near/C4far=%u/%u/%u/%u",
+        __atomic_load_n(&gOGS45ExplosionBlocked[0], __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGS45ExplosionBlocked[1], __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGS45ExplosionBlocked[2], __ATOMIC_RELAXED),
+        __atomic_load_n(&gOGS45ExplosionBlocked[3], __ATOMIC_RELAXED)];
     details = [details stringByAppendingFormat:
         @"\nOGS42 room capacity: pending=%u | queued=%u | attempted=%u"
          " | local applied=%u | rejected=%u | failed=%u | below occupants=%u"
@@ -5204,7 +5230,15 @@ static void OGSInstallHooks(void) {
         if (root && !root.presentedViewController) [root presentViewController:warning animated:YES completion:nil];
         return;
     }
-    if (next) OGS44InstallExplosionDiagnostics(); // optional; older IPAs remain usable
+    if (next) {
+        OGS44InstallExplosionDiagnostics();
+        for (unsigned i = 0; i < 4; ++i) {
+            if (__atomic_load_n(&gOGS44Status[i], __ATOMIC_ACQUIRE) != 1u) {
+                self.statusLabel.text = @"يلزم IPA كامل يدعم جسور الانفجار";
+                return;
+            }
+        }
+    }
     __atomic_store_n(&gOGS.godModeOn, next, __ATOMIC_RELEASE);
     if (next) {
         __atomic_store_n(&gGodCallbacks, 0u, __ATOMIC_RELAXED);
@@ -5225,7 +5259,7 @@ static void OGSInstallHooks(void) {
         __atomic_store_n(&gOGS42KillPreDeadFlagUnknown, 0u, __ATOMIC_RELAXED);
         [s setTitle:@"درع الحماية: تجريبي ⚠️" forState:UIControlStateNormal];
         s.backgroundColor = [UIColor colorWithRed:0.15 green:0.55 blue:0.25 alpha:1.0];
-        self.statusLabel.text = @"OGS42 يحاول منع الضرر قبل الموت؛ مسار KillPlayer يمر طبيعيًا لإتاحة إعادة الظهور";
+        self.statusLabel.text = @"حماية الانفجار للهوست داخل غرفة مغلقة ومخفية فقط؛ تجريبية";
     } else {
         [s setTitle:@"درع الحماية: متوقف 🛡️" forState:UIControlStateNormal];
         s.backgroundColor = [UIColor colorWithRed:0.22 green:0.23 blue:0.28 alpha:1.0];
