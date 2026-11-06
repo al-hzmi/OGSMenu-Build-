@@ -51,6 +51,10 @@ jobs:
         run: python3 tools/test_ogs54_ui.py
       - name: Check guarded capacity choice grid
         run: python3 tools/test_ogs55_capacity_ui.py
+      - name: Test OGS55 name identity policy
+        run: clang++ -std=c++17 -Wall -Wextra -Werror -pedantic tests/test_name_identity_policy.cpp -o /tmp/ogs-name-identity && /tmp/ogs-name-identity
+      - name: Check OGS55 name tracker bridge
+        run: python3 tools/test_ogs55_name_ui.py
       - name: Compile iOS arm64 dylib
         shell: bash
         run: |

@@ -1,4 +1,5 @@
 #include "OGS51TrainingPolicy.h"
+#include "OGSNameIdentityPolicy.h"
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <os/lock.h>
@@ -1488,6 +1489,8 @@ static void OGSProcessSpeed(void) {
 @property (strong, nonatomic) NSMutableDictionary<NSString *, NSNumber *> *sessionNameLastActor;
 @property (assign, nonatomic) uintptr_t sessionNameRoom;
 @property (assign, nonatomic) int32_t sessionNameLocalActor;
+@property (assign, nonatomic) double sessionNameRoomEnterEpoch;
+@property (assign, nonatomic) double sessionNameMissingRoomSince;
 + (instancetype)sharedInstance;
 - (void)setupMenu;
 - (void)ensureMenuVisible;
@@ -4501,7 +4504,8 @@ static void OGSInstallHooks(void) {
         int matches = 0;
         for (uint32_t i = 0; i < roster->count; ++i)
             if (strcmp(roster->peers[i].userId, peer->userId) == 0) ++matches;
-        if (matches == 1) return [@"u:" stringByAppendingString:uid];
+        if (ogsname::HasUniquePublishedUserId(peer->userId, (unsigned)matches))
+            return [@"u:" stringByAppendingString:uid];
     }
     // The actor fallback cannot identify the same account after reconnect.
     return [NSString stringWithFormat:@"a:%d", peer->actorID];
@@ -4515,9 +4519,30 @@ static void OGSInstallHooks(void) {
     uintptr_t room = snapshot.inRoom ? snapshot.roomAddress : 0;
     int32_t localActor = snapshot.inRoom ?
         __atomic_load_n(&gOGSPresenceActorID,__ATOMIC_ACQUIRE) : 0;
+    double roomEpoch = 0.0;
+    os_unfair_lock_lock(&gStateLock);
+    roomEpoch = gOGS.roomEnterTime;
+    os_unfair_lock_unlock(&gStateLock);
     bool changedLocal = localActor > 0 && self.sessionNameLocalActor > 0 &&
         localActor != self.sessionNameLocalActor;
-    if (room != self.sessionNameRoom || changedLocal) {
+    bool changedEpoch = roomEpoch > 0.0 && self.sessionNameRoomEnterEpoch > 0.0 &&
+        fabs(roomEpoch - self.sessionNameRoomEnterEpoch) > 0.001;
+    if (!room && self.sessionNameRoom) {
+        double now = CFAbsoluteTimeGetCurrent();
+        if (self.sessionNameMissingRoomSince <= 0.0)
+            self.sessionNameMissingRoomSince = now;
+        bool confirmedOutside = !snapshot.inRoom &&
+            __atomic_load_n(&gOGSPresenceReadOnly, __ATOMIC_ACQUIRE) == 2;
+        if (ogsname::ShouldPreserveHistoryDuringMissingRoom(
+                now, self.sessionNameMissingRoomSince, true, confirmedOutside,
+                changedLocal, changedEpoch)) {
+            __atomic_store_n(&gOGSNameStableIdsAvailable,0u,__ATOMIC_RELEASE);
+            return;
+        }
+    } else if (room) {
+        self.sessionNameMissingRoomSince = 0.0;
+    }
+    if (room != self.sessionNameRoom || changedLocal || changedEpoch) {
         self.sessionNameRoom = room;
         [self.sessionNameHistory removeAllObjects];
         [self.sessionNameCandidates removeAllObjects];
@@ -4528,9 +4553,12 @@ static void OGSInstallHooks(void) {
         gOGSUserIdCacheReplace = 0;
         os_unfair_lock_unlock(&gOGSUserIdCacheLock);
     }
+    if (room && roomEpoch > 0.0) self.sessionNameRoomEnterEpoch = roomEpoch;
     if (localActor > 0) self.sessionNameLocalActor = localActor;
     if (!room) {
         self.sessionNameLocalActor = 0;
+        self.sessionNameRoomEnterEpoch = 0.0;
+        self.sessionNameMissingRoomSince = 0.0;
         __atomic_store_n(&gOGSNameStableIdsAvailable,0u,__ATOMIC_RELEASE);
         return;
     }
@@ -4543,6 +4571,27 @@ static void OGSInstallHooks(void) {
         NSString *key = [self sessionIdentityKey:peer roster:&snapshot];
         if (!key.length) continue;
         if ([key hasPrefix:@"u:"]) ++stableIds;
+        // If Photon publishes UserId after an earlier actor-only sample,
+        // retain the name baseline for this SAME actor. Never do this for
+        // a different actor without a unique published UserId.
+        if ([key hasPrefix:@"u:"]) {
+            NSString *actorKey = [NSString stringWithFormat:@"a:%d", peer->actorID];
+            NSMutableArray<NSString *> *actorNames = self.sessionNameHistory[actorKey];
+            if (ogsname::CanPromoteActorHistory(true, actorNames != nil,
+                                               self.sessionNameHistory[key] != nil)) {
+                self.sessionNameHistory[key] = actorNames;
+                if (self.sessionNameCandidates[actorKey])
+                    self.sessionNameCandidates[key] = self.sessionNameCandidates[actorKey];
+                if (self.sessionNameCandidateSamples[actorKey])
+                    self.sessionNameCandidateSamples[key] = self.sessionNameCandidateSamples[actorKey];
+                if (self.sessionNameLastActor[actorKey])
+                    self.sessionNameLastActor[key] = self.sessionNameLastActor[actorKey];
+                [self.sessionNameHistory removeObjectForKey:actorKey];
+                [self.sessionNameCandidates removeObjectForKey:actorKey];
+                [self.sessionNameCandidateSamples removeObjectForKey:actorKey];
+                [self.sessionNameLastActor removeObjectForKey:actorKey];
+            }
+        }
         NSMutableArray<NSString *> *names = self.sessionNameHistory[key];
         if (!names) {
             names = [NSMutableArray arrayWithObject:name];
@@ -4608,8 +4657,10 @@ static void OGSInstallHooks(void) {
              [names componentsJoinedByString:@" ← "],
              hasUserId ? @"المطابقة تستخدم UserId المنشور من Photon؛ ليست إثبات ملكية حساب." :
                  @"UserId غير متاح؛ المطابقة محصورة برقم Actor الحالي."] :
-        [NSString stringWithFormat:@"Actor #%d: %@\nلم يُرصد تغيير بعد اكتمال قراءتين متتاليتين. %@",
-             peer.actorID, last, hasUserId ? @"UserId متاح محليًا" : @"UserId غير متاح"];
+        [NSString stringWithFormat:@"Actor #%d: %@\n%@",
+             peer.actorID, last, hasUserId ?
+                 @"لم يُرصد تغيير مؤكد. UserId منشور محليًا؛ يمكن متابعة نفس المعرّف إذا تغير رقم Actor." :
+                 @"لم يُرصد تغيير لهذا الـActor. عند الخروج والدخول يتغير رقمه، ولا يمكن إثبات أنه نفس الحساب أو كشف تغييره للاسم دون UserId منشور."];
     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"سجل الأسماء المحلي"
         message:message preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"نسخ" style:UIAlertActionStyleDefault
