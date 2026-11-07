@@ -3095,9 +3095,11 @@ static bool hook_LeaveRoom(int32_t becomeInactive, void *method) {
     if (inRoomNow && (gOGS.antiKickHardLock || insideNet || (settled && recentThreat))) {
         __atomic_fetch_add(&gOGS.blockedKicksCount, 1, __ATOMIC_RELAXED);
         __atomic_fetch_add(&gOGSLeaveRoomBlocked, 1u, __ATOMIC_RELAXED);
+        auto cs=causal55::capture();causal55::push(causal55::make(43,0,cs,cs));
         return false;
     }
     __atomic_fetch_add(&gOGSLeaveRoomForwarded, 1u, __ATOMIC_RELAXED);
+    auto cs=causal55::capture();causal55::push(causal55::make(44,0,cs,cs));
     return orig_LeaveRoom ? orig_LeaveRoom(becomeInactive, method) : false;
 }
 
@@ -3203,6 +3205,7 @@ static void hook_OnPhotonPlayerDisconnected(void *self, void *player, void *meth
     if (orig_OnDisconnect) orig_OnDisconnect(self, player, method);
 }
 static void hook_WorkerInGameDisconnected(void *self, void *method) {
+    auto causalState=causal55::capture();causal55::push(causal55::make(42,0x1428224,causalState,causalState));
     // Unity notification that THIS client disconnected from Photon.
     // Observation only: forward to original before any room is destroyed.
     __atomic_fetch_add(&gOGSWorkerPhotonDisconnectNotices, 1u,
@@ -4268,7 +4271,7 @@ static void OGSInstallHooks(void) {
         self.menuPanel.hidden = YES;
 
         self.titleLabel = [[UILabel alloc] initWithFrame:CGRectMake(8, 5, 240, 18)];
-        self.titleLabel.text = @"OGS54";
+        self.titleLabel.text = @"OGS55 TEST";
         self.titleLabel.textColor = [UIColor whiteColor];
         self.titleLabel.textAlignment = NSTextAlignmentCenter;
         self.titleLabel.font = [UIFont boldSystemFontOfSize:10.5];
@@ -4765,7 +4768,7 @@ static void OGSInstallHooks(void) {
     int32_t readPresence = __atomic_load_n(&gOGSPresenceReadOnly, __ATOMIC_ACQUIRE);
     int32_t localActor = __atomic_load_n(&gOGSPresenceActorID, __ATOMIC_ACQUIRE);
     int32_t localMaster = __atomic_load_n(&gOGSLocalMasterActorID, __ATOMIC_ACQUIRE);
-    self.titleLabel.text = @"OGS54";
+    self.titleLabel.text = @"OGS55 TEST";
     uint32_t selected = __atomic_load_n(&gOGS.selectedPeer, __ATOMIC_ACQUIRE);
 
     if (count == 0) {
@@ -5341,6 +5344,9 @@ static void OGSInstallHooks(void) {
     [alert addAction:[UIAlertAction actionWithTitle:@"نسخ" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
         (void)action;
         [UIPasteboard generalPasteboard].string = [details stringByAppendingString:causalDetails];
+    }]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"نسخ أثر الجلسة السابقة" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+        (void)action;[UIPasteboard generalPasteboard].string=causal55::previousText();
     }]];
     [alert addAction:[UIAlertAction actionWithTitle:@"إغلاق" style:UIAlertActionStyleCancel handler:nil]];
     UIViewController *root = [self gameMainWindow].rootViewController;

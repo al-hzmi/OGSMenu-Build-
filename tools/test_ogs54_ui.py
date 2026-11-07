@@ -16,8 +16,8 @@ def check(condition, message):
         raise AssertionError(message)
 
 
-check(source.count('self.titleLabel.text = @"OGS54";') == 2,
-      "release label must be exactly OGS54 on create and refresh")
+check(source.count('self.titleLabel.text = @"OGS55 TEST";') == 2,
+      "test label must be exactly OGS55 TEST on create and refresh")
 check('self.titleLabel.text = @"OGS53";' not in source,
       "stale release title")
 check('self.menuPanel.contentSize = CGSizeMake(290, 352);' in menu,
