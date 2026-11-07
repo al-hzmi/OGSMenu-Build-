@@ -92,6 +92,7 @@ static void remoteTick(void *self, const Snapshot &s);
 static void processSelfRequest(void *self, const Snapshot &s, const Request &req);
 static void roomUpdate(void *self, void *method) {
     if (roomOriginal) roomOriginal(self, method);
+    causal55::roomTick();
     Snapshot s = sample(self);
     if (__atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE)) {
         uintptr_t boundRoom = __atomic_load_n(&gOGS46ShieldRoom, __ATOMIC_ACQUIRE);

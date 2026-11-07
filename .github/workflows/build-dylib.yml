@@ -51,6 +51,11 @@ jobs:
         run: python3 tools/test_ogs54_ui.py
       - name: Test bounded defensive policies
         run: clang++ -std=c++17 -Wall -Wextra -Werror -pedantic -pthread tests/test_ogs55_defensive.cpp -o /tmp/ogs55-defense && /tmp/ogs55-defense
+      - name: Emulate exact ARM64 observation probes
+        run: |
+          python3 -m venv /tmp/ogs55-probe-env
+          /tmp/ogs55-probe-env/bin/pip install unicorn==2.1.4
+          /tmp/ogs55-probe-env/bin/python tests/test_ogs55_probe_machine.py tests/fixtures/ogs55_probes.json
       - name: Compile iOS arm64 dylib
         shell: bash
         run: |

@@ -3,6 +3,7 @@
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <os/lock.h>
+#import <objc/runtime.h>
 #include <mach-o/dyld.h>
 #include <mach/mach.h>
 #include <stdint.h>
@@ -1032,6 +1033,8 @@ static NSString *OGS55IncidentText() {
     return text;
 }
 
+#include "OGS55CausalTrace.h"
+
 static void OGSDisarmAutoRoom(void) {
     os_unfair_lock_lock(&gStateLock);
     if (__atomic_exchange_n(&gOGSAutoEnabled, 0u, __ATOMIC_ACQ_REL))
@@ -1395,7 +1398,11 @@ static bool OGSRequestLocalMasterOnceOnEvent(uintptr_t expectedRoom, int32_t exp
     os_unfair_lock_unlock(&gStateLock);
     // A true return means the local API accepted the request for submission.
     // Local room reads may be optimistic; server confirmation needs other evidence.
+    auto causalBefore=causal55::capture();
+    causal55::push(causal55::make(40,0x13d30ec,causalBefore,causalBefore));
     bool submitted = ((PeerAction1Fn)candidate)((void *)localPlayer, NULL);
+    auto causalRequest=causal55::make(41,0x13d30ec,causalBefore,causal55::capture());
+    causalRequest.newValue=submitted?1:0;causal55::push(causalRequest);
     // Read-only telemetry: PUN Classic may optimistically change the local
     // MasterClient prior to any server acknowledgement.
     int32_t immediate = 0;
@@ -2368,6 +2375,7 @@ static void hook_OGSGrenadeShoot(void *self, const void *method) {
 }
 
 static void OGSBridgeIncomingDamage(void *self, void *values, int32_t killerID, const void *method) {
+    causal55::DamageScope causalScope(self,values,killerID);
     __atomic_fetch_add(&gGodCallbacks, 1u, __ATOMIC_RELAXED);
     void *expectedArray=nullptr,*actualArray=nullptr; uint64_t length=0;
     bool typed=values && OGSReadPointer(OGSResolveRVA(0x28154B8),&expectedArray) &&
@@ -2847,6 +2855,7 @@ static void OGSProcessHostHandoffOnPhotonThread(void);
 // Executed on the game's Unity/PUN Update thread, never from the UIKit
 // menu timer. Makes standalone room privacy possible with zero other players.
 static void hook_PhotonHandlerUpdate(void *self, void *method) {
+    ++causal55::photonFrame;causal55::lastPhoton=CACurrentMediaTime();
     // Count entry before the original to distinguish hook reachability
     // from a non-returning/exceptional original managed call.
     __atomic_fetch_add(&gOGSPhotonHandlerUpdateCalls, 1ULL, __ATOMIC_RELAXED);
@@ -2953,6 +2962,9 @@ static void hook_OnOperationResponse(void *self, void *response, void *method) {
 }
 
 static void hook_OnEvent(void *self, void *eventData, void *method) {
+    uint8_t causalCode=0;causal55::read((uintptr_t)eventData,0x10,causalCode);
+    causal55::EventScope causalEvent(causalCode);
+    auto causalBefore=causal55::capture();
     __atomic_fetch_add(&gOGSNetworkEvents, 1ULL, __ATOMIC_RELAXED);
     double now = CFAbsoluteTimeGetCurrent();
     uint32_t observedEventCode = 0; // zero = unknown / unreadable
@@ -3036,6 +3048,8 @@ static void hook_OnEvent(void *self, void *eventData, void *method) {
         }
     }
     int32_t masterAfter = OGSReadMasterForEventObservation();
+    auto causalAfter=causal55::capture();
+    if(causal55::changed(causalBefore,causalAfter))causal55::push(causal55::make(31,0x13b54ac,causalBefore,causalAfter));
     if(trace55)
         OGS55Record(1,(uint16_t)observedEventCode,before55,OGS55Capture());
     if (masterBefore > 0 && masterAfter > 0) {
@@ -3482,6 +3496,7 @@ static void OGS44InstallExplosionDiagnostics(void) {
 }
 
 #include "OGSGameplayRuntime.h"
+#include "OGS55CausalNative.h"
 
 // A deliberate, one-shot MasterClient handoff. Queued by UIKit and executed
 // only by PhotonHandler.Update; no IL2CPP call is made from the touch handler.
@@ -4031,6 +4046,7 @@ static void OGSRefreshReadOnlyPresence(void) {
 static void OGSInstallHooks(void) {
     if (!OGSFindGameImage()) return;
     ogs46::install();
+    causal55::install();
     // Independent of the shield toggle: structural validation only.
     OGSInstallDamageHookOnDemand(true);
     OGSInstallPointerSlotHook(gOffsets.tblCashUpdate, (void *)&hook_CashUpdate, (void **)&orig_CashUpdate);
@@ -5285,7 +5301,7 @@ static void OGSInstallHooks(void) {
         @"\nAuto pending loss=%u | deferred queued=%u | deferred executed=%u | cancelled=%u"
          "\nRolling rate limit=%u/%u in 60s | window resets in %.1fs"
          "\nRate-limited windows=%u | retries while still not host=%u"
-         "\nStay ARMED when limited; requests continue on the next Photon Update/Event after cooldown/window reset.",
+         "\nAutomatic recovery stops at 3 attempts or 30s after first attempt. API true is not server confirmation.",
         __atomic_load_n(&gOGSAutoPendingLoss, __ATOMIC_ACQUIRE),
         __atomic_load_n(&gOGSAutoDeferredQueued, __ATOMIC_RELAXED),
         __atomic_load_n(&gOGSAutoDeferredExecuted, __ATOMIC_RELAXED),
@@ -5318,11 +5334,13 @@ static void OGSInstallHooks(void) {
          "\nTiming indicates proximity only, not causation.",
         __atomic_load_n(&gOGSEventCodes[201], __ATOMIC_RELAXED),
         eventTrailCopy[0] ? eventTrailCopy : "none within 5s"];
-    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"تشخيص تحديث OGS"
+    NSString *causalDetails=causal55::text(); // captured now; do not render 256 rows in UIAlertController
+    details=[details stringByAppendingString:causal55::statusText()];
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"OGS55 TEST — قياس الحوادث"
                              message:details preferredStyle:UIAlertControllerStyleAlert];
     [alert addAction:[UIAlertAction actionWithTitle:@"نسخ" style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
         (void)action;
-        [UIPasteboard generalPasteboard].string = details;
+        [UIPasteboard generalPasteboard].string = [details stringByAppendingString:causalDetails];
     }]];
     [alert addAction:[UIAlertAction actionWithTitle:@"إغلاق" style:UIAlertActionStyleCancel handler:nil]];
     UIViewController *root = [self gameMainWindow].rootViewController;
