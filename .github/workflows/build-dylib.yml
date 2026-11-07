@@ -49,6 +49,8 @@ jobs:
         run: clang++ -std=c++17 -Wall -Wextra -Werror -pedantic tests/test_ogs51_training.cpp -o /tmp/ogs51-training && /tmp/ogs51-training
       - name: Check compact OGS54 play-menu layout
         run: python3 tools/test_ogs54_ui.py
+      - name: Test bounded defensive policies
+        run: clang++ -std=c++17 -Wall -Wextra -Werror -pedantic -pthread tests/test_ogs55_defensive.cpp -o /tmp/ogs55-defense && /tmp/ogs55-defense
       - name: Compile iOS arm64 dylib
         shell: bash
         run: |
@@ -58,18 +60,14 @@ jobs:
           xcrun --sdk iphoneos clang++ -target arm64-apple-ios14.0 -isysroot "$SDK" -std=c++17 -fobjc-arc -fblocks -dynamiclib -Ivendor/dobby/build/iphoneos -framework UIKit -framework Foundation -framework QuartzCore -framework CoreGraphics -Wl,-install_name,@rpath/OGSMenu.dylib OGSMenu/ModMenu.mm vendor/dobby/build/iphoneos/arm64/libdobby.a -lc++ -o dist/OGSMenu.dylib
           # The game links @rpath/OGSMenu.dylib internally. Ship the same
           # bytes under an explicit release name for unambiguous downloads.
-          cp dist/OGSMenu.dylib dist/OGS54.dylib
+          # Research build only: no IPA or release is produced.
           file dist/OGSMenu.dylib
-          shasum -a 256 dist/OGSMenu.dylib dist/OGS54.dylib
+          shasum -a 256 dist/OGSMenu.dylib
           xcrun vtool -show-build dist/OGSMenu.dylib
       - uses: actions/upload-artifact@v4
         with:
           name: OGSMenu-ios-arm64-dylib
           path: dist/OGSMenu.dylib
-      - uses: actions/upload-artifact@v4
-        with:
-          name: OGS54-ARM64-Artifact
-          path: dist/OGS54.dylib
       - uses: actions/upload-artifact@v4
         with:
           name: OGSMenu-Stage12-Source-Review

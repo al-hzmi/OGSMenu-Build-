@@ -1,4 +1,5 @@
 #include "OGS51TrainingPolicy.h"
+#include "OGS55DefensivePolicy.h"
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <os/lock.h>
@@ -859,6 +860,7 @@ static int32_t gOGSAutoWindowActor = 0;            // gStateLock
 static double gOGSAutoWindowStartedAt = 0.;       // gStateLock
 static bool gOGSAutoWindowPauseCounted = false;   // gStateLock
 static bool gOGSAutoAttemptedPending = false;     // gStateLock
+static ogs55::RecoveryBudget gOGS55RecoveryBudget; // gStateLock; explicit arm only
 static bool gOGSAutoSawOwnedMaster = false;        // gStateLock
 static const uint32_t kOGSAutoWindowAttemptLimit = 6;
 static const double kOGSAutoWindowSeconds = 60.0;
@@ -975,6 +977,61 @@ static void OGSRecordHostLocalObservation(uintptr_t room, int32_t actor,
     os_unfair_lock_unlock(&gStateLock);
 }
 
+struct OGS55State {
+    uintptr_t room=0; int32_t actor=0,master=0;
+    int16_t team=-1; int8_t ui=-1;
+};
+static ogs55::IncidentRing<64> gOGS55Incidents;
+static std::atomic<uint64_t> gOGS55SampleSkipped{0};
+static bool OGS55TraceDue() {
+    static thread_local double last=-1;
+    double now=CACurrentMediaTime();
+    if(last>=0 && now-last<0.05) {++gOGS55SampleSkipped;return false;}
+    last=now;return true;
+}
+static uintptr_t gOGS55EpochRoom=0; // gStateLock, never exported
+static int32_t gOGS55EpochActor=0;
+static uint64_t gOGS55Epoch=0;
+static OGS55State OGS55Capture() {
+    OGS55State v;
+    if (!OGSReadAutoRoom(&v.room,&v.actor,&v.master)) v={};
+    void *klass=nullptr,*fields=nullptr,*rc=nullptr;
+    int32_t team=-1; uint8_t ui=255;
+    if (OGSReadPointer(OGSResolveRVA(0x281B1B8),&klass) && klass &&
+        OGSReadPointer((uintptr_t)klass+0xB8,&fields) && fields &&
+        OGSReadPointer((uintptr_t)fields+0x30,&rc) && rc) {
+        if (OGSReadMemory((uintptr_t)rc+0x1B0,&team,4) && team>=0 && team<=2) v.team=(int16_t)team;
+        if (OGSReadMemory((uintptr_t)rc+0xFD,&ui,1) && ui<=1) v.ui=(int8_t)ui;
+    }
+    return v;
+}
+static void OGS55Record(uint16_t kind,uint16_t code,const OGS55State &before,
+                        const OGS55State &after,uint8_t verdict=0) {
+    ogs55::Incident e; e.at=CACurrentMediaTime();e.kind=kind;e.event=code;e.verdict=verdict;
+    os_unfair_lock_lock(&gStateLock);
+    if(after.room!=gOGS55EpochRoom || after.actor!=gOGS55EpochActor) {
+        ++gOGS55Epoch;gOGS55EpochRoom=after.room;gOGS55EpochActor=after.actor;
+    }
+    e.roomEpoch=gOGS55Epoch;
+    os_unfair_lock_unlock(&gStateLock);
+    e.localActor=after.actor;e.masterBefore=before.master;e.masterAfter=after.master;
+    e.teamBefore=before.team;e.teamAfter=after.team;e.uiBefore=before.ui;e.uiAfter=after.ui;
+    gOGS55Incidents.push(e);
+}
+static NSString *OGS55IncidentText() {
+    std::array<ogs55::Incident,64> rows;
+    size_t count=gOGS55Incidents.snapshot(rows);
+    NSMutableString *text=[NSMutableString stringWithFormat:@"\nOGS55 research trace: %zu retained, %llu contention drops. Source actor UNKNOWN; room epoch is local only.\n",count,(unsigned long long)gOGS55Incidents.drops()];
+    [text appendFormat:@"Rate-limit omissions: %llu. Connection status and sender unavailable.\n",(unsigned long long)gOGS55SampleSkipped.load()];
+    for(size_t i=0;i<count;++i) {
+        const auto &e=rows[i];
+        [text appendFormat:@"%.3f E%llu A%d k%u ev%u M%d>%d T%d>%d UI%d>%d result%u\n",
+            e.at,(unsigned long long)e.roomEpoch,e.localActor,(unsigned)e.kind,(unsigned)e.event,
+            e.masterBefore,e.masterAfter,(int)e.teamBefore,(int)e.teamAfter,(int)e.uiBefore,(int)e.uiAfter,(unsigned)e.verdict];
+    }
+    return text;
+}
+
 static void OGSDisarmAutoRoom(void) {
     os_unfair_lock_lock(&gStateLock);
     if (__atomic_exchange_n(&gOGSAutoEnabled, 0u, __ATOMIC_ACQ_REL))
@@ -1006,6 +1063,7 @@ static void OGSArmAutoRoomBounded(uintptr_t room, int32_t actor, int32_t master)
         gOGSRecoveryTokens = kOGSRecoveryTokenCapacity;
         gOGSRecoveryTokenRefillAt = 0.;
     }
+    gOGS55RecoveryBudget.arm();
     gOGSAutoRoom = room;
     gOGSAutoOwner = actor;
     __atomic_store_n(&gOGSHostSwitchWakePending, 1u, __ATOMIC_RELEASE);
@@ -2311,6 +2369,15 @@ static void hook_OGSGrenadeShoot(void *self, const void *method) {
 
 static void OGSBridgeIncomingDamage(void *self, void *values, int32_t killerID, const void *method) {
     __atomic_fetch_add(&gGodCallbacks, 1u, __ATOMIC_RELAXED);
+    void *expectedArray=nullptr,*actualArray=nullptr; uint64_t length=0;
+    bool typed=values && OGSReadPointer(OGSResolveRVA(0x28154B8),&expectedArray) &&
+        expectedArray && OGSReadPointer((uintptr_t)values,&actualArray) && actualArray==expectedArray;
+    bool readable=typed && OGSReadMemory((uintptr_t)values+0x18,&length,sizeof(length));
+    auto shape=ogs55::damageShape(values!=nullptr,typed,readable,length);
+    if(ogs55::reject(shape)) {
+        if(OGS55TraceDue()){auto state=OGS55Capture();OGS55Record(2,0,state,state,(uint8_t)shape);}
+        return;
+    }
     if (self && __atomic_load_n(&gOGS.godModeOn, __ATOMIC_ACQUIRE)) {
         bool verified = false;
         bool isLocalOwner = OGSIsDamageToLocalPlayer(self, &verified);
@@ -2505,8 +2572,12 @@ static void OGSProcessRecoveryOnPhotonCallback(uint32_t observedEventCode,
                         // An explicit manual request takes precedence on
                         // this callback, using the SAME bounded quota.
                         // Do not consume its slot and discard the tap.
-                        if (!__atomic_load_n(&gOGSManualRecoveryPending, __ATOMIC_ACQUIRE) &&
+                        if (gOGS55RecoveryBudget.exhausted(CACurrentMediaTime())) {
+                            __atomic_store_n(&gOGSAutoEnabled, 0u, __ATOMIC_RELEASE);
+                            __atomic_store_n(&gOGSAutoPendingLoss, 0u, __ATOMIC_RELEASE);
+                        } else if (!__atomic_load_n(&gOGSManualRecoveryPending, __ATOMIC_ACQUIRE) &&
                             OGSReserveMasterRequestLocked(liveRoom, localID, currentTime)) {
+                            gOGS55RecoveryBudget.consume(CACurrentMediaTime());
                             ready = true;
                             if (gOGSAutoAttemptedPending)
                                 __atomic_fetch_add(&gOGSAutoRetriesWhileLost, 1u,
@@ -2932,6 +3003,8 @@ static void hook_OnEvent(void *self, void *eventData, void *method) {
 
     // Compare room MasterClient only across original dispatch execution.
     // This never tries to restore master or suppress the event.
+    bool trace55=(observedEventCode==208 || observedEventCode==253 || observedEventCode==200) && OGS55TraceDue();
+    OGS55State before55=trace55?OGS55Capture():OGS55State{};
     int32_t masterBefore = OGSReadMasterForEventObservation();
     __atomic_fetch_add(&gOGS.insideNetworkEvent, 1, __ATOMIC_ACQ_REL);
     if (orig_OnEvent) {
@@ -2963,6 +3036,8 @@ static void hook_OnEvent(void *self, void *eventData, void *method) {
         }
     }
     int32_t masterAfter = OGSReadMasterForEventObservation();
+    if(trace55)
+        OGS55Record(1,(uint16_t)observedEventCode,before55,OGS55Capture());
     if (masterBefore > 0 && masterAfter > 0) {
         __atomic_fetch_add(&gOGSInlineMasterObservations, 1u, __ATOMIC_RELAXED);
         if (masterBefore != masterAfter) {
@@ -3177,6 +3252,8 @@ static bool OGSIsExecutableGameAddress(uintptr_t addr) {
 }
 
 static bool OGSInstallDamageHookOnDemand(bool godMode) {
+    struct InstallLease { InstallLease(){os_unfair_lock_lock(&gHookInstallLock);}
+        ~InstallLease(){os_unfair_lock_unlock(&gHookInstallLock);} } installLease;
     int index = godMode ? 1 : 0;
     if (gOGSDamageHookInstalled[index]) return true;
     uintptr_t base = OGSFindGameImage();
@@ -3205,6 +3282,13 @@ static bool OGSInstallDamageHookOnDemand(bool godMode) {
         NSLog(@"[OGS] IPA not prepared with verified fps 3.4.0 bridge (%d)", index);
         return false;
     }
+    uint32_t actualStub[7]={};
+    uint32_t expectedStub[7]={0x90014090u,0x91000210u | ((uint32_t)(slotRVA & 0xfff)<<10),
+        0xf9400210u,0xb4000050u,0xd61f0200u,
+        godMode?0xd10183ffu:0xd10103ffu,
+        0x14000000u | ((uint32_t)(((int64_t)entryRVA+4-(int64_t)stubRVA-24)/4)&0x3ffffffu)};
+    if(!OGSReadMemory(stub,actualStub,sizeof(actualStub)) ||
+        memcmp(actualStub,expectedStub,sizeof(actualStub)))return false;
     uintptr_t old = 0;
     if (!OGSReadMemory(slot, &old, sizeof(old))) return false;
     uintptr_t callback = godMode ? (uintptr_t)&OGSBridgeIncomingDamage :
@@ -3947,6 +4031,8 @@ static void OGSRefreshReadOnlyPresence(void) {
 static void OGSInstallHooks(void) {
     if (!OGSFindGameImage()) return;
     ogs46::install();
+    // Independent of the shield toggle: structural validation only.
+    OGSInstallDamageHookOnDemand(true);
     OGSInstallPointerSlotHook(gOffsets.tblCashUpdate, (void *)&hook_CashUpdate, (void **)&orig_CashUpdate);
     // Stage 22: DO NOT hook the former "chat" slots! For this exact iOS
     // executable they are NamePickGui..ctor() and NetworkCharacter..ctor(),
@@ -4710,7 +4796,7 @@ static void OGSInstallHooks(void) {
         self.statusLabel.text = @"جاري إرسال حزمة الطرد للسيرفر...";
     } else if (hjBuf[0] != '\0') {
         NSString *hj = [NSString stringWithUTF8String:hjBuf];
-        self.statusLabel.text = [NSString stringWithFormat:@"آخر سارق: %@ | صد طرد: %u 🛡️", hj ?: @"", blocked];
+        self.statusLabel.text = [NSString stringWithFormat:@"آخر مالك مرصود: %@ | تصفية محلية: %u", hj ?: @"", blocked];
     } else {
         int32_t presence = __atomic_load_n(&gOGSPresenceReadOnly, __ATOMIC_ACQUIRE);
         NSString *roomLine = hookActive ?
@@ -4786,6 +4872,7 @@ static void OGSInstallHooks(void) {
         chatHook ? @"مركب" : (chatReadable ? @"غير مركب" : @"غير قابل للقراءة"),
         chatWritable ? @"نعم" : @"لا",
         queued ? @"نعم" : @"لا"];
+    details = [details stringByAppendingString:OGS55IncidentText()];
     details = [details stringByAppendingFormat:@"\nOGS51 bounded request trace:\n%@", ogs46::trace51Text()];
     details = [details stringByAppendingFormat:
         @"\nStage22: legacy chat hooks DISABLED (wrong constructor slots)"
