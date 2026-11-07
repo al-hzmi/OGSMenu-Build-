@@ -2383,6 +2383,7 @@ static void OGSBridgeIncomingDamage(void *self, void *values, int32_t killerID, 
     bool readable=typed && OGSReadMemory((uintptr_t)values+0x18,&length,sizeof(length));
     auto shape=ogs55::damageShape(values!=nullptr,typed,readable,length);
     if(ogs55::reject(shape)) {
+        causalScope.row.newValue=2;
         if(OGS55TraceDue()){auto state=OGS55Capture();OGS55Record(2,0,state,state,(uint8_t)shape);}
         return;
     }
@@ -2390,12 +2391,14 @@ static void OGSBridgeIncomingDamage(void *self, void *values, int32_t killerID, 
         bool verified = false;
         bool isLocalOwner = OGSIsDamageToLocalPlayer(self, &verified);
         if (verified && isLocalOwner && OGS46ShouldBlockSelfDamage(self)) {
+            causalScope.row.newValue=3;
             __atomic_fetch_add(&gGodLocalBypasses, 1u, __ATOMIC_RELAXED);
             return;
         }
         if (verified) __atomic_fetch_add(&gGodOtherPlayerPasses, 1u, __ATOMIC_RELAXED);
         else __atomic_fetch_add(&gGodUnverifiedPasses, 1u, __ATOMIC_RELAXED);
     }
+    causalScope.row.newValue=orig_DamageRemote?1:4;
     if (orig_DamageRemote) orig_DamageRemote(self, values, killerID, method);
 }
 
@@ -2964,7 +2967,8 @@ static void hook_OnOperationResponse(void *self, void *response, void *method) {
 static void hook_OnEvent(void *self, void *eventData, void *method) {
     uint8_t causalCode=0;causal55::read((uintptr_t)eventData,0x10,causalCode);
     causal55::EventScope causalEvent(causalCode);
-    auto causalBefore=causal55::capture();
+    bool causalRelevant=causalCode==200||causalCode==208||causalCode==253;
+    auto causalBefore=causalRelevant?causal55::capture():causal55::State{};
     __atomic_fetch_add(&gOGSNetworkEvents, 1ULL, __ATOMIC_RELAXED);
     double now = CFAbsoluteTimeGetCurrent();
     uint32_t observedEventCode = 0; // zero = unknown / unreadable
@@ -3048,8 +3052,8 @@ static void hook_OnEvent(void *self, void *eventData, void *method) {
         }
     }
     int32_t masterAfter = OGSReadMasterForEventObservation();
-    auto causalAfter=causal55::capture();
-    if(causal55::changed(causalBefore,causalAfter))causal55::push(causal55::make(31,0x13b54ac,causalBefore,causalAfter));
+    auto causalAfter=causalRelevant?causal55::capture():causal55::State{};
+    if(causalRelevant&&causal55::changed(causalBefore,causalAfter))causal55::push(causal55::make(31,0x13b54ac,causalBefore,causalAfter));
     if(trace55)
         OGS55Record(1,(uint16_t)observedEventCode,before55,OGS55Capture());
     if (masterBefore > 0 && masterAfter > 0) {

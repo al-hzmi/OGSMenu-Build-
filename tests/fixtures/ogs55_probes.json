@@ -32,6 +32,14 @@
     "code": "b05401b010223991100240f9500000b400021fd6fc6fbaa91b364f14"
   },
   {
+    "name": "ReceivedRpcDispatch",
+    "site": 20674464,
+    "stub": 15744,
+    "slot": 44666496,
+    "original": "60030014",
+    "code": "b05401b010023a91100240f9500000b400021fd6e3d14e1483ce4e14"
+  },
+  {
     "name": "store_0x141afd4",
     "site": 21082068,
     "stub": 13440,

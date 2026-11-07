@@ -3,7 +3,7 @@
 // No gameplay mutations, native calls, allocation or blocking lock in store probes.
 namespace causal55 {
 constexpr int unknown=-9999;
-struct Context {uint64_t event=0,rpc=0;int eventCode=0,sender=-1;};
+struct Context {uint64_t event=0,rpc=0;int eventCode=0,sender=-1,origin=0;};
 static thread_local Context context;
 static std::atomic<uint64_t> serial{0},frame{0},photonFrame{0};
 static std::atomic<double> lastFrame{0},lastPhoton{0},lastTouch{0},lastNetwork{0};
@@ -12,12 +12,12 @@ static std::atomic<int> appActive{-1};
 static std::atomic<int> lastNetworkCode{0};
 struct EventScope {
  Context prior;
- explicit EventScope(int code):prior(context){context={++serial,0,code,-1};lastNetwork=CACurrentMediaTime();lastNetworkCode=code;}
+ explicit EventScope(int code):prior(context){context={++serial,0,code,-1,0};lastNetwork=CACurrentMediaTime();lastNetworkCode=code;}
  ~EventScope(){context=prior;}
 };
 struct RpcScope {
  Context prior;
- explicit RpcScope(int sender):prior(context){context.rpc=++serial;context.sender=sender;}
+ explicit RpcScope(int sender,int origin):prior(context){context.rpc=++serial;context.sender=sender;context.origin=origin;}
  ~RpcScope(){context=prior;}
 };
 struct State {
@@ -49,7 +49,7 @@ struct Row {
  uint64_t seq=0,epoch=0,ev=0,rpc=0,frames=0,touches=0;
  double at=0,touchAge=-1,netAge=-1,frameAge=-1;
  uint32_t kind=0,site=0,caller=0;
- int code=0,sender=-1,target=unknown,view=unknown,owner=unknown,claimed=unknown;
+ int code=0,sender=-1,origin=0,target=unknown,view=unknown,owner=unknown,claimed=unknown;
  int v0=unknown,v1=unknown,v2=unknown,oldValue=unknown,newValue=unknown,propTeam=unknown,propHP=unknown;
  State before,after;
 };
@@ -60,7 +60,7 @@ static uint64_t epoch=0;static uintptr_t epochRoom=0;static int epochActor=0;
 static std::atomic<uint64_t> drops{0};
 static uint32_t callerRVA(uintptr_t p){uintptr_t b=OGSFindGameImage();return b && p>=b && p-b<0x22d8000?(uint32_t)(p-b):0;}
 static Row make(uint32_t kind,uint32_t site,const State &before,const State &after){
- Row r;r.seq=++serial;r.at=CACurrentMediaTime();r.kind=kind;r.site=site;r.ev=context.event;r.rpc=context.rpc;r.code=context.eventCode;r.sender=context.sender;
+ Row r;r.seq=++serial;r.at=CACurrentMediaTime();r.kind=kind;r.site=site;r.ev=context.event;r.rpc=context.rpc;r.code=context.eventCode;r.sender=context.sender;r.origin=context.origin;
  r.frames=frame.load();r.touches=touchCount.load();double t=lastTouch.load(),n=lastNetwork.load(),f=lastFrame.load();
  r.touchAge=t>0?r.at-t:-1;r.netAge=n>0?r.at-n:-1;r.frameAge=f>0?r.at-f:-1;r.before=before;r.after=after;return r;
 }
@@ -113,8 +113,8 @@ static NSString *text(){
  NSMutableString *out=[NSMutableString stringWithFormat:@"\nOGS55 TEST causal-v1 (not protected) n=%zu dropped=%llu frames=%llu photon=%llu roomAge=%.3f photonAge=%.3f active=%d\n",count,(unsigned long long)drops.load(),(unsigned long long)frame.load(),(unsigned long long)photonFrame.load(),lastFrame>0?CACurrentMediaTime()-lastFrame.load():-1,lastPhoton>0?CACurrentMediaTime()-lastPhoton.load():-1,appActive.load()];
  [out appendString:@"Unknown=-9999/-1. M=SDK cache, NOT server confirmation. Sender=ExecuteRpc argument, claimed=killerID. ev=local dispatch ID. Near touch/network does NOT prove origin.\n"];
  for(size_t i=0;i<count;++i){const Row&r=copy[i];
-  [out appendFormat:@"#%llu t%.4f E%llu k%u @%x caller%x ev%llu/%d rpc%llu src%d target%d view%d owner%d claim%d vals[%d,%d,%d] write%d>%d propT%d propHP%d touch%.3f/%llu net%.3f frames%llu age%.3f | A%d M%d>%d conn%d>%d T%d>%d PN%d>%d GS%d>%d PhotonT%d>%d PhotonHP%d>%d HP%d>%d dead%d>%d UI%d>%d menu%d>%d resp%d>%d round%.2f\n",
-   (unsigned long long)r.seq,r.at,(unsigned long long)r.epoch,r.kind,r.site,r.caller,(unsigned long long)r.ev,r.code,(unsigned long long)r.rpc,r.sender,r.target,r.view,r.owner,r.claimed,r.v0,r.v1,r.v2,r.oldValue,r.newValue,r.propTeam,r.propHP,r.touchAge,(unsigned long long)r.touches,r.netAge,(unsigned long long)r.frames,r.frameAge,r.after.actor,r.before.master,r.after.master,r.before.connection,r.after.connection,r.before.team,r.after.team,r.before.playerTeam,r.after.playerTeam,r.before.gameTeam,r.after.gameTeam,r.before.photonTeam,r.after.photonTeam,r.before.photonHP,r.after.photonHP,r.before.hp,r.after.hp,r.before.killed,r.after.killed,r.before.ui,r.after.ui,r.before.menu,r.after.menu,r.before.respawn,r.after.respawn,r.after.round];
+  [out appendFormat:@"#%llu t%.4f E%llu k%u @%x caller%x ev%llu/%d rpc%llu origin%d src%d target%d view%d owner%d claim%d vals[%d,%d,%d] write%d>%d propT%d propHP%d touch%.3f/%llu net%.3f frames%llu age%.3f | A%d M%d>%d conn%d>%d T%d>%d PN%d>%d GS%d>%d PhotonT%d>%d PhotonHP%d>%d HP%d>%d dead%d>%d UI%d>%d menu%d>%d resp%d>%d round%.2f\n",
+   (unsigned long long)r.seq,r.at,(unsigned long long)r.epoch,r.kind,r.site,r.caller,(unsigned long long)r.ev,r.code,(unsigned long long)r.rpc,r.origin,r.sender,r.target,r.view,r.owner,r.claimed,r.v0,r.v1,r.v2,r.oldValue,r.newValue,r.propTeam,r.propHP,r.touchAge,(unsigned long long)r.touches,r.netAge,(unsigned long long)r.frames,r.frameAge,r.after.actor,r.before.master,r.after.master,r.before.connection,r.after.connection,r.before.team,r.after.team,r.before.playerTeam,r.after.playerTeam,r.before.gameTeam,r.after.gameTeam,r.before.photonTeam,r.after.photonTeam,r.before.photonHP,r.after.photonHP,r.before.hp,r.after.hp,r.before.killed,r.after.killed,r.before.ui,r.after.ui,r.before.menu,r.after.menu,r.before.respawn,r.after.respawn,r.after.round];
  }return out;
 }
 }

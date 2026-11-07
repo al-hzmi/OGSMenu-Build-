@@ -6,7 +6,7 @@ from unicorn.arm64_const import *
 ps=json.loads(Path(sys.argv[1]).read_text())
 reg=[getattr(__import__('unicorn.arm64_const',fromlist=['']),f'UC_ARM64_REG_X{i}') for i in range(31)]
 qreg=[getattr(__import__('unicorn.arm64_const',fromlist=['']),f'UC_ARM64_REG_Q{i}') for i in range(32)]
-for p in ps[4:]:
+for p in ps[5:]:
  for enabled in [False,True]:
   for seed in range(8):
    r=random.Random(seed);u=Uc(UC_ARCH_ARM64,UC_MODE_ARM)
@@ -39,3 +39,19 @@ for p in ps[4:]:
    assert writes==[initial[val]]
    assert calls==([[initial[obj],initial[val],p['site'],old]] if enabled else [])
 print('PASS 96 ARM64 store probe cases: callback on/off, exact one write, arguments, x0-x30/q0-q31/SP/NZCV/FPCR/FPSR preserved. NOT iOS runtime.')
+
+for index,p in enumerate(ps[:5]):
+ for enabled in [False,True]:
+  u=Uc(UC_ARCH_ARM64,UC_MODE_ARM)
+  for a,n in [(0,0x10000),(0x1300000,0x200000),(0x2a98000,0x2000),(0x4000000,0x10000),(0x6000000,0x1000)]:u.mem_map(a,n)
+  u.mem_write(p['stub'],bytes.fromhex(p['code']));u.mem_write(p['slot'],struct.pack('<Q',0x6000000 if enabled else 0))
+  initial=[0x100+i for i in range(31)]
+  for rr,v in zip(reg,initial):u.reg_write(rr,v)
+  u.reg_write(UC_ARM64_REG_SP,0x400f000)
+  end=0x6000000 if enabled else (0x13b8520 if index==4 else p['site']+4)
+  u.emu_start(p['stub'],end,count=50)
+  assert u.reg_read(UC_ARM64_REG_PC)==end
+  delta=0 if enabled or index==4 else [0xe0,0x90,0x60,0x60][index]
+  assert u.reg_read(UC_ARM64_REG_SP)==0x400f000-delta
+  assert all(u.reg_read(rr)==initial[i] for i,rr in enumerate(reg) if i!=16)
+print('PASS 10 native entry/received-dispatch routes: callback on/off, fallback prologue/relocated tail branch, arguments forwarded. NOT iOS runtime.')

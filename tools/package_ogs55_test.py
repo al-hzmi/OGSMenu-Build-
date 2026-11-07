@@ -11,7 +11,8 @@ BASE=0x100000000
 ENTRIES=[('ExecuteRpc',0x13b8520,0x3380,0x2a98e30,'sub sp, sp, #0xe0'),
  ('PrepareRespawn',0x13f65c0,0x33c0,0x2a98e38,'sub sp, sp, #0x90'),
  ('InternalCacheProperties',0x13d0f70,0x3400,0x2a98e40,'sub sp, sp, #0x60'),
- ('SetCustomProperties',0x13d0cc0,0x3440,0x2a98e48,'stp x28, x27, [sp, #-0x60]!')]
+ ('SetCustomProperties',0x13d0cc0,0x3440,0x2a98e48,'stp x28, x27, [sp, #-0x60]!'),
+ ('ReceivedRpcDispatch',0x13b77a0,0x3d80,0x2a98e80,'b #0x13b8520')]
 # site, object register, value register, offset, width. Captures old value, performs
 # ORIGINAL store, then observes. All GPRs/vector registers/NZCV/FPCR/FPSR preserved.
 STORES=[(0x141afd4,20,8,0xfd,1),(0x141afec,20,8,0xfd,1),
@@ -25,7 +26,8 @@ def probes(g):
  for name,entry,stub,slot,ins in ENTRIES:
   original=g[entry:entry+4];decoded=next(CS.disasm(original,entry))
   assert decoded.mnemonic+' '+decoded.op_str==ins,(name,decoded.mnemonic,decoded.op_str)
-  words=[adrp_x16(stub,slot),0x91000210|((slot&4095)<<10),0xf9400210,0xb4000050,0xd61f0200,struct.unpack('<I',original)[0],b_imm(stub+24,entry+4)]
+  relocated=b_imm(stub+20,0x13b8520) if name=='ReceivedRpcDispatch' else struct.unpack('<I',original)[0]
+  words=[adrp_x16(stub,slot),0x91000210|((slot&4095)<<10),0xf9400210,0xb4000050,0xd61f0200,relocated,b_imm(stub+24,entry+4)]
   patches.append(dict(name=name,site=entry,stub=stub,slot=slot,original=original.hex(),code=struct.pack('<7I',*words)))
  for idx,(site,obj,val,off,width) in enumerate(STORES):
   stub=0x3480+idx*0x180;slot=0x2a98e50+idx*8
